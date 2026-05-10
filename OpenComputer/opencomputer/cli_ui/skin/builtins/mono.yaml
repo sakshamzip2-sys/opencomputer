@@ -1,0 +1,56 @@
+name: mono
+description: Grayscale, no color — terminals that hate ANSI.
+
+colors:
+  # Banner
+  banner_border:    "#FFFFFF"
+  banner_title:     "#FFFFFF"
+  banner_accent:    "#A0A0A0"
+  banner_dim:       "#808080"
+  banner_text:      "#FFFFFF"
+  # UI semantic
+  ui_accent:        "#FFFFFF"
+  ui_label:         "#A0A0A0"
+  ui_ok:            "#FFFFFF"
+  ui_error:         "#FFFFFF"
+  ui_warn:          "#FFFFFF"
+  # Prompt + input area
+  prompt:           "#FFFFFF"
+  input_rule:       "#808080"
+  # Agent response box
+  response_border:  "#FFFFFF"
+  # Session badge + border
+  session_label:    "#FFFFFF"
+  session_border:   "#808080"
+  # Status bars
+  status_bar_bg:    "#000000"
+  status_bar_fg:    "#FFFFFF"
+  voice_status_bg:  "#1A1A1A"
+  # TUI selection highlight
+  selection_bg:     "#404040"
+  # Completion menu panes
+  completion_menu_bg:               "#1A1A1A"
+  completion_menu_current_bg:       "#404040"
+  completion_menu_meta_bg:          "#0D0D0D"
+  completion_menu_meta_current_bg:  "#262626"
+  # Legacy / extra
+  user_text:        "#FFFFFF"
+  agent_text:       "#FFFFFF"
+  agent_label:      "#FFFFFF"
+  tool_label:       "#FFFFFF"
+  tool_output:      "#FFFFFF"
+  error:            "#FFFFFF"
+  warning:          "#FFFFFF"
+  info:             "#FFFFFF"
+  dim:              "#808080"
+
+spinner:
+  thinking_verbs: [thinking, working, processing]
+  wings: [[">", "<"]]
+  waiting_faces: ["(o_o)", "(O_O)", "(o.o)"]
+  thinking_faces: ["(*_*)", "(@_@)", "(#_#)"]
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " > OC "
+  prompt_symbol: ">"

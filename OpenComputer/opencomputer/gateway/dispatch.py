@@ -22,6 +22,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
@@ -33,9 +34,11 @@ from plugin_sdk.runtime_context import (
 )
 
 if TYPE_CHECKING:
+    from opencomputer.channels.allowlist import AllowlistGate
     from opencomputer.gateway.agent_router import AgentRouter
     from opencomputer.gateway.binding_resolver import BindingResolver
     from opencomputer.gateway.channel_directory import ChannelDirectory
+    from opencomputer.gateway.reset_policy import ResetPolicyChecker
     from opencomputer.plugins.loader import PluginAPI
     from plugin_sdk.consent import CapabilityClaim
 
@@ -218,41 +221,48 @@ def _format_user_facing_error(exc: Exception) -> str:
 
     The full traceback is logged via ``logger.exception`` at the call
     site — this only shapes what the *user* sees on Telegram / Discord
-    / etc. Keying off ``status_code`` works for Anthropic, OpenAI, and
-    httpx exceptions uniformly; class-name fallback handles network-
-    layer errors that never produced an HTTP response.
+    / etc. Categorisation flows through
+    :func:`opencomputer.agent.error_classifier.classify` so all retry/
+    rotation/render paths agree on what counts as which kind of error.
 
     Pure function (no Dispatch state) so unit tests + downstream
     error-presentation code can call it directly.
     """
+    from opencomputer.agent.error_classifier import ErrorCategory, classify
+
     name = type(exc).__name__
+    category = classify(exc)
     status = getattr(exc, "status_code", None)
 
-    # Network-layer — connection refused, DNS failure, TCP timeout. No HTTP
-    # status was ever produced. Class-name match because httpx + the SDKs
-    # use these names without a shared base class we can isinstance-check.
-    if name in {
-        "APIConnectionError", "APITimeoutError", "ConnectError",
-        "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout",
-    }:
+    if category is ErrorCategory.NETWORK or category is ErrorCategory.TIMEOUT:
         return ("Can't reach the model server right now (network issue). "
                 "Try again in a moment.")
 
-    if status == 429 or name == "RateLimitError":
+    if category is ErrorCategory.RATE_LIMITED:
         return ("Rate-limited by the model provider. "
                 "Try again in a few seconds.")
 
-    if status in (401, 403) or name in {
-        "AuthenticationError", "PermissionDeniedError",
-    }:
+    if category is ErrorCategory.AUTH:
         return ("Authentication failed — your API key may be invalid or "
                 "your provider proxy is misconfigured.")
 
-    if isinstance(status, int) and 500 <= status < 600:
-        return (f"The model service returned an error ({status}). "
+    if category is ErrorCategory.QUOTA:
+        return ("Plan/quota exceeded — top up the provider account "
+                "or switch to a different key.")
+
+    if category is ErrorCategory.SERVER:
+        if isinstance(status, int):
+            return (f"The model service returned an error ({status}). "
+                    "This is usually transient — try again in a moment.")
+        return ("The model service returned an error. "
                 "This is usually transient — try again in a moment.")
 
-    # Unknown / unmapped — keep the class name so logs can be grepped,
+    if category is ErrorCategory.BAD_REQUEST:
+        return ("The request was rejected as invalid — this is usually a "
+                "bug in the agent or an unsupported model feature. "
+                "Check the gateway logs.")
+
+    # UNKNOWN / unmapped — keep the class name so logs can be grepped,
     # but don't dump the raw exception args (those often contain the
     # offending prompt or an SDK-internal kwarg dump).
     return (f"Sorry, something went wrong ({name}). "
@@ -307,7 +317,31 @@ class Dispatch:
         *,
         router: AgentRouter | None = None,
         resolver: BindingResolver | None = None,
+        allowlist_gate: AllowlistGate | None = None,
+        reset_policy: ResetPolicyChecker | None = None,
+        last_seen_path: Any = None,  # Path to <profile>/gateway/last_seen.json
     ) -> None:
+        # Phase 2 collect-mode leader registry. Only ONE arrival per
+        # session in collect mode runs the agent; subsequent arrivals
+        # buffer + return early. The leader's drain wait coalesces them.
+        # Map: session_id → asyncio.Lock acting as the leader claim.
+        self._collect_leaders: dict[str, bool] = {}
+        # /background completion-notifier plumbing — main-thread asyncio
+        # loop is captured by ``bind_main_loop`` at gateway start so the
+        # background-worker thread's notifier can schedule adapter.send
+        # via ``run_coroutine_threadsafe``. ``None`` until bound.
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+
+        # 2026-05-08 — Hermes Doc-2 ``session:start`` tracking. Hermes'
+        # spec: "Fires on brand-new sessions only (not continuations)."
+        # We track session ids we've already routed through dispatch in
+        # this process so subsequent messages for the same id fire
+        # ``session:end`` (per-turn) only, not another ``session:start``.
+        # Memory is per-process; a gateway restart resets it (and
+        # legitimately re-fires session:start on resumed sessions —
+        # acceptable semantics).
+        self._known_sessions: set[str] = set()
+
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
         # two must be set.
@@ -350,9 +384,29 @@ class Dispatch:
         # single-profile case. Multi-profile callers reading this
         # attribute should migrate to ``router.get_or_load(profile_id)``.
         self.loop = loop if loop is not None else router._loops.get("default")
-        # Per-(profile_id, session_id) lock map — multi-profile correct.
-        # Same chat across two profiles no longer interleaves.
+        # Phase 2 (S1 from 2026-05-06 brief) — inbound queue manager.
+        # Replaces the historical per-(profile,session) asyncio.Lock dict.
+        # Default mode = "followup" (preserves legacy serialize-and-wait
+        # behaviour); slash command can flip per-session to "interrupt".
+        from opencomputer.gateway.queue_manager import (
+            QueueManager,
+            set_active_manager,
+        )
+
+        self._queue_manager: QueueManager = QueueManager()
+        # Register so /queue-mode slash command can reach this manager.
+        # Last-Dispatch-wins is fine: tests construct multiple Dispatches
+        # and the most recent one is the relevant one for slash dispatch.
+        set_active_manager(self._queue_manager)
+        # Backwards compat: tests + callers that read ``dispatch._locks``
+        # see an empty dict; new code paths use ``self._queue_manager``.
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Kanban-Goals v2 (2026-05-08) — set of session_ids currently
+        # inside a ``run_conversation`` call. Inspected by the
+        # /goal-set mid-run race-guard (``_goal_midrun_check``) so we
+        # can refuse a new goal when the agent is in flight rather than
+        # racing the current continuation prompt.
+        self._active_runs: set[str] = set()
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
         # Task I.9: the shared PluginAPI whose ``in_request`` we wrap
@@ -373,6 +427,18 @@ class Dispatch:
         self._display_cfg: dict[str, Any] = cfg
         self._burst_window_seconds: float = float(
             cfg.get("photo_burst_window", 0.8)
+        )
+        # 2026-05-08 — gate the Hermes-style 👀/✅ lifecycle reactions
+        # behind a config flag, default OFF. Default behavior in
+        # ``BaseChannelAdapter`` posts a 👀 reaction on every inbound
+        # message (and ✅ on completion); Telegram clients render that
+        # inline next to the user's message and it reads like the bot
+        # is replying with an emoji. Saksham's standing emoji-free
+        # preference (memory: ``user_oc_owns_all_channels.md``) means
+        # this MUST default off for him; users who explicitly want the
+        # indicator can opt in via ``gateway.lifecycle_reactions: true``.
+        self._lifecycle_reactions: bool = bool(
+            cfg.get("lifecycle_reactions", False)
         )
         self._burst_pending: dict[str, MessageEvent] = {}
         self._burst_tasks: dict[str, asyncio.Task[None]] = {}
@@ -408,6 +474,30 @@ class Dispatch:
         if gate is not None and hasattr(gate, "set_prompt_handler"):
             gate.set_prompt_handler(self._send_approval_prompt)
 
+        # ── PR-1 (Task 1.6): allowlist + reset policy + last-seen ──────
+        # All optional — Dispatch constructed without them preserves the
+        # historic permissive flow (existing tests untouched). Gateway
+        # wires these in production to gate unknown users + reset stale
+        # sessions.
+        self._allowlist_gate: AllowlistGate | None = allowlist_gate
+        self._reset_policy: ResetPolicyChecker | None = reset_policy
+        self._last_seen_path = last_seen_path
+        # ``(platform, chat_id) → unix_seconds`` and ``(platform, chat_id) →
+        # reset_token`` — both tracked here, persisted to last_seen.json.
+        self._chat_last_seen: dict[tuple[str, str], float] = {}
+        self._chat_reset_tokens: dict[tuple[str, str], str] = {}
+        self._last_seen_dirty_count = 0
+        self._last_seen_persist_every = 10
+        self._load_last_seen()
+        # PR-1 follow-up — drain coordination. ``_drain_active`` is set by
+        # ``Gateway.serve_forever`` when ``oc gateway restart`` writes the
+        # drain flag; new arrivals while drain is active return None
+        # immediately without entering the agent loop. ``_inflight_count``
+        # tracks how many handle_message calls are mid-flight so the
+        # serve loop can wait until 0 before exiting.
+        self._drain_active = False
+        self._inflight_count = 0
+
     def register_adapter(self, platform: str, adapter) -> None:
         self._adapters_by_platform[platform] = adapter
         # Round 2a P-5 — if the adapter exposes the approval-button
@@ -417,19 +507,127 @@ class Dispatch:
             adapter.set_approval_callback(self._handle_approval_click)
 
     def _session_id_for(self, event: MessageEvent) -> str:
-        """Stable session id: hash(platform + chat_id[, thread_hint]).
+        """Stable session id: hash(platform + chat_id[, thread_hint][, reset_token]).
 
         ``thread_hint`` (Item 21) comes from ``event.metadata["thread_hint"]``
         if set, letting cron / non-conversational paths route output to
         a separate session within the same chat. Default behaviour
         (no hint) keeps existing chats on a single session forever.
+
+        PR-1 (Task 1.6) — when a reset policy fires for ``(platform, chat_id)``,
+        the dispatcher writes a ``reset_token`` (e.g., ``daily-2026-05-08``)
+        into ``self._chat_reset_tokens``. The token is OR'd into the hash
+        salt so the next session_id derivation lands in a fresh session
+        without mutating the channel id or thread hint.
         """
         thread_hint: str | None = None
         if event.metadata:
             raw = event.metadata.get("thread_hint")
             if isinstance(raw, str) and raw.strip():
                 thread_hint = raw.strip()
-        return session_id_for(event.platform.value, event.chat_id, thread_hint)
+        platform_value = event.platform.value if event.platform else ""
+        # Defensive: callers that bypass __init__ (e.g.,
+        # Dispatch.__new__(Dispatch) in tests) won't have _chat_reset_tokens.
+        # The reset path is opt-in; falling back to no token preserves the
+        # legacy behavior for those callers.
+        reset_tokens = getattr(self, "_chat_reset_tokens", {})
+        token_key = (platform_value, event.chat_id)
+        reset_token = reset_tokens.get(token_key)
+        if reset_token:
+            # Compose with thread_hint so explicit cron threads still
+            # partition cleanly inside the reset boundary.
+            thread_hint = (
+                f"{thread_hint}|reset:{reset_token}"
+                if thread_hint
+                else f"reset:{reset_token}"
+            )
+        return session_id_for(platform_value, event.chat_id, thread_hint)
+
+    # ── PR-1 (Task 1.6) — last-seen persistence + pairing reply helpers ──
+
+    def _load_last_seen(self) -> None:
+        """Restore ``_chat_last_seen`` + ``_chat_reset_tokens`` from disk."""
+        if self._last_seen_path is None:
+            return
+        try:
+            from pathlib import Path
+
+            path = Path(self._last_seen_path)
+            if not path.exists():
+                return
+            import json as _json
+
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            for key, ts in (data.get("last_seen") or {}).items():
+                if "|" in key:
+                    plat, chat = key.split("|", 1)
+                    self._chat_last_seen[(plat, chat)] = float(ts)
+            for key, tok in (data.get("reset_tokens") or {}).items():
+                if "|" in key:
+                    plat, chat = key.split("|", 1)
+                    self._chat_reset_tokens[(plat, chat)] = str(tok)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "dispatch: last_seen.json unreadable (%s) — starting fresh", exc
+            )
+
+    def _persist_last_seen(self, force: bool = False) -> None:
+        """Write ``_chat_last_seen`` + ``_chat_reset_tokens`` to disk.
+
+        Throttled to every Nth write (default 10) so the dispatch hot-path
+        stays cheap. ``force=True`` ignores throttle (used on shutdown).
+        """
+        if self._last_seen_path is None:
+            return
+        self._last_seen_dirty_count += 1
+        if not force and self._last_seen_dirty_count < self._last_seen_persist_every:
+            return
+        self._last_seen_dirty_count = 0
+        try:
+            import json as _json
+            import tempfile
+            from pathlib import Path
+
+            path = Path(self._last_seen_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "last_seen": {f"{p}|{c}": ts for (p, c), ts in self._chat_last_seen.items()},
+                "reset_tokens": {f"{p}|{c}": tok for (p, c), tok in self._chat_reset_tokens.items()},
+            }
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    _json.dump(payload, f)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            logger.warning("dispatch: last_seen persist failed: %s", exc)
+
+    def _format_pairing_reply(self, platform: str, code: str | None) -> str | None:
+        """Format the bot's reply for an unknown user.
+
+        Returns ``None`` when the gate suppressed the code (rate-limit /
+        lockout) — the dispatcher then sends nothing.
+        """
+        if not code:
+            return None
+        bot_username = os.environ.get("TELEGRAM_BOT_USERNAME") or ""
+        deep = ""
+        if platform == "telegram" and bot_username:
+            deep = (
+                f"\nOr click: https://t.me/{bot_username}?start=approve_{code}"
+            )
+        return (
+            f"Pairing code: `{code}` (expires in 60 minutes)\n"
+            f"Ask the OpenComputer admin to run:\n"
+            f"`oc gateway pairing approve {platform} {code}`"
+            f"{deep}"
+        )
 
     async def handle_message(self, event: MessageEvent) -> str | None:
         """
@@ -487,7 +685,177 @@ class Dispatch:
         if not text_present and not attach_present:
             return None
 
+        # PR-1 follow-up — drain mode: refuse new arrivals while
+        # ``oc gateway restart`` is waiting for in-flight runs to drain.
+        # Existing in-flight runs continue (they're tracked in
+        # ``_inflight_count``); the gateway's serve_forever waits for
+        # the count to reach 0 before exiting.
+        if getattr(self, "_drain_active", False):
+            logger.info(
+                "dispatch: drain active — skipping new arrival on %s:%s",
+                event.platform.value if event.platform else "?",
+                event.chat_id,
+            )
+            return None
+
+        # ── PR-1 (Task 1.6) — AllowlistGate check ───────────────────────
+        # Default-OFF: when ``self._allowlist_gate`` is None (unit-test
+        # constructions, legacy paths) this whole block is a no-op.
+        if self._allowlist_gate is not None:
+            platform_value = event.platform.value if event.platform else ""
+            user_id = ""
+            user_name = ""
+            if event.metadata:
+                raw_uid = event.metadata.get("user_id") or event.metadata.get(
+                    "from_user_id"
+                )
+                if isinstance(raw_uid, str | int):
+                    user_id = str(raw_uid)
+                raw_name = event.metadata.get("user_name") or event.metadata.get(
+                    "from_user_name"
+                )
+                if isinstance(raw_name, str):
+                    user_name = raw_name
+            # Fall back to chat_id when no per-user id is available — for
+            # 1:1 DMs the chat_id IS the user_id on most platforms.
+            if not user_id:
+                user_id = event.chat_id
+            decision = self._allowlist_gate.check(
+                platform_value, user_id, user_name=user_name
+            )
+            if not decision.allowed:
+                reply = self._format_pairing_reply(
+                    platform_value, decision.pairing_code
+                )
+                if reply:
+                    adapter = self._adapters_by_platform.get(platform_value)
+                    if adapter is not None:
+                        try:
+                            await adapter.send(event.chat_id, reply)
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "pairing-reply: adapter.send failed for %s:%s",
+                                platform_value,
+                                event.chat_id,
+                                exc_info=True,
+                            )
+                logger.info(
+                    "allowlist-gate: denied %s:%s (source=%s, code=%s)",
+                    platform_value,
+                    user_id,
+                    decision.source,
+                    "yes" if decision.pairing_code else "rate-limited",
+                )
+                return None
+
+        # ── PR-1 (Task 1.6) — Reset Policy ──────────────────────────────
+        # Default-OFF: skipped when ``self._reset_policy`` is None.
+        if self._reset_policy is not None:
+            platform_value = event.platform.value if event.platform else ""
+            key = (platform_value, event.chat_id)
+            last_seen = self._chat_last_seen.get(key, 0.0)
+            do_reset, reason = self._reset_policy.should_reset(
+                platform_value, event.chat_id, last_seen
+            )
+            if do_reset:
+                # Compose a reset token from the reason + current UTC date
+                # so the new session_id is stable within the post-reset
+                # window (later messages on the same day reach the same
+                # token; the next reset advances to a new token).
+                from datetime import datetime
+
+                stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S")
+                self._chat_reset_tokens[key] = f"{reason}-{stamp}"
+                logger.info(
+                    "reset-policy: fresh session for %s:%s (reason=%s)",
+                    platform_value,
+                    event.chat_id,
+                    reason,
+                )
+            self._chat_last_seen[key] = time.time()
+            self._persist_last_seen()
+
         session_id = self._session_id_for(event)
+
+        # ── Hermes-parity consent-reply text classification (Phase 3 P3.3) ──
+        # When the user has a pending approval prompt and replies with a
+        # bare "yes"/"no"/"approve"/"deny" (the Hermes-spec keywords),
+        # route the reply to ConsentGate.resolve_pending instead of the
+        # agent loop. This complements the existing button-based
+        # ``_handle_approval_click`` path — text replies are necessary on
+        # platforms without inline buttons (SMS, IRC, Email) and natural
+        # on platforms that support buttons (the user can type or tap).
+        if event.text and event.text.strip():
+            try:
+                consumed = await self._maybe_resolve_consent_text_reply(
+                    session_id=session_id, text=event.text,
+                )
+            except Exception:  # noqa: BLE001 — never let a consent-side
+                # bug starve the regular reply path.
+                logger.debug(
+                    "consent text-reply check failed for session=%s",
+                    session_id, exc_info=True,
+                )
+                consumed = False
+            if consumed:
+                # The reply has been delivered to the gate. The agent
+                # loop's request_approval coroutine will unblock and
+                # post the actual response. We return None so the
+                # adapter doesn't double-respond.
+                return None
+
+        # 2026-05-08 — Hermes Doc-2 gateway hooks: session:start.
+        # Fire only on first observation of this session id in this
+        # process — subsequent dispatches for the same id are
+        # continuations (session:end fires per-turn instead).
+        if session_id not in self._known_sessions:
+            self._known_sessions.add(session_id)
+            try:
+                from opencomputer.gateway.event_hooks import (
+                    SESSION_START as _GW_SESSION_START,
+                )
+                from opencomputer.gateway.event_hooks import (
+                    engine as _gw_hooks_engine_ss,
+                )
+                asyncio.create_task(
+                    _gw_hooks_engine_ss.fire(_GW_SESSION_START, {
+                        "platform": event.platform.value if event.platform else None,
+                        "user_id": event.chat_id,
+                        "session_id": session_id,
+                    }),
+                    name="gw-hook-session-start",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("gateway session:start fire failed", exc_info=True)
+
+        # PR-A Feature 1: if /steer just fired for this session and the
+        # agent loop hasn't yet consumed the cancel state, route this
+        # inbound message to SteerBuffer instead of triggering a fresh
+        # turn. The next-turn between-turn consume drains the buffer and
+        # merges it into the replan as <USER-INTERRUPT>. This is a narrow
+        # window — typically microseconds — but during a long-running
+        # cancelled tool, multiple messages can pile up.
+        try:
+            from opencomputer.agent.steer import (
+                default_buffer as _steer_buffer,
+            )
+            from opencomputer.agent.steer import (
+                default_registry as _steer_reg,
+            )
+
+            if (
+                _steer_reg.has_cancel_listener(session_id)
+                and _steer_reg.cancel_event(session_id).is_set()
+            ):
+                _steer_buffer.append(session_id, event.text or "")
+                logger.debug(
+                    "gateway: buffered inbound during cancel-pending window "
+                    "for session %s",
+                    session_id,
+                )
+                return None
+        except Exception:  # noqa: BLE001 — never block dispatch on this
+            pass
 
         # Wave 5 T13 — Hermes-port pre_gateway_dispatch hook (1ef1e4c66).
         # Fires once per inbound message before any auth check. Plugins
@@ -621,7 +989,30 @@ class Dispatch:
         ``set_profile(profile_home)`` so ``_home()`` and PluginAPI
         lazy properties resolve to the right profile inside the
         request scope.
+
+        PR-1 follow-up — inflight bookkeeping. Increments
+        ``self._inflight_count`` for the duration of this call so the
+        gateway's drain-aware ``serve_forever`` can wait for active
+        dispatches to finish before exiting.
         """
+        # Inflight tracking — guarded so legacy callers that bypass
+        # __init__ (Dispatch.__new__(Dispatch) in tests) keep working.
+        try:
+            self._inflight_count = getattr(self, "_inflight_count", 0) + 1
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return await self.__do_dispatch_inner(event, session_id)
+        finally:
+            try:
+                self._inflight_count = max(0, getattr(self, "_inflight_count", 0) - 1)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def __do_dispatch_inner(
+        self, event: MessageEvent, session_id: str
+    ) -> str | None:
+        """Inner dispatch — wrapped by ``_do_dispatch`` for inflight bookkeeping."""
         # Phase 3 Task 3.3: per-event profile resolution via the
         # BindingResolver. Falls back to "default" when no resolver
         # was wired — preserves the legacy behaviour for callers /
@@ -655,6 +1046,81 @@ class Dispatch:
         loop = await self._router.get_or_load(profile_id)
         profile_home = self._router._profile_home_resolver(profile_id)
 
+        # v1.1 plan-3 M10.3 — per-rule profile rebind. After the
+        # BindingResolver picks the source profile and we load its loop,
+        # consult the source profile's routing.rules for THIS event. If
+        # a matched rule sets `profile: <name>` (carried as
+        # ``ResolvedTemplate.profile_rebind`` from M10.2), swap to the
+        # named profile's loop for the remainder of dispatch.
+        #
+        # Composition with M10.2 (system_prompt routing): after this
+        # swap, the M10.2 resolution inside ``_dispatch_tool_calls``
+        # consults the REBOUND profile's routing rules. If the rebound
+        # profile lists the same rule (typical setup — source profile
+        # routes to specialised profiles), the agent template + system
+        # prompt resolve again on the rebound profile and apply
+        # identically.
+        #
+        # Composition with M1.4 (per-profile env): per-profile .env
+        # files are loaded at CLI startup based on the active profile.
+        # Mid-process rebinds via M10.3 use the rebound profile's loop
+        # which was constructed against its own profile_home, so its
+        # cached resources (memory, agent templates, MCP servers) cover
+        # the common case. Re-loading per-profile env per-message is a
+        # follow-up if real workloads need credential isolation per
+        # rebound dispatch (currently the source-profile env wins).
+        #
+        # Defensive: any failure logs WARNING and falls through to the
+        # source profile — a stale rule must NEVER break message dispatch.
+        try:
+            cfg_obj_for_rebind = getattr(loop, "config", None)
+            routing_cfg_for_rebind = getattr(cfg_obj_for_rebind, "routing", None)
+            if routing_cfg_for_rebind is not None and routing_cfg_for_rebind.rules:
+                from opencomputer.agent.agent_templates import (
+                    discover_agents as _discover_for_rebind,
+                )
+                from opencomputer.agent.routing import (
+                    resolve_template_for_event as _resolve_for_rebind,
+                )
+
+                _templates_for_rebind = _discover_for_rebind()
+                _resolved_for_rebind = _resolve_for_rebind(
+                    routing_cfg_for_rebind, event, _templates_for_rebind
+                )
+                if (
+                    _resolved_for_rebind is not None
+                    and _resolved_for_rebind.profile_rebind
+                    and _resolved_for_rebind.profile_rebind != profile_id
+                ):
+                    _new_pid = _resolved_for_rebind.profile_rebind
+                    try:
+                        _new_loop = await self._router.get_or_load(_new_pid)
+                        _new_home = self._router._profile_home_resolver(_new_pid)
+                        logger.info(
+                            "M10.3 routing rebind: %s:%s → profile=%r "
+                            "(source=%r, agent=%r)",
+                            event.platform.value if event.platform else "?",
+                            event.chat_id,
+                            _new_pid,
+                            profile_id,
+                            _resolved_for_rebind.template_name,
+                        )
+                        loop = _new_loop
+                        profile_home = _new_home
+                        profile_id = _new_pid
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.warning(
+                            "M10.3 routing rebind to %r failed (%s) — "
+                            "continuing on source profile %r",
+                            _new_pid, _exc, profile_id,
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "M10.3 routing rebind resolution failed: %s — "
+                "continuing on source profile",
+                e,
+            )
+
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
         # to ask the user on. Best-effort: missing adapter = legacy
@@ -674,12 +1140,17 @@ class Dispatch:
         # sees the 👀 reaction even if the previous turn is still
         # holding the lock. Fire-and-forget — failures never affect
         # the reply path.
+        #
+        # 2026-05-08: gated on ``self._lifecycle_reactions`` (default
+        # off). Without the gate, Telegram clients render the reaction
+        # inline next to the user's message and it reads like the bot
+        # is auto-replying with 👀. See GatewayConfig.lifecycle_reactions.
         message_id: str | None = None
         if event.metadata:
             raw_id = event.metadata.get("message_id")
             if isinstance(raw_id, str | int) and raw_id != "":
                 message_id = str(raw_id)
-        if adapter is not None:
+        if adapter is not None and self._lifecycle_reactions:
             asyncio.create_task(
                 self._safe_lifecycle_hook(
                     adapter.on_processing_start(event.chat_id, message_id)
@@ -696,13 +1167,52 @@ class Dispatch:
         if bypass_result is not None:
             return bypass_result
 
-        # Per-(profile_id, session_id) lock keys make multi-profile
-        # correct: same chat_id across two profiles no longer
-        # interleaves through the same lock.
-        lock_key = (profile_id, session_id)
-        lock = self._locks.setdefault(lock_key, asyncio.Lock())
+        # Phase 2 (S1) — queue manager replaces the legacy lock dict.
+        # ``acquire`` resolves the per-session mode (default ``followup``
+        # serializes; ``interrupt`` cancels any in-flight run before
+        # entering the body; ``collect`` buffers + drains via the
+        # leader-of-debounce-window pattern below).
+        mode = self._queue_manager.get_session_mode(session_id)
+        if mode == "collect" and (event.text or "").strip():
+            # Always buffer this arrival's text + reset the debounce timer.
+            self._queue_manager.buffer_message(session_id, event.text or "")
+            await self._queue_manager.schedule_collect_drain(session_id)
+
+            # Determine leadership: first arrival per drain window runs the
+            # agent on the merged buffer; subsequent arrivals return early.
+            # The leader claim lives in self._collect_leaders[session_id].
+            if self._collect_leaders.get(session_id):
+                # A leader is already waiting for the drain; we just
+                # contributed to the buffer + reset its timer.
+                return None
+
+            self._collect_leaders[session_id] = True
+            try:
+                # Wait for the debounce window to close. Subsequent arrivals
+                # (above) reset the timer, extending our wait.
+                await self._queue_manager.wait_for_drain(session_id)
+                # Drain the merged buffer and replace event.text with it.
+                merged = self._queue_manager.drain_buffer(session_id)
+                if merged:
+                    event = MessageEvent(
+                        platform=event.platform,
+                        chat_id=event.chat_id,
+                        user_id=event.user_id,
+                        text=merged,
+                        timestamp=event.timestamp,
+                        attachments=list(event.attachments),
+                        metadata={**event.metadata, "collect_merged": True},
+                    )
+                # Fall through to the existing followup-style serialized
+                # acquire so the rest of the dispatch path is unchanged.
+            finally:
+                # Clear leadership BEFORE entering the agent run so the
+                # next arrival post-drain can start a fresh debounce window
+                # while this run is in flight.
+                self._collect_leaders.pop(session_id, None)
+
         outcome: ProcessingOutcome = ProcessingOutcome.SUCCESS
-        async with lock:
+        async with self._queue_manager.acquire(profile_id, session_id):
             # Start a typing heartbeat (Telegram's typing state expires after
             # ~5s, so we re-send every 4s until the turn completes).
             heartbeat = asyncio.create_task(
@@ -760,7 +1270,87 @@ class Dispatch:
             # P0-4: capture wall-clock around run_conversation so we
             # can record a turn_outcomes row at the end.
             turn_start_ts = time.time()
+            # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:start.
+            # Fire-and-forget (gathered concurrently; never blocks the
+            # turn). Failure isolated.
             try:
+                from opencomputer.gateway.event_hooks import (
+                    AGENT_START as _GW_AGENT_START,
+                )
+                from opencomputer.gateway.event_hooks import (
+                    engine as _gw_hooks_engine_a1,
+                )
+                _agent_ctx = {
+                    "session_id": session_id,
+                    "platform": event.platform.value if event.platform else None,
+                    "user_id": event.chat_id,
+                    "message": user_message,
+                }
+                asyncio.create_task(
+                    _gw_hooks_engine_a1.fire(_GW_AGENT_START, _agent_ctx),
+                    name="gw-hook-agent-start",
+                )
+            except Exception:  # noqa: BLE001 — hook firing must never block
+                logger.debug("gateway agent:start fire failed", exc_info=True)
+            try:
+                self._active_runs.add(session_id)
+                # Kanban-Goals v2 (2026-05-08) — install a per-session
+                # goal-banner callback so the Ralph loop's ``↻/✓/⏸``
+                # transitions reach this chat as a separate message.
+                # Per-session keying matters because one AgentLoop can
+                # serve multiple concurrent sessions on the same
+                # profile; a global callback would fan banners to the
+                # wrong chat.
+                if adapter is not None and hasattr(loop, "set_goal_banner_callback"):
+                    self._install_goal_banner_callback(
+                        loop=loop,
+                        session_id=session_id,
+                        adapter=adapter,
+                        chat_id=event.chat_id,
+                    )
+                # v1.1 plan-3 M10.2 — per-channel routing dispatcher
+                # integration. ``resolve_template_for_event`` returns the
+                # matched template (system prompt + maybe profile rebind)
+                # or None if no rule matches / the named template isn't
+                # registered. We pass the system prompt through the same
+                # ``system_prompt_override`` plumbing that ``DelegateTool``
+                # already uses for ``agent: ...``. Tool allowlist
+                # enforcement is a follow-up (AgentLoop's
+                # ``allowed_tools`` is constructor-bound; per-message
+                # filtering needs more plumbing).
+                #
+                # Wrapped defensively: any routing failure logs at WARNING
+                # and falls through to the default behavior — a stale
+                # routing rule must NEVER break message dispatch.
+                routing_system_override: str | None = None
+                try:
+                    cfg_obj = getattr(loop, "config", None)
+                    routing_cfg = getattr(cfg_obj, "routing", None)
+                    if routing_cfg is not None and routing_cfg.rules:
+                        from opencomputer.agent.agent_templates import (
+                            discover_agents as _discover_agents,
+                        )
+                        from opencomputer.agent.routing import (
+                            resolve_template_for_event as _rs_template,
+                        )
+
+                        templates = _discover_agents()
+                        resolved = _rs_template(routing_cfg, event, templates)
+                        if resolved is not None:
+                            routing_system_override = resolved.system_prompt
+                            logger.info(
+                                "M10.2 routing: %s:%s → agent=%r",
+                                event.platform.value if event.platform else "?",
+                                event.chat_id,
+                                resolved.template_name,
+                            )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "M10.2 routing resolution failed (falling through "
+                        "to default dispatch): %s",
+                        e,
+                    )
+
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
@@ -769,6 +1359,7 @@ class Dispatch:
                                 session_id=session_id,
                                 images=images,
                                 runtime=runtime,
+                                system_prompt_override=routing_system_override,
                             )
                     else:
                         result = await loop.run_conversation(
@@ -776,7 +1367,52 @@ class Dispatch:
                             session_id=session_id,
                             images=images,
                             runtime=runtime,
+                            system_prompt_override=routing_system_override,
                         )
+                # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:end +
+                # session:end. Hermes spec: session:end fires per
+                # run_conversation (i.e. per turn), agent:end same window.
+                # Both fire-and-forget so a slow handler can't delay the
+                # next turn.
+                try:
+                    from opencomputer.gateway.event_hooks import (
+                        AGENT_END as _GW_AGENT_END,
+                    )
+                    from opencomputer.gateway.event_hooks import (
+                        SESSION_END as _GW_SESSION_END,
+                    )
+                    from opencomputer.gateway.event_hooks import (
+                        engine as _gw_hooks_engine_a2,
+                    )
+                    _final_text_for_hook = (
+                        result.final_message.content
+                        if isinstance(result.final_message.content, str)
+                        else ""
+                    )
+                    _agent_end_ctx = {
+                        "session_id": session_id,
+                        "platform": event.platform.value if event.platform else None,
+                        "user_id": event.chat_id,
+                        "message": user_message,
+                        "response": _final_text_for_hook,
+                    }
+                    asyncio.create_task(
+                        _gw_hooks_engine_a2.fire(_GW_AGENT_END, _agent_end_ctx),
+                        name="gw-hook-agent-end",
+                    )
+                    asyncio.create_task(
+                        _gw_hooks_engine_a2.fire(
+                            _GW_SESSION_END,
+                            {
+                                "platform": event.platform.value if event.platform else None,
+                                "user_id": event.chat_id,
+                                "session_key": session_id,
+                            },
+                        ),
+                        name="gw-hook-session-end",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("gateway agent:end / session:end fire failed", exc_info=True)
                 # P0-4: schedule turn_outcomes write fire-and-forget.
                 # Errors are swallowed inside _record_turn_outcome_async
                 # so a telemetry failure never breaks the user reply.
@@ -821,10 +1457,41 @@ class Dispatch:
                         _model_str = (
                             getattr(_model_name, "model", "") if _model_name else ""
                         )
+                        # 2026-05-09 — resolve context_length via the same
+                        # multi-source probe the CLI status-line uses.
+                        # Resolution chain: model_context_overrides →
+                        # custom_providers per-model override → probe
+                        # (OpenRouter / Ollama / Anthropic / models.dev) →
+                        # static DEFAULT_CONTEXT_WINDOWS table. Result is
+                        # always an int (>= 64k conservative default) so
+                        # context_pct now renders for every gateway turn.
+                        # ``enable_probe=False`` keeps this hot path
+                        # synchronous; the disk-cached 24h probe layer is
+                        # separately refreshed by status-line / startup.
+                        _ctx_len: int | None = None
+                        try:
+                            from opencomputer.agent.compaction import (
+                                context_window_with_overrides,
+                            )
+
+                            _cfg = getattr(loop, "config", None)
+                            if _cfg is not None and _model_str:
+                                _ctx_len = context_window_with_overrides(
+                                    _model_str,
+                                    custom_providers=getattr(
+                                        _cfg, "custom_providers", (),
+                                    ),
+                                    model_context_overrides=getattr(
+                                        _cfg, "model_context_overrides", None,
+                                    ),
+                                    enable_probe=False,
+                                )
+                        except Exception:  # noqa: BLE001 — defensive
+                            _ctx_len = None
                         _line = format_runtime_footer(
                             model=_model_str,
                             tokens_used=getattr(result, "input_tokens", 0) or 0,
-                            context_length=None,  # provider-specific lookup TBD
+                            context_length=_ctx_len,
                             cwd=os.getcwd(),
                         )
                         if _line:
@@ -843,6 +1510,16 @@ class Dispatch:
                 outcome = ProcessingOutcome.FAILURE
                 return _format_user_facing_error(e)
             finally:
+                # Kanban-Goals v2 (2026-05-08) — release the active-run
+                # marker so /goal <text> dispatched in the next moment
+                # is no longer refused.
+                self._active_runs.discard(session_id)
+                # Symmetric banner-callback teardown.
+                if hasattr(loop, "clear_goal_banner_callback"):
+                    try:
+                        loop.clear_goal_banner_callback(session_id)
+                    except Exception:  # noqa: BLE001
+                        pass
                 heartbeat.cancel()
                 try:
                     await heartbeat
@@ -852,7 +1529,11 @@ class Dispatch:
                 # on_processing_complete after the turn settles, with
                 # the outcome captured above. Fire-and-forget so a
                 # failing reaction send doesn't mask the actual reply.
-                if adapter is not None:
+                #
+                # 2026-05-08: gated on ``self._lifecycle_reactions``
+                # (default off) — paired with the on_processing_start
+                # gate above. See GatewayConfig.lifecycle_reactions.
+                if adapter is not None and self._lifecycle_reactions:
                     asyncio.create_task(
                         self._safe_lifecycle_hook(
                             adapter.on_processing_complete(
@@ -980,6 +1661,18 @@ class Dispatch:
         cmd = _plugin_registry.slash_commands.get(name)
         if cmd is None:
             return None
+        # Kanban-Goals v2 (2026-05-08) — refuse /goal <text> when this
+        # session has a turn in flight; status / pause / resume / clear
+        # remain unrestricted. Checked before the bypass_running_guard
+        # gate so /goal-set is short-circuited even though /goal isn't
+        # itself a bypass command. Non-set /goal subcommands fall
+        # through to the normal locked dispatch path.
+        if name == "goal":
+            refused = await self._goal_midrun_check(
+                session_id=session_id, args=list(args),
+            )
+            if refused is not None:
+                return refused
         if not getattr(cmd, "bypass_running_guard", False):
             return None
         # Build a runtime context with channel info so the command can
@@ -997,12 +1690,138 @@ class Dispatch:
                 if v is not None:
                     custom[k] = v
         runtime = RuntimeContext(custom=custom)
+        # 2026-05-08 — Hermes Doc-2 gateway hooks: command:<slug>.
+        # Fire-and-forget so a slow handler never delays slash dispatch.
+        # The wildcard "command:*" pattern in HOOK.yaml matches every
+        # slug (handled in event_hooks.GatewayHook.matches).
+        try:
+            from opencomputer.gateway.event_hooks import (
+                engine as _gw_hooks_engine_cmd,
+            )
+            asyncio.create_task(
+                _gw_hooks_engine_cmd.fire(
+                    f"command:{name}",
+                    {
+                        "platform": event.platform.value if event.platform else None,
+                        "user_id": event.chat_id,
+                        "session_id": session_id,
+                        "command": name,
+                        "args": args,
+                    },
+                ),
+                name=f"gw-hook-command-{name}",
+            )
+            # 2026-05-08 — Hermes Doc-2 gateway hooks: session:reset
+            # fires when a slash command rotates the session id. The
+            # canonical commands are /new, /reset, /clear (they all
+            # alias to the same handler — see cli_ui/slash.py:72).
+            if name in {"new", "reset", "clear"}:
+                from opencomputer.gateway.event_hooks import (
+                    SESSION_RESET as _GW_SESSION_RESET,
+                )
+                asyncio.create_task(
+                    _gw_hooks_engine_cmd.fire(
+                        _GW_SESSION_RESET,
+                        {
+                            "platform": event.platform.value if event.platform else None,
+                            "user_id": event.chat_id,
+                            "session_key": session_id,
+                            "command": name,
+                        },
+                    ),
+                    name=f"gw-hook-session-reset-{name}",
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("gateway command:%s fire failed", name, exc_info=True)
         try:
             result = await cmd.execute(args, runtime)
         except Exception as exc:  # noqa: BLE001
             logger.exception("bypass slash %s raised", name)
             return f"/{name}: {type(exc).__name__}: {exc}"
         return result.output if result is not None else None
+
+    def _install_goal_banner_callback(
+        self,
+        *,
+        loop,
+        session_id: str,
+        adapter,
+        chat_id: str,
+    ) -> None:
+        """Wire ``loop._fire_goal_banner`` for ``session_id`` to send a
+        chat message via ``adapter``.
+
+        The callback runs inside the agent loop (sync, no event loop in
+        scope by signature). We need to schedule an async ``adapter.send``
+        — capture the running loop's event-loop here and use
+        ``call_soon_threadsafe`` + ``ensure_future`` to fire-and-forget.
+        Adapter errors are swallowed — banner rendering must never
+        wedge the agent loop.
+        """
+        from opencomputer.cli_ui.goal_banner import format_banner
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        def _cb(*, session_id, kind, verdict, goal):
+            try:
+                text = format_banner(kind=kind, verdict=verdict, goal=goal)
+            except Exception:  # noqa: BLE001
+                return
+            if running is None or running.is_closed():
+                return
+            try:
+                # Schedule from whatever thread fires the banner.
+                asyncio.run_coroutine_threadsafe(
+                    self._safe_send_goal_banner(adapter, chat_id, text),
+                    running,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        loop.set_goal_banner_callback(session_id, _cb)
+
+    async def _safe_send_goal_banner(
+        self, adapter, chat_id: str, text: str,
+    ) -> None:
+        """Best-effort banner-as-message send. Errors swallowed."""
+        try:
+            await adapter.send(chat_id, text)
+        except Exception:  # noqa: BLE001
+            logger.debug("goal banner send failed", exc_info=True)
+
+    async def _goal_midrun_check(
+        self,
+        *,
+        session_id: str,
+        args: list[str],
+    ) -> str | None:
+        """Refuse `/goal <text>` when an agent run is already in flight.
+
+        Spec: docs/superpowers/specs/2026-05-08-kanban-goals-v2-design.md §3
+        Gap D. The set form races with the in-flight continuation prompt
+        ``_maybe_continue_goal`` is about to inject — refuse and tell
+        the user to /stop first. Status / pause / resume / clear only
+        touch control-plane state and remain unrestricted.
+
+        Returns the refusal string when the dispatcher should short-
+        circuit, otherwise None (caller proceeds normally).
+        """
+        if not args:
+            return None  # status form (no text)
+        sub = (args[0] or "").lower()
+        if sub in {"status", "pause", "resume", "clear"}:
+            return None
+        # SET form. Check the active-runs marker (instrumented around
+        # run_conversation in :meth:`_do_dispatch`).
+        if session_id in self._active_runs:
+            return (
+                "/goal: agent is currently running — use /stop first, "
+                "then set the new goal."
+            )
+        return None
 
     async def _typing_heartbeat(self, platform: str, chat_id: str) -> None:
         """Send typing indicator every 4s until cancelled."""
@@ -1065,7 +1884,9 @@ class Dispatch:
             return False
 
         token = uuid.uuid4().hex[:24]
-        prompt_text = gate.render_prompt(claim, scope)
+        # Hermes parity: pass session_id so render_prompt can surface
+        # any Tirith findings stashed by the loop's pre-consent scan.
+        prompt_text = gate.render_prompt(claim, scope, session_id=session_id)
         try:
             result = await adapter.send_approval_request(
                 chat_id=chat_id,
@@ -1092,6 +1913,81 @@ class Dispatch:
         self._approval_tokens[token] = (session_id, claim.capability_id)
         return True
 
+    async def _maybe_resolve_consent_text_reply(
+        self, *, session_id: str, text: str,
+    ) -> bool:
+        """Resolve a pending consent prompt with a bare-text user reply.
+
+        Hermes-parity for the "type yes/no in chat" flow. Returns True
+        iff the reply was consumed (i.e., a pending consent request was
+        resolved). False means the caller should continue to route the
+        message through the agent loop normally.
+
+        Logic:
+        - Look up the per-profile loop's :class:`ConsentGate`.
+        - If no pending request keyed on ``session_id`` exists, return
+          False immediately. The reply is ordinary user input.
+        - Classify ``text`` via :func:`opencomputer.security.approval_keywords.classify_reply`.
+          Strict single-token match — anything ambiguous (e.g.
+          ``"yes please"``) returns None and is treated as a normal
+          message.
+        - When approve/deny: resolve every pending key for this
+          session — there's typically only one but the registry shape
+          permits multiples. ``persist=False`` semantics mirror
+          "allow once" for approve and a plain deny for deny.
+
+        Never raises — callers see a False on any internal error.
+        """
+        from opencomputer.security.approval_keywords import classify_reply
+
+        # Find the gate via the same indirection as
+        # ``_handle_approval_click``: profile → router._loops → gate.
+        try:
+            profile = self._session_profiles.get(session_id, "default")
+            loop = self._router._loops.get(profile) if self._router else None
+            gate = getattr(loop, "_consent_gate", None)
+        except Exception:  # noqa: BLE001
+            return False
+        if gate is None:
+            return False
+
+        pending = getattr(gate, "_pending_requests", None)
+        if not pending:
+            return False
+        # Find any pending key for this session_id.
+        target_keys = [k for k in pending if k[0] == session_id]
+        if not target_keys:
+            return False
+
+        verdict = classify_reply(text)
+        if verdict is None:
+            return False
+
+        decision = verdict == "approve"
+        persist = False  # text replies always allow_once / deny — explicit
+        # "always" requires the button surface, not a single keyword.
+        for key in target_keys:
+            session, capability_id = key
+            try:
+                gate.resolve_pending(
+                    session_id=session,
+                    capability_id=capability_id,
+                    decision=decision,
+                    persist=persist,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "consent text-reply resolve_pending failed for "
+                    "session=%s capability=%s",
+                    session, capability_id, exc_info=True,
+                )
+                continue
+            logger.info(
+                "consent text-reply: session=%s capability=%s verdict=%s",
+                session, capability_id, verdict,
+            )
+        return True
+
     async def _handle_approval_click(self, verb: str, token: str) -> None:
         """Adapter-side approval-callback receiver.
 
@@ -1114,8 +2010,14 @@ class Dispatch:
         gate = getattr(_click_loop, "_consent_gate", None)
         if gate is None:
             return
+        # Hermes parity: 4th verb 'session' grants for the rest of the
+        # session only — dispatched to the in-memory cache via
+        # resolve_pending(... session_scoped=True).
+        session_scoped = False
         if verb == "once":
             decision, persist = True, False
+        elif verb == "session":
+            decision, persist, session_scoped = True, False, True
         elif verb == "always":
             decision, persist = True, True
         elif verb == "deny":
@@ -1128,6 +2030,7 @@ class Dispatch:
             capability_id=capability_id,
             decision=decision,
             persist=persist,
+            session_scoped=session_scoped,
         )
         if not resolved:
             logger.info(
@@ -1137,4 +2040,91 @@ class Dispatch:
             )
 
 
-__all__ = ["Dispatch", "session_id_for", "_format_user_facing_error"]
+    # ─── /background completion notifier ─────────────────────────────
+
+    def bind_main_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Capture the gateway's main-thread asyncio loop.
+
+        Background-job worker threads call back synchronously into the
+        completion notifier; the notifier needs the gateway's loop to
+        schedule ``adapter.send`` on it via ``run_coroutine_threadsafe``.
+        Called once by ``Gateway.serve_forever`` before the daemon enters
+        the serve-forever wait.
+        """
+        self._main_loop = loop
+
+    def background_completion_notifier(
+        self, job: Any
+    ) -> None:
+        """Sync notifier invoked from the background-job worker thread
+        when a job transitions to ``complete`` or ``error``.
+
+        Routes the result back to the originating channel by:
+        1. Looking up ``_session_channels[job.parent_session_id]`` to
+           find the (adapter, chat_id) pair.
+        2. Building the user-facing summary via
+           :func:`_format_background_completion_text`.
+        3. Scheduling ``adapter.send(chat_id, summary)`` onto the gateway's
+           loop using ``run_coroutine_threadsafe`` (worker thread cannot
+           directly await on the gateway's loop).
+
+        Failure-isolated. The registry swallows any exception this raises;
+        a misbehaving notifier must never tear down the worker thread.
+        """
+        sid = getattr(job, "parent_session_id", None)
+        if not sid:
+            return
+        binding = self._session_channels.get(sid)
+        if binding is None:
+            logger.debug(
+                "/background completion: session=%s has no channel binding "
+                "(non-gateway path or session evicted) — skipping push",
+                sid,
+            )
+            return
+        adapter, chat_id = binding
+        if not hasattr(adapter, "send"):
+            return
+        main_loop = getattr(self, "_main_loop", None)
+        if main_loop is None:
+            logger.debug(
+                "/background completion: no main loop bound — skipping push"
+            )
+            return
+        text = _format_background_completion_text(job)
+        try:
+            asyncio.run_coroutine_threadsafe(
+                adapter.send(chat_id, text), main_loop
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "/background completion: schedule failed for session=%s",
+                sid, exc_info=True,
+            )
+
+
+def _format_background_completion_text(job: Any) -> str:
+    """Render the user-facing summary for a finished background job.
+
+    Single-line head with the job id + status + first 60 chars of prompt,
+    followed by the body (result or error). Kept compact so chat surfaces
+    don't explode on long outputs.
+    """
+    head = (job.prompt or "").splitlines()[0]
+    if len(head) > 60:
+        head = head[:57] + "…"
+    if job.status == "complete":
+        body = job.result or "(empty response)"
+        return f"✓ background {job.job_id} done — {head}\n\n{body}"
+    return (
+        f"✗ background {job.job_id} failed — {head}\n\n"
+        f"error: {job.error or '(no detail)'}"
+    )
+
+
+__all__ = [
+    "Dispatch",
+    "_format_background_completion_text",
+    "_format_user_facing_error",
+    "session_id_for",
+]

@@ -143,6 +143,15 @@ def _build_app(
                 name=f"plugin-{name}-dist",
             )
 
+    # --- v1 domain-split routers ---------------------------------------
+    # 17 routers under /api/v1/* — see opencomputer/dashboard/routes/.
+    # Stub modules are registered alongside the populated ones so the
+    # SPA's first-load `/api/v1/status` works before later PRs land.
+    from opencomputer.dashboard.routes import ALL_ROUTERS
+
+    for v1_router in ALL_ROUTERS:
+        app.include_router(v1_router)
+
     # --- /api/health (always public) -----------------------------------
     @app.get("/api/health")
     async def health() -> dict:
@@ -162,9 +171,41 @@ def _build_app(
         body = body.replace("__SESSION_TOKEN__", _SESSION_TOKEN)
         return HTMLResponse(body)
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index() -> Response:
-        return _render_html(static_dir / "index.html")
+    # --- SPA at / (post-2026-05-07 — Vite-built dashboard) -------------
+    # Built by `cd OpenComputer/ui-web && npm run build`; outputs to
+    # `static/spa/`. When present, `/` serves the SPA's index.html and
+    # any non-/api, non-/static, non-/assets path falls through to it
+    # so React Router handles the route on hard refresh.
+    _SPA_DIR = static_dir / "spa"
+
+    if _SPA_DIR.exists() and (_SPA_DIR / "index.html").exists():
+        # Hashed assets — Vite emits content-hashed filenames so cache
+        # control is safe. _render_html only handles the index shell.
+        _ASSETS_DIR = _SPA_DIR / "assets"
+        if _ASSETS_DIR.exists():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(_ASSETS_DIR), html=False),
+                name="spa-assets",
+            )
+        # Synced @nous-research/ui fonts + ds-assets (sync-assets script).
+        for sub in ("fonts", "ds-assets"):
+            d = _SPA_DIR / sub
+            if d.exists():
+                app.mount(
+                    f"/{sub}",
+                    StaticFiles(directory=str(d), html=False),
+                    name=f"spa-{sub}",
+                )
+
+        @app.get("/", response_class=HTMLResponse)
+        async def index() -> Response:
+            return _render_html(_SPA_DIR / "index.html")
+    else:
+        # No SPA build artifact — fall back to the legacy `static/index.html`.
+        @app.get("/", response_class=HTMLResponse)
+        async def index() -> Response:  # type: ignore[no-redef]
+            return _render_html(static_dir / "index.html")
 
     @app.get("/static/plugins.html", response_class=HTMLResponse)
     async def plugins_page() -> Response:
@@ -173,6 +214,95 @@ def _build_app(
     @app.get("/static/models.html", response_class=HTMLResponse)
     async def models_page() -> Response:
         return _render_html(static_dir / "models.html")
+
+    # Hermes-followup A1 (2026-05-07) — LLM calls real-time tracker.
+    @app.get("/static/llm-calls.html", response_class=HTMLResponse)
+    async def llm_calls_page() -> Response:
+        return _render_html(static_dir / "llm-calls.html")
+
+    @app.get("/api/llm-calls/recent")
+    async def llm_calls_recent(limit: int = 50) -> dict:
+        """Return the most recent ``llm_calls`` rows for the live tracker.
+
+        Reads the active profile's ``sessions.db``. Hardens against:
+        - missing DB / pre-v13 schema (returns empty list).
+        - bad ``limit`` (clamped to 1..500).
+        """
+        from opencomputer.agent.config import default_config
+        from opencomputer.agent.state import SessionDB
+
+        clamped = max(1, min(int(limit or 50), 500))
+        db_path = default_config().home / "sessions.db"
+        if not db_path.exists():
+            return {"rows": [], "limit": clamped}
+        db = SessionDB(db_path)
+        try:
+            with db._connect() as conn:  # noqa: SLF001 — internal helper, dashboard read-only
+                rows = conn.execute(
+                    "SELECT id, session_id, ts, provider, model, "
+                    "input_tokens, output_tokens, cost_usd, batch "
+                    "FROM llm_calls ORDER BY ts DESC LIMIT ?",
+                    (clamped,),
+                ).fetchall()
+        except Exception:
+            return {"rows": [], "limit": clamped}
+        return {
+            "rows": [dict(r) for r in rows],
+            "limit": clamped,
+        }
+
+    # Hermes-followup A1 — gateway-restart endpoint. Token-gated by
+    # the existing /api/* auth guard. Reads the gateway daemon's PID
+    # from a pidfile and signals SIGUSR1; the daemon's signal handler
+    # is responsible for re-exec. Refuses to signal if no pidfile is
+    # found — we MUST NOT kill the dashboard process itself, which
+    # may be the same Python process when ``oc gateway`` and the
+    # dashboard are co-hosted.
+    @app.post("/api/gateway/restart")
+    async def gateway_restart() -> dict:
+        import os
+        import signal
+        from pathlib import Path as _Path
+
+        pidfile_candidates = [
+            _Path.home() / ".opencomputer" / "default" / "gateway.pid",
+            _Path.home() / ".opencomputer" / "gateway.pid",
+        ]
+        target_pid: int | None = None
+        for cand in pidfile_candidates:
+            try:
+                if cand.exists():
+                    target_pid = int(cand.read_text().strip())
+                    break
+            except Exception:
+                continue
+
+        if target_pid is None:
+            return {
+                "ok": False,
+                "error": (
+                    "no gateway pidfile found at "
+                    "~/.opencomputer/[<profile>/]gateway.pid"
+                ),
+            }
+        # Belt-and-braces: never signal our own process — even if a stale
+        # pidfile somehow contains our PID, we'd kill the dashboard.
+        if target_pid == os.getpid():
+            return {
+                "ok": False,
+                "pid": target_pid,
+                "error": (
+                    "pidfile points at the dashboard process itself; "
+                    "refusing to signal (would kill the UI)"
+                ),
+            }
+        try:
+            os.kill(target_pid, signal.SIGUSR1)
+            return {"ok": True, "pid": target_pid, "signal": "SIGUSR1"}
+        except (ProcessLookupError, PermissionError) as exc:
+            return {"ok": False, "pid": target_pid, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
 
     if static_dir.exists():
         app.mount(
@@ -184,6 +314,20 @@ def _build_app(
     # --- /api/pty WebSocket --------------------------------------------
     if enable_pty:
         _attach_pty(app)
+
+    # --- SPA route fallback (must come AFTER /api/* + /static/* + /assets/*) ---
+    # React Router renders client-side routes like /sessions, /logs.
+    # Hard-refreshing one of those would 404 without a fallback that
+    # serves index.html and lets the client-side router resolve.
+    # Unknown /api/* + /static/* paths are explicitly 404'd so the SPA
+    # only catches genuine SPA navigations.
+    if _SPA_DIR.exists() and (_SPA_DIR / "index.html").exists():
+
+        @app.get("/{spa_path:path}", response_class=HTMLResponse)
+        async def spa_fallback(spa_path: str) -> Response:
+            if spa_path.startswith(("api/", "static/", "assets/", "fonts/", "ds-assets/")):
+                return Response(status_code=404)
+            return _render_html(_SPA_DIR / "index.html")
 
     return app
 

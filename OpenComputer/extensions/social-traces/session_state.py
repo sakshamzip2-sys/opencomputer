@@ -56,7 +56,6 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 
-
 #: Soft cap on tracked sessions. A daemon that handles 10K sessions
 #: would otherwise grow this dict unbounded; ``set_trace_used`` evicts
 #: the oldest entries when the cap is reached. Tunable per-test via
@@ -89,7 +88,7 @@ class _SessionEntry:
 
 # OrderedDict so the LRU eviction is cheap — pop the first key when
 # we exceed the cap.
-_state: "OrderedDict[str, _SessionEntry]" = OrderedDict()
+_state: OrderedDict[str, _SessionEntry] = OrderedDict()
 _lock = threading.RLock()
 
 

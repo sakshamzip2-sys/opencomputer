@@ -61,6 +61,211 @@ def show_command(site: str = typer.Argument(...)):
         typer.echo(f"    formats: {cmd.formats}")
 
 
+@browser_app.command("status")
+def status_command(
+    port: int = typer.Option(9222, "--port", help="CDP port to probe."),
+):
+    """Show whether a Chrome with CDP enabled is reachable on this machine.
+
+    Hermes B1 — this is the user-friendly status surface. Probes the
+    local CDP endpoint at ``http://localhost:<port>/json/version`` and
+    reports the Chrome build + WebSocket URL on success, or actionable
+    next-step instructions on failure.
+    """
+    import json
+    import urllib.request
+
+    url = f"http://localhost:{port}/json/version"
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"No CDP-enabled Chrome reachable on port {port}.", err=True)
+        typer.echo(f"  reason: {type(exc).__name__}: {exc}", err=True)
+        typer.echo(
+            "\nStart Chrome with CDP:\n"
+            "  oc browser chrome    # prints the platform-specific command",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo(f"CDP endpoint: http://localhost:{port}")
+    if "Browser" in data:
+        typer.echo(f"  Chrome:    {data['Browser']}")
+    if "User-Agent" in data:
+        typer.echo(f"  UA:        {data['User-Agent'][:80]}")
+    if "webSocketDebuggerUrl" in data:
+        typer.echo(f"  WS URL:    {data['webSocketDebuggerUrl']}")
+    typer.echo(
+        f"\nTo route browser tools through this Chrome:\n"
+        f"  export OPENCOMPUTER_BROWSER_CDP_URL=http://localhost:{port}"
+    )
+
+
+@browser_app.command("connect")
+def connect_command(
+    port: int = typer.Option(9222, "--port", help="CDP port to attach to."),
+):
+    """Attach the agent's browser tools to your already-running Chrome.
+
+    Hermes B1 — the user-facing on-switch. Verifies Chrome is reachable
+    on ``--port`` (default 9222), then sets ``OPENCOMPUTER_BROWSER_CDP_URL``
+    in the user's shell rc files so subsequent ``oc`` invocations attach
+    automatically. Existing terminals need to ``source ~/.zshrc`` (or
+    open a new shell) to pick it up.
+
+    Refuses to write the rc file when no Chrome is reachable — running
+    ``oc browser chrome`` first prints the launch command.
+    """
+    import json
+    import urllib.request
+    from pathlib import Path
+
+    url = f"http://localhost:{port}/json/version"
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as resp:
+            json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(
+            f"No CDP-enabled Chrome reachable on port {port}.", err=True
+        )
+        typer.echo(f"  reason: {type(exc).__name__}: {exc}", err=True)
+        typer.echo("\nStart Chrome first:  oc browser chrome", err=True)
+        raise typer.Exit(code=1)
+
+    cdp_url = f"http://localhost:{port}"
+    rc_lines = [
+        f"export OPENCOMPUTER_BROWSER_CDP_URL={cdp_url}",
+    ]
+    rc_files = []
+    home = Path.home()
+    for rc_name in (".zshrc", ".bashrc"):
+        rc_path = home / rc_name
+        if rc_path.exists():
+            rc_files.append(rc_path)
+    if not rc_files:
+        # No rc file to extend — print env-var instruction.
+        typer.echo(f"Chrome reachable. Set this in your shell:\n  {rc_lines[0]}")
+        return
+
+    marker = "# OpenComputer browser CDP attach (oc browser connect)"
+    appended = []
+    for rc_path in rc_files:
+        text = rc_path.read_text()
+        # Idempotency — strip existing marker block if present.
+        if marker in text:
+            lines = text.splitlines()
+            kept: list[str] = []
+            i = 0
+            while i < len(lines):
+                if lines[i].strip() == marker:
+                    # Skip marker + next 1 export line
+                    i += 2
+                    continue
+                kept.append(lines[i])
+                i += 1
+            text = "\n".join(kept).rstrip() + "\n"
+        text += "\n" + marker + "\n" + rc_lines[0] + "\n"
+        rc_path.write_text(text)
+        appended.append(str(rc_path))
+    typer.echo(f"Attached to Chrome on port {port}.")
+    typer.echo(f"  Wrote {cdp_url} → " + ", ".join(appended))
+    typer.echo(
+        "  Open a new shell or 'source ~/.zshrc' to pick it up in this session."
+    )
+
+
+@browser_app.command("disconnect")
+def disconnect_command():
+    """Detach the agent's browser tools from your running Chrome.
+
+    Hermes B1 — the user-facing off-switch. Strips the
+    ``OPENCOMPUTER_BROWSER_CDP_URL`` line from ``~/.zshrc`` /
+    ``~/.bashrc`` if present. Idempotent — safe to run when
+    not currently connected.
+    """
+    from pathlib import Path
+
+    marker = "# OpenComputer browser CDP attach (oc browser connect)"
+    home = Path.home()
+    touched = []
+    for rc_name in (".zshrc", ".bashrc"):
+        rc_path = home / rc_name
+        if not rc_path.exists():
+            continue
+        text = rc_path.read_text()
+        if marker not in text:
+            continue
+        lines = text.splitlines()
+        kept: list[str] = []
+        i = 0
+        while i < len(lines):
+            if lines[i].strip() == marker:
+                i += 2  # marker + next export line
+                continue
+            kept.append(lines[i])
+            i += 1
+        rc_path.write_text("\n".join(kept).rstrip() + "\n")
+        touched.append(str(rc_path))
+
+    if not touched:
+        typer.echo("Not currently attached (no marker found in shell rc files).")
+        return
+    typer.echo("Detached from Chrome. Stripped marker from: " + ", ".join(touched))
+    typer.echo(
+        "  Open a new shell or 'source ~/.zshrc' to clear it in this session."
+    )
+
+
+@browser_app.command("tabs")
+def tabs_command(
+    port: int = typer.Option(9222, "--port", help="CDP port."),
+    cdp_url: str | None = typer.Option(
+        None, "--cdp-url",
+        help="Full CDP URL override; takes precedence over --port.",
+    ),
+):
+    """List the open tabs in the attached Chrome.
+
+    Hermes B1 next-tier — when CDP-attached, the agent can target
+    specific tabs by URL/title. This command shows what's available.
+
+    Reads ``http://<host>/json`` (the standard CDP discovery endpoint)
+    and prints a numbered table of open tabs with their URL + title.
+    """
+    import json
+    import urllib.request
+
+    base = (cdp_url or f"http://localhost:{port}").rstrip("/")
+    url = f"{base}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as resp:
+            tabs = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"Could not list tabs at {url}.", err=True)
+        typer.echo(f"  reason: {type(exc).__name__}: {exc}", err=True)
+        typer.echo(
+            "\nIs Chrome running with CDP?  oc browser status",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    pages = [t for t in tabs if t.get("type") == "page"]
+    if not pages:
+        typer.echo("No open page tabs.")
+        return
+    typer.echo(f"{len(pages)} tab(s) open at {base}:")
+    for i, t in enumerate(pages):
+        title = (t.get("title") or "(untitled)")[:60]
+        url_str = (t.get("url") or "")[:80]
+        typer.echo(f"  [{i}]  {title}")
+        typer.echo(f"       {url_str}")
+        if t.get("webSocketDebuggerUrl"):
+            typer.echo(
+                f"       targetId={t.get('id', '?')}"
+            )
+
+
 @browser_app.command("chrome")
 def chrome_command():
     """Print the Chrome launch command for CDP attach mode."""
@@ -101,6 +306,11 @@ def run(
     limit: int = typer.Option(10, "--limit", "-n"),
     fmt: str = typer.Option("json", "--format", "-f"),
     llm_fallback: bool = typer.Option(False, "--llm-fallback"),
+    cdp_url: str | None = typer.Option(
+        None, "--cdp-url",
+        help="Override OPENCOMPUTER_BROWSER_CDP_URL for this invocation.",
+        envvar="OPENCOMPUTER_BROWSER_CDP_URL",
+    ),
 ):
     """Run a recipe: 'oc browser run <site> <verb>'.
 
@@ -108,9 +318,21 @@ def run(
     with a "not yet implemented" message. Phase 5 (next-session) wires
     the real LLM-fallback path. Default behaviour (no flag, missing
     recipe) is exit 1 with helpful options.
+
+    Hermes B1 next-tier — ``--cdp-url`` overrides the env var for a
+    one-off run, useful when you have multiple Chrome profiles on
+    different ports (e.g. a debug profile on 9223 + your everyday
+    profile on 9222).
     """
+    import os as _os
+
     from opencomputer.recipes import run_recipe
     from opencomputer.recipes.fetcher import httpx_fetcher
+
+    # Apply --cdp-url for the lifetime of this command. The recipe
+    # runner picks up the env var at recipe-execution time.
+    if cdp_url:
+        _os.environ["OPENCOMPUTER_BROWSER_CDP_URL"] = cdp_url
 
     try:
         out = run_recipe(

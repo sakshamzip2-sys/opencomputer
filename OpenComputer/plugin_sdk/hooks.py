@@ -25,6 +25,10 @@ Available events:
     BeforeMessageWrite      — fires before SessionDB persists a message
     BeforeTask              — fires after UserPromptSubmit, before first LLM
                               call (blocking; lets handlers inject context)
+    BeforeInstall           — fires after extract + scan, before plugin activates an install
+    BeforeModelResolve      — fires before model_resolver.resolve_model() runs
+    MessageSending          — fires before a channel adapter sends an outgoing message
+    MessageSent             — fires after a channel adapter sends an outgoing message
 
 Hook ordering: handlers can declare ``priority`` on their HookSpec — lower
 priorities run first; FIFO within the same priority bucket. The default is 100,
@@ -74,6 +78,30 @@ class HookEvent(str, Enum):
     # (used by the social-traces plugin to inject pre-fetched TraceCards
     # into context). See docs/plans/social-traces-plugin.md §8.
     BEFORE_TASK = "BeforeTask"
+    # 2026-05-06 — install lifecycle (S3 leftover from OpenClaw deep-comparison).
+    BEFORE_INSTALL = "BeforeInstall"
+    # 2026-05-06 — Phase 3 (S3 leftovers from OpenClaw deep-comparison).
+    BEFORE_MODEL_RESOLVE = "BeforeModelResolve"
+    MESSAGE_SENDING = "MessageSending"
+    MESSAGE_SENT = "MessageSent"
+    # 2026-05-08 — Hermes Doc-2 parity (see
+    # docs/refs/hermes-agent/2026-05-08-kanban-goals-execcode-hooks-parity.md).
+    # SESSION_END fires per ``run_conversation`` (every turn). SESSION_FINALIZE
+    # fires once when the surface tears down a session entirely (CLI exits,
+    # gateway evicts, websocket closes). Last chance to flush state.
+    SESSION_FINALIZE = "SessionFinalize"
+    # SESSION_RESET fires after ``/new`` / ``/reset`` / ``/clear`` allocates a
+    # fresh session id. Distinct from SESSION_START because the previous
+    # session id is also exposed via ``HookContext.previous_session_id`` so a
+    # plugin can carry forward state. Gateway + CLI both fire this.
+    SESSION_RESET = "SessionReset"
+    # TRANSFORM_LLM_OUTPUT fires once per turn after the final assistant text
+    # is assembled, before delivery to channel/console. Handlers may return
+    # ``HookDecision(decision="rewrite", rewritten_text=...)`` to replace the
+    # response. First non-empty rewrite wins; later handlers see the rewritten
+    # text. Use cases: PII redaction post-LLM, tone adjustments, citation
+    # appending, A/B response routing.
+    TRANSFORM_LLM_OUTPUT = "TransformLlmOutput"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +145,49 @@ class HookContext:
     #: Tool dispatch latency in ms — populated for POST_TOOL_USE +
     #: TRANSFORM_TOOL_RESULT (Wave 5 T15 — Hermes 59b56d445).
     duration_ms: int | None = None
+    # 2026-05-06 — install lifecycle context fields. Populated only for
+    # BEFORE_INSTALL; default None so existing HookContext callers across
+    # the loop / gateway / approval paths stay unchanged.
+    #:
+    #: Install source: "catalog" | "git" | "url" | "path".
+    install_source: str | None = None
+    #: Raw URL the user typed (or slug for catalog, abs path for path).
+    install_url: str | None = None
+    #: Resolved plugin id (post-extract, post-manifest-parse).
+    install_plugin_id: str | None = None
+    #: install_security_scan.ScanReport — typed loosely as object so the SDK
+    #: doesn't need to re-import it (the plugin loader is the only producer).
+    install_scan_report: object | None = None
+    # 2026-05-06 — Phase 3 (S3 leftovers from OpenClaw deep-comparison).
+    #: Pre-resolve model alias text — populated for BEFORE_MODEL_RESOLVE.
+    #: Distinct from ``model`` (which carries the post-resolve canonical id
+    #: for PRE/POST_LLM_CALL). A handler may set ``modified_message`` on
+    #: HookDecision to redirect resolution to a different alias key.
+    pre_resolve_model: str | None = None
+    #: Outgoing channel message text — populated for MESSAGE_SENDING /
+    #: MESSAGE_SENT. Distinct from ``message`` (which carries inbound).
+    outgoing_text: str | None = None
+    #: Channel platform string ("telegram" | "discord" | "cli" | ...) —
+    #: populated for MESSAGE_SENDING / MESSAGE_SENT.
+    channel: str | None = None
+    #: Outgoing chat id (channel-specific) — populated for MESSAGE_SENDING / MESSAGE_SENT.
+    outgoing_chat_id: str | None = None
+    # 2026-05-08 — Hermes Doc-2 parity additions.
+    #: Reason a SESSION_FINALIZE fires — "cli_exit" | "gateway_evict" |
+    #: "wire_disconnect" | "shutdown" | "error". Handlers that need to behave
+    #: differently for normal vs abnormal exits can branch on this.
+    finalize_reason: str | None = None
+    #: Previous session id rotated out by ``/new`` / ``/reset`` / ``/clear`` —
+    #: populated for SESSION_RESET so a plugin can carry forward in-memory
+    #: caches keyed on the old id.
+    previous_session_id: str | None = None
+    #: The platform/surface the reset originated on — "cli" | "gateway" |
+    #: "wire" | "acp" — populated for SESSION_RESET / SESSION_FINALIZE.
+    surface_origin: str | None = None
+    #: Final assistant text being delivered — populated for
+    #: TRANSFORM_LLM_OUTPUT. Distinct from ``outgoing_text`` which is the
+    #: per-channel-message text in MESSAGE_SENDING (multiple chunks possible).
+    response_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +206,12 @@ class HookDecision:
     modified_message: str = ""  # if set, injected as a system reminder
     #: Wave 5 T13 — for decision="rewrite", the new event text.
     rewritten_text: str | None = None
+    #: 2026-05-08 G4 — text to inject into the user message for
+    #: PRE_LLM_CALL only. Mirrors Hermes' shell-hook stdout
+    #: ``{"context": "..."}`` shape and the existing plugin-side
+    #: pre_llm_call return-value contract. Ignored for non-PRE_LLM_CALL
+    #: events (callers in loop.py decide the apply-condition).
+    inject_context: str | None = None
 
 
 # Hook handler is an async callable: (ctx) -> HookDecision or None (= "pass")
@@ -201,4 +278,14 @@ ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
     HookEvent.POST_APPROVAL_RESPONSE,
     # Social-traces plugin
     HookEvent.BEFORE_TASK,
+    # 2026-05-06 — install lifecycle
+    HookEvent.BEFORE_INSTALL,
+    # 2026-05-06 — Phase 3 (S3 leftovers from OpenClaw deep-comparison)
+    HookEvent.BEFORE_MODEL_RESOLVE,
+    HookEvent.MESSAGE_SENDING,
+    HookEvent.MESSAGE_SENT,
+    # 2026-05-08 — Hermes Doc-2 parity additions.
+    HookEvent.SESSION_FINALIZE,
+    HookEvent.SESSION_RESET,
+    HookEvent.TRANSFORM_LLM_OUTPUT,
 )

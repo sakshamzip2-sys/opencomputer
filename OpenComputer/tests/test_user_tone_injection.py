@@ -149,15 +149,23 @@ def test_user_tone_overrides_persona_preferred_tone_in_code() -> None:
     <user-tone> block renders. The <persona-tone> block is suppressed —
     code-level enforcement of the precedence rule.
     """
+    # Use a sentinel substring that's unlikely to appear elsewhere in
+    # base.j2's prose. Earlier the test asserted ``"warm" not in out``
+    # but PR #489 (db560c2c) added prose containing the word "warm"
+    # into the no-emojis paragraph, causing a substring collision that
+    # had nothing to do with the persona-tone precedence rule. Use a
+    # synthetic token so we test the structural property (block excluded)
+    # without colliding on common English vocabulary.
     pb = PromptBuilder()
+    sentinel = "QQ_PERSONA_TONE_SENTINEL_ZX9"
     out = pb.build(
         user_tone="concise and action-first",
-        persona_preferred_tone="warm",
+        persona_preferred_tone=sentinel,
     )
     assert "<user-tone>" in out
     assert "concise and action-first" in out
     assert "<persona-tone>" not in out
-    assert "warm" not in out
+    assert sentinel not in out
 
 
 def test_persona_preferred_tone_omitted_when_persona_has_none() -> None:

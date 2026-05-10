@@ -1,4 +1,4 @@
-"""Provider-agnostic auxiliary LLM helpers.
+"""Auxiliary LLM helpers — provider-agnostic, with fallback (T68).
 
 Auxiliary code paths (the /btw slash command, vision_analyze tool, batch
 processing, profile bootstrap LLM extractor) historically called
@@ -23,7 +23,42 @@ provider plugin already knows them.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
+
+from opencomputer.agent.agent_cache import (
+    DEFAULT_AUX_RESPONSE_CACHE_MAX,
+    AgentCache,
+    aux_response_signature,
+)
+
+_log = logging.getLogger("opencomputer.agent.aux_llm")
+
+#: Module-level singleton response cache (M1.3, 2026-05-09). Opt-in
+#: via ``use_cache=True`` on :func:`complete_text`. Sized for ~2MB
+#: worst case (256 entries × ~8KB each at typical max_tokens).
+_AUX_RESPONSE_CACHE: AgentCache = AgentCache(max_size=DEFAULT_AUX_RESPONSE_CACHE_MAX)
+
+#: Telemetry counters for ``oc usage`` integration / debug surfaces.
+#: Best-effort — never crash the call path.
+_AUX_CACHE_STATS: dict[str, int] = {"hits": 0, "misses": 0}
+
+
+def aux_cache_stats() -> dict[str, int]:
+    """Return a snapshot of aux-LLM response cache hit/miss counts.
+
+    M1.3 — exposed so ``oc usage`` (or any debug surface) can render
+    the cache effectiveness without grovelling into module internals.
+    Returns a fresh dict so callers can mutate it safely.
+    """
+    return dict(_AUX_CACHE_STATS)
+
+
+def clear_aux_response_cache() -> None:
+    """Empty the aux-LLM response cache. Intended for tests + ``oc admin reset``."""
+    _AUX_RESPONSE_CACHE.clear()
+    _AUX_CACHE_STATS["hits"] = 0
+    _AUX_CACHE_STATS["misses"] = 0
 
 
 def _resolve_provider() -> Any:
@@ -33,16 +68,60 @@ def _resolve_provider() -> Any:
     so all auxiliary paths inherit the same auth + base URL config without
     new setup.
     """
-    from opencomputer.agent.config import default_config
+    from opencomputer.agent.config import default_config as _dc
     from opencomputer.plugins.registry import registry as plugin_registry
 
-    cfg = default_config()
+    cfg = _dc()
     provider_cls = plugin_registry.providers.get(cfg.model.provider)
     if provider_cls is None:
         raise RuntimeError(
             f"provider {cfg.model.provider!r} not registered; cannot run auxiliary call"
         )
     return provider_cls() if isinstance(provider_cls, type) else provider_cls
+
+
+def _resolve_fallback_provider(fp: Any) -> Any:
+    """T68 — resolve a :class:`FallbackProvider` to a provider instance.
+
+    Looks up the provider class in the plugin registry by ``fp.provider``,
+    instantiates it. ``fp.base_url`` / ``fp.key_env`` are advisory — the
+    provider class is expected to read its own env config, but callers
+    can override via attributes when needed.
+    """
+    from opencomputer.plugins.registry import registry as plugin_registry
+
+    provider_cls = plugin_registry.providers.get(fp.provider)
+    if provider_cls is None:
+        raise RuntimeError(
+            f"fallback provider {fp.provider!r} not registered"
+        )
+    return provider_cls() if isinstance(provider_cls, type) else provider_cls
+
+
+def default_config():  # re-export so tests can monkeypatch this single name
+    from opencomputer.agent.config import default_config as _dc
+
+    return _dc()
+
+
+_TRANSIENT_AUX_MARKERS: tuple[str, ...] = (
+    "rate limit",
+    "ratelimit",
+    "rate_limit",
+    "429",
+    "503",
+    "502",
+    "504",
+    "connection reset",
+    "connection error",
+    "timeout",
+    "temporarily unavailable",
+)
+
+
+def _is_transient_aux(exc: BaseException) -> bool:
+    msg = (str(exc) or "").lower()
+    return any(marker in msg for marker in _TRANSIENT_AUX_MARKERS)
 
 
 def _resolve_default_model() -> str:
@@ -66,6 +145,7 @@ async def complete_text(
     max_tokens: int = 2048,
     temperature: float = 2.0,
     model: str | None = None,
+    use_cache: bool = False,
 ) -> str:
     """Run a single text completion through the configured provider.
 
@@ -76,23 +156,111 @@ async def complete_text(
     underlying provider error otherwise — callers should wrap in their
     own try/except if they want to convert SDK errors into user-facing
     text.
+
+    ``use_cache=True`` (M1.3, 2026-05-09) memoizes responses keyed on
+    ``(provider, model, system, messages, max_tokens, temperature)``.
+    Opt-in: callers MUST verify their prompt is deterministic (same
+    inputs always produce a semantically identical answer) before
+    enabling. Smart-mode security assessments at temperature=0.0 are
+    the canonical use case. Cache misses always hit the upstream
+    provider; the result is then stored.
     """
     from plugin_sdk.core import Message
 
-    provider = _resolve_provider()
     sdk_messages = [
         Message(role=m["role"], content=m.get("content"))
         for m in messages
     ]
     resolved_model = model or _resolve_default_model()
-    resp = await provider.complete(
-        model=resolved_model,
-        messages=sdk_messages,
-        system=system,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return resp.message.content if resp and resp.message else ""
+
+    if use_cache:
+        # We need the provider name for the cache key — resolve here
+        # (cheap, registry lookup) so the key is provider-aware. A
+        # cache miss falls through to the same _aux_call_with_fallback
+        # path as the non-cached case so fallback behavior is identical.
+        try:
+            provider_name = default_config().model.provider
+        except Exception:  # noqa: BLE001 — fall back to non-cached path
+            provider_name = ""
+        if provider_name:
+            cache_key = aux_response_signature(
+                provider_name=provider_name,
+                model=resolved_model,
+                system=system,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            cached = _AUX_RESPONSE_CACHE.get(cache_key)
+            if cached is not None:
+                _AUX_CACHE_STATS["hits"] += 1
+                return cached
+            _AUX_CACHE_STATS["misses"] += 1
+
+    async def _attempt(prov: Any, model_name: str) -> Any:
+        return await prov.complete(
+            model=model_name,
+            messages=sdk_messages,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    result = await _aux_call_with_fallback(_attempt, resolved_model)
+
+    if use_cache:
+        try:
+            provider_name = default_config().model.provider
+        except Exception:  # noqa: BLE001
+            provider_name = ""
+        if provider_name:
+            cache_key = aux_response_signature(
+                provider_name=provider_name,
+                model=resolved_model,
+                system=system,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            _AUX_RESPONSE_CACHE.put(cache_key, result)
+
+    return result
+
+
+async def _aux_call_with_fallback(attempt, primary_model: str) -> str:
+    """T68 — shared fallback driver for aux LLM calls.
+
+    Tries the configured provider; on transient failure walks the
+    ``fallback_providers`` chain. Records cost on every success.
+    Returns the assistant text. Raises the last error after
+    chain exhaustion. Used by complete_text / complete_vision /
+    complete_video so all three share one fallback contract.
+    """
+    primary = _resolve_provider()
+    last_exc: BaseException | None = None
+    try:
+        resp = await attempt(primary, primary_model)
+        _record_aux_cost(primary, primary_model, resp)
+        return resp.message.content if resp and resp.message else ""
+    except Exception as exc:  # noqa: BLE001
+        last_exc = exc
+        if not _is_transient_aux(exc):
+            raise
+
+    cfg = default_config()
+    for fp in getattr(cfg, "fallback_providers", ()) or ():
+        try:
+            backup = _resolve_fallback_provider(fp)
+            backup_model = fp.model or primary_model
+            resp = await attempt(backup, backup_model)
+            _record_aux_cost(backup, backup_model, resp)
+            return resp.message.content if resp and resp.message else ""
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not _is_transient_aux(exc):
+                raise
+    assert last_exc is not None
+    raise last_exc
 
 
 def complete_text_sync(
@@ -102,6 +270,7 @@ def complete_text_sync(
     max_tokens: int = 2048,
     temperature: float = 2.0,
     model: str | None = None,
+    use_cache: bool = False,
 ) -> str:
     """Sync wrapper for :func:`complete_text`.
 
@@ -116,6 +285,7 @@ def complete_text_sync(
             max_tokens=max_tokens,
             temperature=temperature,
             model=model,
+            use_cache=use_cache,
         )
     )
 
@@ -130,19 +300,14 @@ async def complete_vision(
 ) -> str:
     """Run a vision completion (text + image) through the configured provider.
 
-    Both Anthropic and OpenAI use the multimodal-content-array shape
-    where each item is either ``{"type": "text", "text": "..."}`` or
-    ``{"type": "image", "source": {"type": "base64", "media_type": "...",
-    "data": "..."}}``. We pass that shape verbatim — providers whose
-    ``complete()`` understands it (anthropic, openai-compat with vision
-    models, gemini) handle the call; providers without vision raise.
-
-    Caller should catch the resulting error and surface a clean
-    "vision not available on <provider>" message rather than a stack trace.
+    T68 — same fallback chain as :func:`complete_text`. A transient
+    failure on the primary provider walks the configured
+    ``fallback_providers`` chain. Non-transient errors short-circuit
+    immediately so the existing "vision not available on <provider>"
+    UX is preserved.
     """
     from plugin_sdk.core import Message
 
-    provider = _resolve_provider()
     content = [
         {
             "type": "image",
@@ -155,12 +320,15 @@ async def complete_vision(
         {"type": "text", "text": prompt},
     ]
     resolved_model = model or _resolve_default_model()
-    resp = await provider.complete(
-        model=resolved_model,
-        messages=[Message(role="user", content=content)],
-        max_tokens=max_tokens,
-    )
-    return resp.message.content if resp and resp.message else ""
+
+    async def _attempt(prov: Any, model_name: str) -> Any:
+        return await prov.complete(
+            model=model_name,
+            messages=[Message(role="user", content=content)],
+            max_tokens=max_tokens,
+        )
+
+    return await _aux_call_with_fallback(_attempt, resolved_model)
 
 
 async def complete_video(
@@ -173,30 +341,44 @@ async def complete_video(
 ) -> str:
     """Run a video completion (text + base64 video) through the configured provider.
 
-    Wave 5 T7 — Hermes-port (c9a3f36f5). Uses the OpenRouter / Gemini-style
-    multimodal-content-array shape with a ``video_url`` block whose URL
-    is a ``data:<mime>;base64,<b64>`` URI. Providers that can't decode
-    a video block raise; the caller (``video_analyze`` tool) catches
-    and surfaces a clean error.
+    T68 — same fallback chain as :func:`complete_text` and :func:`complete_vision`.
     """
     from plugin_sdk.core import Message
 
-    provider = _resolve_provider()
     data_url = f"data:{mime_type};base64,{video_base64}"
     content = [
         {"type": "video_url", "video_url": {"url": data_url}},
         {"type": "text", "text": prompt},
     ]
     resolved_model = model or _resolve_default_model()
-    resp = await provider.complete(
-        model=resolved_model,
-        messages=[Message(role="user", content=content)],
-        max_tokens=max_tokens,
-    )
-    return resp.message.content if resp and resp.message else ""
+
+    async def _attempt(prov: Any, model_name: str) -> Any:
+        return await prov.complete(
+            model=model_name,
+            messages=[Message(role="user", content=content)],
+            max_tokens=max_tokens,
+        )
+
+    return await _aux_call_with_fallback(_attempt, resolved_model)
+
+
+def _record_aux_cost(provider: Any, model: str, resp: Any) -> None:
+    """Hermes-followup 2026-05-07 — record aux LLM call into active session.
+
+    Best-effort. No-op when no session is active. Centralised so the
+    three aux_llm callers stay one-liners.
+    """
+    try:
+        from opencomputer.agent.usage_pricing import record_response_for_provider
+
+        record_response_for_provider(provider=provider, model=model, response=resp)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 __all__ = [
+    "aux_cache_stats",
+    "clear_aux_response_cache",
     "complete_text",
     "complete_text_sync",
     "complete_video",

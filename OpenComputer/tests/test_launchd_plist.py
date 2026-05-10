@@ -61,6 +61,32 @@ def test_template_carries_load_bearing_keys() -> None:
         assert required in raw, f"missing required key/value: {required}"
 
 
+def test_keepalive_uses_dict_not_bool() -> None:
+    """Regression guard for the 2026-05-08 respawn-loop incident.
+
+    KeepAlive=<true/> means launchd respawns even after intentional
+    SIGTERM, making the daemon impossible to stop. The dict form
+    (SuccessfulExit=false, Crashed=true) restores user control:
+    ``oc service stop`` actually stops it, but a real crash still
+    triggers the desired auto-recovery.
+    """
+    raw = TEMPLATE.read_text()
+    assert "<key>SuccessfulExit</key>" in raw, (
+        "KeepAlive must be a dict with SuccessfulExit=false, "
+        "not <true/> — see 2026-05-08 incident in plist comments"
+    )
+    assert "<key>Crashed</key>" in raw
+    # The bare ``<key>KeepAlive</key>\n    <true/>`` pattern must be
+    # absent. Looking for the next non-whitespace token after the
+    # KeepAlive opener.
+    keep_idx = raw.index("<key>KeepAlive</key>")
+    after = raw[keep_idx + len("<key>KeepAlive</key>"):].lstrip()
+    assert not after.startswith("<true/>"), (
+        "KeepAlive uses raw <true/> — convert to <dict>...</dict> "
+        "(see 2026-05-08 incident)"
+    )
+
+
 def test_install_sh_syntax_is_valid() -> None:
     """``bash -n`` parse-only check — catches typos before they hit a user."""
     result = subprocess.run(

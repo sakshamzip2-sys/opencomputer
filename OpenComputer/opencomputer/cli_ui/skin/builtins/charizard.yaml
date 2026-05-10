@@ -1,0 +1,49 @@
+name: charizard
+description: Burnt orange + ember, dragon register.
+
+colors:
+  # Banner
+  banner_border:    "#9A3412"
+  banner_title:     "#EA580C"
+  banner_accent:    "#FB923C"
+  banner_dim:       "#7C2D12"
+  banner_text:      "#FFEDD5"
+  # UI semantic
+  ui_accent:        "#EA580C"
+  ui_label:         "#FB923C"
+  ui_ok:            "#4ADE80"
+  ui_error:         "#DC2626"
+  ui_warn:          "#FACC15"
+  # Prompt + input area
+  prompt:           "#FED7AA"
+  input_rule:       "#9A3412"
+  # Agent response box
+  response_border:  "#EA580C"
+  # Session badge + border
+  session_label:    "#FFEDD5"
+  session_border:   "#7C2D12"
+  # Status bars
+  status_bar_bg:    "#431407"
+  status_bar_fg:    "#FFEDD5"
+  voice_status_bg:  "#7C2D12"
+  # TUI selection highlight
+  selection_bg:     "#9A3412"
+  # Completion menu panes
+  completion_menu_bg:               "#431407"
+  completion_menu_current_bg:       "#9A3412"
+  completion_menu_meta_bg:          "#1F0700"
+  completion_menu_meta_current_bg:  "#7C2D12"
+  # Legacy / extra
+  agent_text:       "#FFEDD5"
+  agent_label:      "#EA580C"
+
+spinner:
+  thinking_verbs: [igniting, blazing, soaring, kindling]
+  wings: [["🔥", "🔥"], ["⟆", "⟇"]]
+  waiting_faces: ["(◕‿◕)", "(>‿<)", "(◔ᴗ◔)"]
+  thinking_faces: ["(◉‿◉)", "(✦‿✦)", "(◕ω◕)"]
+
+branding:
+  agent_name: "Charizard"
+  response_label: " 🔥 Char "
+  prompt_symbol: "🔥"

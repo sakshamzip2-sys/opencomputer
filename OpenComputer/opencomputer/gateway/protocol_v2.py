@@ -35,15 +35,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from opencomputer.gateway.protocol import (
     EVENT_ASSISTANT_MESSAGE,
     EVENT_ERROR,
+    EVENT_PERMISSION_REQUEST,
     EVENT_TOOL_CALL,
     EVENT_TOOL_RESULT,
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
     METHOD_HELLO,
+    METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_LIST,
     METHOD_SKILLS_LIST,
+    METHOD_SLASH_DISPATCH,
+    METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
     WireEvent,
     WireRequest,
@@ -62,18 +66,44 @@ class _StrictModel(BaseModel):
 
 
 class HelloParams(_StrictModel):
-    """Client capability declaration sent on connect."""
+    """Client capability declaration sent on connect.
+
+    v1.1 plan-1 M3.3 (2026-05-09) — :attr:`session_id` +
+    :attr:`last_event_seq` enable wire-reconnect replay. After the
+    server returns :class:`HelloResult`, it replays any events from
+    the per-session ring buffer with ``seq > last_event_seq`` so a
+    transient network drop doesn't cost the client visibility into
+    intermediate tool calls. Both fields are optional so old clients
+    that never disconnect mid-turn keep working unchanged.
+    """
 
     client: str  # e.g. "opencomputer-tui/0.1.0"
     capabilities: tuple[str, ...] = ()
+    session_id: str | None = None
+    last_event_seq: int | None = None
 
 
 class HelloResult(_StrictModel):
-    """Gateway capability response."""
+    """Gateway capability response.
+
+    v1.1 plan-1 M3.3 (2026-05-09) — when the client passes
+    :attr:`HelloParams.last_event_seq`, the server replays missed
+    events from the per-session ring buffer immediately after this
+    HelloResult and sets :attr:`gap_warning` if any events were lost
+    (i.e. the last_event_seq is older than the buffer can represent).
+    """
 
     server: str  # e.g. "opencomputer/0.1.0"
     capabilities: tuple[str, ...]
     protocol_version: int = 2
+    #: True when the client requested replay via ``last_event_seq`` and
+    #: that seq fell off the end of the ring buffer, so some events
+    #: were lost. Old clients (no ``last_event_seq``) always see False.
+    gap_warning: bool = False
+    #: Echoes the highest seq currently held in the per-session ring,
+    #: so reconnecting clients can detect immediately whether they
+    #: have a gap to worry about.
+    server_last_event_seq: int | None = None
 
 
 class ChatParams(_StrictModel):
@@ -141,6 +171,71 @@ class SteerSubmitResult(_StrictModel):
     queued_chars: int
 
 
+# 2026-05-07 PR6 — slash commands routed via wire (single source of truth
+# for the dashboard ChatPage palette and the Ink TUI).
+
+
+class SlashListParams(_StrictModel):
+    pass
+
+
+class SlashCommandInfo(_StrictModel):
+    name: str
+    description: str
+    aliases: tuple[str, ...] = ()
+
+
+class SlashListResult(_StrictModel):
+    commands: tuple[SlashCommandInfo, ...]
+
+
+class SlashDispatchParams(_StrictModel):
+    name: str
+    args: str = ""
+    session_id: str | None = None
+
+
+class SlashDispatchResult(_StrictModel):
+    output: str
+    side_effects: dict[str, Any] = Field(default_factory=dict)
+
+
+# v1.1 plan-1 M3.1 (2026-05-09) — permission request/response wire surface
+# for Tier-2 consent gates with no channel adapter bound.
+
+
+class PermissionRequestPayload(_StrictModel):
+    """Server → client event when a Tier-2 capability needs approval.
+
+    Emitted by ``EVENT_PERMISSION_REQUEST`` on a wire-bound session
+    that hits a Tier-2 capability without a channel adapter present
+    to ask the user. The client (TUI / IDE / dashboard) renders an
+    approval prompt to the user and replies via
+    :class:`PermissionResponseParams` keyed on ``request_id``.
+    """
+
+    request_id: str
+    session_id: str
+    capability_id: str
+    scope: str | None = None
+    context: str = ""
+    timeout_s: float = 300.0
+
+
+class PermissionResponseParams(_StrictModel):
+    """Client → server RPC carrying the user's approval decision."""
+
+    request_id: str
+    session_id: str
+    capability_id: str
+    decision: Literal["allow_once", "allow_always", "deny"]
+
+
+class PermissionResponseResult(_StrictModel):
+    request_id: str
+    resolved: bool
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -150,6 +245,9 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_SEARCH: (SearchParams, SearchResult),
     METHOD_SKILLS_LIST: (SkillsListParams, SkillsListResult),
     METHOD_STEER_SUBMIT: (SteerSubmitParams, SteerSubmitResult),
+    METHOD_SLASH_LIST: (SlashListParams, SlashListResult),
+    METHOD_SLASH_DISPATCH: (SlashDispatchParams, SlashDispatchResult),
+    METHOD_PERMISSION_RESPONSE: (PermissionResponseParams, PermissionResponseResult),
 }
 
 
@@ -200,6 +298,7 @@ EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_TOOL_RESULT: ToolResultPayload,
     EVENT_ASSISTANT_MESSAGE: AssistantMessagePayload,
     EVENT_ERROR: ErrorPayload,
+    EVENT_PERMISSION_REQUEST: PermissionRequestPayload,
 }
 
 
@@ -214,12 +313,21 @@ __all__ = [
     "METHOD_SEARCH",
     "METHOD_SKILLS_LIST",
     "METHOD_STEER_SUBMIT",
+    "METHOD_SLASH_LIST",
+    "METHOD_SLASH_DISPATCH",
+    "METHOD_PERMISSION_RESPONSE",
+    "SlashListParams",
+    "SlashListResult",
+    "SlashCommandInfo",
+    "SlashDispatchParams",
+    "SlashDispatchResult",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",
     "EVENT_TOOL_RESULT",
     "EVENT_ASSISTANT_MESSAGE",
     "EVENT_ERROR",
+    "EVENT_PERMISSION_REQUEST",
     # v2 method schemas
     "HelloParams",
     "HelloResult",
@@ -233,6 +341,9 @@ __all__ = [
     "SkillsListResult",
     "SteerSubmitParams",
     "SteerSubmitResult",
+    "PermissionRequestPayload",
+    "PermissionResponseParams",
+    "PermissionResponseResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",

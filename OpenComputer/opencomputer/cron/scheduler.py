@@ -21,11 +21,20 @@ Adapted from `sources/hermes-agent-2026.4.23/cron/scheduler.py` but slimmer:
   rather than a Hermes-specific `AIAgent` class.
 - Delivery is OC-native: telegram/discord/webhook channels resolved through
   the bundled adapter plugins.
+
+Hermes parity (2026-05-08):
+- :func:`_parse_wake_agent_marker` — last-line ``{"wakeAgent": false}`` JSON
+  marker on agent-path output suppresses delivery (silent tick).
+- :func:`_run_script_only` — ``--no-agent`` / ``--script`` script-only mode
+  bypasses the LLM entirely.
+- ``cron.wrap_response`` config — opt-in delivery wrap.
+- ``cron.script_timeout_seconds`` config — default timeout for script jobs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -60,6 +69,41 @@ DEFAULT_JOB_TIMEOUT_S = 2400
 
 DEFAULT_MAX_PARALLEL = 6
 """2x Hermes default after 2026-05-05 cap-doubling sweep (was 3)."""
+
+DEFAULT_SCRIPT_TIMEOUT_S = 120
+"""Default ``--no-agent`` script timeout. Overridden by ``cron.script_timeout_seconds``
+config or per-job ``script_timeout_seconds`` field. Hermes parity."""
+
+
+def _parse_wake_agent_marker(text: str) -> bool:
+    """Hermes parity: parse last non-empty stdout line as JSON.
+
+    If it's a dict with key ``wakeAgent`` set to ``False``, the scheduler
+    suppresses delivery for this tick (treat as silent).
+
+    Returns ``True`` (default — proceed with delivery) for:
+    - empty/whitespace-only output
+    - last line not valid JSON
+    - last line valid JSON but not a dict
+    - dict has no ``wakeAgent`` key
+    - dict has ``wakeAgent: True``
+
+    Returns ``False`` only when the last non-empty line is a JSON dict with
+    ``wakeAgent: false``.
+    """
+    if not text:
+        return True
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    last = lines[-1].strip()
+    try:
+        parsed = json.loads(last)
+    except (json.JSONDecodeError, ValueError):
+        return True
+    if not isinstance(parsed, dict):
+        return True
+    return bool(parsed.get("wakeAgent", True))
 
 
 def _now() -> datetime:
@@ -135,26 +179,77 @@ def _release_tick_lock(fd: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+class CronAgentLoopBuildError(RuntimeError):
+    """Raised when the cron scheduler cannot construct an AgentLoop.
+
+    Production-grade behavior: bubbles up to ``_run_one_job`` which
+    catches it and records the run as failed with the underlying error,
+    so the operator sees ``last_status=error`` + the reason in
+    ``last_error`` rather than a silent stub-runtime crash later.
+    """
+
+
 async def _build_agent_loop(job: dict[str, Any]) -> Any:
     """Construct a fresh :class:`AgentLoop` configured for a cron run.
 
     Cron jobs run in their own session, in plan mode by default, with a
     capped iteration budget. The loop inherits the active provider plugin
     from config — there's no per-job provider override.
+
+    Hermes parity (2026-05-08): ``enabled_toolsets`` on the job dict
+    becomes ``loop.allowed_tools``. ``None`` = inherit full tool set;
+    ``[]`` = no tools (pure-reasoning cron); list of names = only those
+    tools dispatchable. Closes the silent gap where the field was stored
+    on the job but never applied at run time.
+
+    Production-grade (2026-05-09): provider resolution failures raise
+    :class:`CronAgentLoopBuildError` instead of returning a silent stub.
+    The stub fallback hid runtime breakage; failing fast surfaces the
+    issue in ``last_error`` where operators can see it.
+
+    Two latent bugs fixed earlier:
+      1. ``Config.with_loop_overrides`` doesn't exist (Config is a frozen
+         dataclass) — uses ``dataclasses.replace`` instead.
+      2. ``AgentLoop(config=cfg)`` is missing the required ``provider``
+         arg — resolves via ``_resolve_provider`` like the rest of the
+         codebase.
     """
+    import dataclasses
+
     from opencomputer.agent.config_store import load_config
     from opencomputer.agent.loop import AgentLoop
 
     cfg = load_config()
 
     # Cron sessions are short-lived; cap iterations tighter than interactive default.
-    cfg = cfg.with_loop_overrides(max_iterations=min(cfg.loop.max_iterations, 30))
+    capped_iters = min(cfg.loop.max_iterations, 30)
+    if capped_iters != cfg.loop.max_iterations:
+        new_loop = dataclasses.replace(cfg.loop, max_iterations=capped_iters)
+        cfg = dataclasses.replace(cfg, loop=new_loop)
 
-    return AgentLoop(
-        config=cfg,
-        # plan_mode + yolo_mode are surfaced via RuntimeContext at run-time
-        # rather than baked into the loop itself.
-    )
+    try:
+        from opencomputer.cli import _resolve_provider
+        provider = _resolve_provider(cfg.model.provider)
+    except Exception as exc:
+        raise CronAgentLoopBuildError(
+            f"cron: cannot resolve provider {cfg.model.provider!r} "
+            f"({type(exc).__name__}: {exc}). Check plugin activation + config."
+        ) from exc
+
+    if provider is None:
+        raise CronAgentLoopBuildError(
+            f"cron: provider {cfg.model.provider!r} resolved to None. "
+            "The provider plugin may not be loaded in this profile."
+        )
+
+    loop = AgentLoop(provider=provider, config=cfg)
+
+    # Hermes parity: enabled_toolsets actually applied at run time.
+    toolsets = job.get("enabled_toolsets")
+    if toolsets is not None:
+        loop.allowed_tools = frozenset(toolsets)
+
+    return loop
 
 
 def _build_context_from_block(job: dict[str, Any]) -> str:
@@ -192,6 +287,11 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
 
     For ``--prompt`` jobs: returns the prompt verbatim with a cron-context header.
     For ``--skill`` jobs: returns "use the X skill" so the agent self-invokes.
+
+    Hermes parity (2026-05-08): ``skills: list[str]`` takes precedence
+    over singular ``skill``. Multi-skill jobs ask the agent to chain the
+    skills and produce a combined report.
+
     Wave 6.A: ``context_from`` block (if any) is prepended after the cron
     hint and before the user prompt.
     """
@@ -203,18 +303,37 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
         'exactly "[SILENT]" (nothing else) to suppress delivery.]\n\n'
     )
     upstream = _build_context_from_block(job)
-    if job.get("skill"):
-        return f"{cron_hint}{upstream}Use the `{job['skill']}` skill and report your findings."
+
+    # Hermes parity: prefer plural ``skills`` when present; fall back to
+    # singular ``skill`` for back-compat with pre-2026-05-08 jobs.json files.
+    skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
+    if skills:
+        if len(skills) == 1:
+            return f"{cron_hint}{upstream}Use the `{skills[0]}` skill and report your findings."
+        bulleted = "\n".join(f"- `{s}`" for s in skills)
+        return (
+            f"{cron_hint}{upstream}Use these skills together and combine the "
+            f"results into one report:\n{bulleted}"
+        )
+
     return cron_hint + upstream + (job.get("prompt") or "")
 
 
 async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]:
     """Run a single cron job. Returns ``(success, full_doc, final_response, error)``.
 
+    Hermes parity (2026-05-08): branches on ``no_agent`` to ``_run_script_only``
+    when the job is script-only (no LLM invocation). The agent path also
+    honors a final ``{"wakeAgent": false}`` JSON marker as a silent tick.
+
     Defence-in-depth: re-scan the prompt for threats before invoking the
     agent. A poisoned prompt that survived create-time scanning (e.g.
     via direct file edit) is blocked here too.
     """
+    # Hermes parity: --no-agent / --script branch (skip LLM entirely).
+    if job.get("no_agent"):
+        return await _run_script_only(job)
+
     from plugin_sdk.runtime_context import RuntimeContext
 
     job_id = job["id"]
@@ -290,8 +409,109 @@ async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]
     if final.strip() == "(No response generated)":
         final = ""
 
+    # Hermes parity: wakeAgent: false marker on last stdout line suppresses
+    # delivery (silent tick). The marker is removed from the saved doc too.
+    if not _parse_wake_agent_marker(final):
+        return True, "", SILENT_MARKER, None
+
     doc = _success_doc(job, full_prompt, final or "(empty response)")
     return True, doc, final, None
+
+
+# ---------------------------------------------------------------------------
+# Script-only jobs (Hermes parity, 2026-05-08)
+# ---------------------------------------------------------------------------
+
+
+async def _run_script_only(
+    job: dict[str, Any],
+) -> tuple[bool, str, str, str | None]:
+    """Hermes parity: ``--no-agent`` / ``--script`` script-only execution.
+
+    Runs a shell script under ``<profile_home>/scripts/<name>`` with a
+    timeout (``script_timeout_seconds`` per-job override, else
+    ``cron.script_timeout_seconds`` config, else
+    :data:`DEFAULT_SCRIPT_TIMEOUT_S`). No LLM invocation.
+
+    Returns ``(success, full_doc, response_text, error)`` matching the
+    agent-path return shape so ``_process_job`` doesn't need to branch.
+
+    Behavior:
+        Empty stdout (zero exit) → silent tick (``response_text =
+        SILENT_MARKER``). Caller suppresses delivery.
+        Non-empty stdout (zero exit) → response_text is stdout (rstripped).
+        Non-zero exit → ``success=False``, ``error`` includes exit code +
+        first 500 chars of stdout.
+        Timeout → ``success=False``, error includes timeout value.
+        Script not found → ``success=False``, error names the path.
+    """
+    from opencomputer.agent.config import _home
+
+    job_name = job.get("name", "?")
+    script_name = (job.get("script") or "").strip()
+    if not script_name:
+        error = "no_agent=True but no script supplied"
+        return False, _failed_doc(job, error), "", error
+
+    scripts_dir = _home() / "scripts"
+    script_path = scripts_dir / script_name
+    if not script_path.exists():
+        error = f"script {script_name!r} not found at {script_path}"
+        return False, _failed_doc(job, error), "", error
+
+    timeout = job.get("script_timeout_seconds")
+    if timeout is None:
+        try:
+            from opencomputer.agent.config_store import load_config
+            cfg = load_config()
+            timeout = getattr(cfg.cron, "script_timeout_seconds", DEFAULT_SCRIPT_TIMEOUT_S)
+        except Exception:  # noqa: BLE001
+            timeout = DEFAULT_SCRIPT_TIMEOUT_S
+
+    cwd = job.get("workdir") or None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(script_path),
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except OSError as exc:
+        error = f"failed to launch script {script_name!r}: {exc}"
+        return False, _failed_doc(job, error), "", error
+
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=float(timeout)
+        )
+    except TimeoutError:
+        try:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except TimeoutError:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        error = f"script {script_name!r} exceeded {timeout}s timeout"
+        logger.warning("Cron job '%s' (id=%s): %s", job_name, job["id"], error)
+        return False, _failed_doc(job, error), "", error
+
+    output_text = stdout_bytes.decode("utf-8", errors="replace").rstrip()
+    if proc.returncode != 0:
+        # Truncate the first 500 chars of output into the error to keep
+        # delivery messages readable.
+        snippet = output_text[:500]
+        error = f"script {script_name!r} exited {proc.returncode}: {snippet}"
+        logger.warning("Cron job '%s' (id=%s): %s", job_name, job["id"], error)
+        return False, _failed_doc(job, error), output_text, error
+
+    if not output_text.strip():
+        # Empty stdout = silent tick (Hermes pattern — common for watchdogs).
+        return True, _success_doc(job, f"[script: {script_name}]", "(silent tick)"), SILENT_MARKER, None
+
+    return True, _success_doc(job, f"[script: {script_name}]", output_text), output_text, None
 
 
 def _success_doc(job: dict[str, Any], prompt: str, response: str) -> str:
@@ -323,55 +543,175 @@ def _failed_doc(job: dict[str, Any], error: str) -> str:
 async def _deliver(job: dict[str, Any], content: str) -> str | None:
     """Best-effort delivery of cron output to the configured channel.
 
-    Returns ``None`` on success or no-op (``notify=None``); returns an error
-    string on failure. Failures are logged but never raise — the job result
-    is already saved to the output file.
+    Hermes parity (2026-05-08, hardened 2026-05-09): any channel
+    registered with the plugin registry is a valid notify target — the
+    spec lists 17+ platforms (telegram, discord, slack, whatsapp,
+    signal, matrix, mattermost, email, sms, homeassistant, dingtalk,
+    feishu, wecom, weixin, qqbot, teams, irc, webhook, etc.). Lookup
+    goes through the module-level ``registry.channels`` dict (the
+    canonical singleton — there is no ``PluginRegistry.instance()``
+    classmethod; the prior code had a latent bug that only manifested
+    if an unknown target was provided).
+
+    Special targets:
+        ``"local"`` / ``""`` / ``None`` → no-op (saved locally only).
+        ``"origin"`` → use the originating chat captured at create time
+            (``origin_platform`` + ``origin_chat_id`` + optional
+            ``origin_thread_id`` for Telegram topic threads). Falls
+            through to local-save when origin context is absent.
+
+    Target format::
+
+        ``<platform>``                 — uses env-var fallback if any
+        ``<platform>:<chat_id>``       — explicit chat
+        ``<platform>:<chat_id>:<thread_id>`` — chat + topic thread
+                                         (Telegram forum topics)
+
+    The third segment is opaque to ``_deliver``; if the adapter's
+    ``send()`` accepts a ``thread_id`` keyword, we forward it. Adapters
+    without thread support ignore the kwarg.
+
+    Returns ``None`` on success / no-op; returns an error string on
+    failure. Failures are logged but never raise — the job's output
+    file is already saved.
     """
     target = (job.get("notify") or "").strip().lower()
     if not target or target == "local":
         return None
 
+    # Hermes parity: notify="origin" → resolve to platform:chat_id[:thread_id]
+    # captured at create time. Falls through to local-save (None) silently
+    # when the origin context is missing — matches Hermes behavior of
+    # "default to local for non-messaging-spawned jobs."
+    if target == "origin":
+        plat = (job.get("origin_platform") or "").strip().lower()
+        chat = (job.get("origin_chat_id") or "").strip()
+        thread = (job.get("origin_thread_id") or "").strip()
+        if not plat or not chat:
+            logger.info(
+                "Cron job %s notify=origin but origin context missing; "
+                "saving locally only",
+                job.get("id", "?"),
+            )
+            return None
+        target = f"{plat}:{chat}:{thread}" if thread else f"{plat}:{chat}"
+
     try:
-        from opencomputer.plugins.registry import PluginRegistry
+        from opencomputer.plugins.registry import registry as plugin_registry
         from plugin_sdk.core import Platform
 
-        registry = PluginRegistry.instance()
-        platform_map = {"telegram": Platform.TELEGRAM, "discord": Platform.DISCORD}
-        platform = platform_map.get(target.split(":", 1)[0])
-        if platform is None:
-            return f"unknown notify target {target!r}"
+        plat_str, sep, suffix = target.partition(":")
 
-        adapter = registry.get_channel_adapter(platform)
+        try:
+            Platform(plat_str)  # validates against the enum
+        except ValueError:
+            return f"unknown notify target {target!r} (not in Platform enum)"
+
+        adapter = plugin_registry.channels.get(plat_str)
         if adapter is None:
-            return f"channel plugin {target!r} not enabled in this profile"
+            return f"channel plugin {plat_str!r} not enabled in this profile"
 
-        chat_id = _resolve_chat_id(target)
+        # Split optional thread_id (third colon-delimited segment).
+        thread_id: str | None = None
+        if ":" in suffix:
+            chat_id_raw, _, thread_id_raw = suffix.partition(":")
+            chat_id = chat_id_raw.strip() or None
+            thread_id = thread_id_raw.strip() or None
+        else:
+            chat_id = suffix.strip() or None
+
         if not chat_id:
-            return f"no chat_id resolved for {target!r}"
+            chat_id = _resolve_default_chat_id(plat_str)
+        if not chat_id:
+            return f"no chat_id resolved for {target!r}; use {plat_str}:<chat_id>"
 
-        await adapter.send(chat_id, content)
+        # Forward thread_id when the adapter accepts it, else fall back to
+        # the two-arg signature. ``inspect`` is local-only on send() so we
+        # only pay the cost on cron deliveries (not the hot path).
+        send_kwargs: dict[str, Any] = {}
+        if thread_id:
+            try:
+                import inspect
+                sig = inspect.signature(adapter.send)
+                if "thread_id" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
+                    send_kwargs["thread_id"] = thread_id
+                else:
+                    logger.debug(
+                        "adapter %s.send() lacks thread_id support; "
+                        "delivering without thread context",
+                        plat_str,
+                    )
+            except (TypeError, ValueError):
+                pass  # signature inspection failed — call without kwarg
+
+        await adapter.send(chat_id, content, **send_kwargs)
         return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("Cron delivery to %s failed: %s", target, exc)
         return str(exc)
 
 
-def _resolve_chat_id(target: str) -> str | None:
-    """Resolve a notify target string to a concrete chat_id.
+def _resolve_default_chat_id(platform: str) -> str | None:
+    """Resolve a bare ``"telegram"`` / ``"discord"`` to its env-var fallback.
 
-    ``"telegram"`` → reads ``TELEGRAM_CRON_CHAT_ID`` env var.
-    ``"telegram:12345"`` → returns ``"12345"``.
+    Other platforms have no env shortcut — callers must use the
+    ``<platform>:<chat_id>`` form. Returns ``None`` when no shortcut
+    is registered for the platform; ``_deliver`` then surfaces a clear
+    "use platform:<chat_id>" hint.
     """
-    if ":" in target:
-        return target.split(":", 1)[1].strip()
     env_map = {
         "telegram": "TELEGRAM_CRON_CHAT_ID",
         "discord": "DISCORD_CRON_CHANNEL",
     }
-    var = env_map.get(target.lower())
+    var = env_map.get(platform.lower())
     if not var:
         return None
     return os.environ.get(var, "").strip() or None
+
+
+def validate_notify_target(target: str | None) -> None:
+    """Validate a ``notify=`` target at create/edit time (production-grade).
+
+    Accepts:
+        * ``None`` / empty string / ``"local"`` (no-op delivery)
+        * ``"origin"`` (delivers back to originating chat at run time)
+        * ``"<platform>"`` for platforms with env-var shortcuts (telegram, discord)
+        * ``"<platform>:<chat_id>"`` for any registered Platform
+        * ``"<platform>:<chat_id>:<thread_id>"`` (Telegram topics)
+
+    Raises ``ValueError`` with a helpful message on invalid input.
+    Plugin-presence is NOT checked here (the channel may load later in
+    the daemon's lifecycle); only the platform name is validated against
+    the ``Platform`` enum.
+    """
+    if not target:
+        return
+    target_norm = target.strip().lower()
+    if target_norm in ("local", "origin"):
+        return
+
+    from plugin_sdk.core import Platform
+
+    plat_str, _, suffix = target_norm.partition(":")
+    try:
+        Platform(plat_str)
+    except ValueError as exc:
+        valid = ", ".join(sorted(p.value for p in Platform))
+        raise ValueError(
+            f"notify target {target!r} has unknown platform {plat_str!r}. "
+            f"Valid platforms: {valid}. Or use 'local' / 'origin'."
+        ) from exc
+
+    # Telegram & discord allow bare form (env-var fallback at delivery).
+    # Other platforms require an explicit chat_id.
+    if not suffix and plat_str not in {"telegram", "discord"}:
+        raise ValueError(
+            f"notify target {target!r} requires a chat_id; "
+            f"use {plat_str}:<chat_id>[:<thread_id>]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -434,10 +774,29 @@ async def _process_job(job: dict[str, Any]) -> bool:
     try:
         success, full_doc, final_response, error = await _run_one_job(job)
 
-        out_file = save_job_output(job["id"], full_doc)
-        logger.info("Cron job '%s' output saved to %s", job["name"], out_file)
+        # full_doc may be empty for silent-tick paths (script-only empty
+        # stdout, wakeAgent: false agent response). Skip the file save in
+        # that case so we don't accumulate empty output dumps.
+        if full_doc:
+            out_file = save_job_output(job["id"], full_doc)
+            logger.info("Cron job '%s' output saved to %s", job["name"], out_file)
 
-        deliver_text = final_response if success else f"⚠️ Cron job '{job['name']}' failed:\n{error}"
+        # Hermes parity: cron.wrap_response controls delivery shape.
+        # Default False = raw response (existing OC behavior). True =
+        # delivered text wraps in the same Markdown header that the saved
+        # output file uses (job name, run time, schedule).
+        wrap_response = False
+        try:
+            from opencomputer.agent.config_store import load_config
+            cfg = load_config()
+            wrap_response = bool(getattr(cfg.cron, "wrap_response", False))
+        except Exception:  # noqa: BLE001
+            pass
+
+        if success:
+            deliver_text = full_doc if wrap_response else final_response
+        else:
+            deliver_text = f"⚠️ Cron job '{job['name']}' failed:\n{error}"
         delivery_error: str | None = None
 
         if deliver_text:
@@ -445,7 +804,8 @@ async def _process_job(job: dict[str, Any]) -> bool:
             if not silent:
                 delivery_error = await _deliver(job, deliver_text)
 
-        # Empty response = soft failure
+        # Empty response = soft failure (only for agent-path; script-path
+        # silent tick correctly carries SILENT_MARKER as final_response).
         if success and not final_response:
             success = False
             error = "agent ran but produced no response"
@@ -490,6 +850,7 @@ async def run_scheduler_loop(*, interval_s: int = DEFAULT_TICK_INTERVAL_S) -> No
 __all__ = [
     "DEFAULT_JOB_TIMEOUT_S",
     "DEFAULT_MAX_PARALLEL",
+    "DEFAULT_SCRIPT_TIMEOUT_S",
     "DEFAULT_TICK_INTERVAL_S",
     "SILENT_MARKER",
     "run_scheduler_loop",

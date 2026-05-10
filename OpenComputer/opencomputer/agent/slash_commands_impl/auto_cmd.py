@@ -63,6 +63,19 @@ class AutoCommand(SlashCommand):
         if new_state:
             runtime.custom["permission_mode"] = "auto"
             runtime.custom["yolo_session"] = True  # legacy compat
+            # M9.3: explicit user re-arm clears any prior block budget.
+            # If the M9.2 classifier had paused auto mode after 3
+            # consecutive / 20 total blocks, `/auto on` is the canonical
+            # resume signal — the user has acknowledged the pause.
+            paused_session = runtime.custom.pop("m9_3_paused_session", None)
+            if paused_session:
+                try:
+                    from opencomputer.agent.tool_call_classifier import (
+                        reset_block_budget as _m93_reset,
+                    )
+                    _m93_reset(paused_session)
+                except Exception:  # noqa: BLE001 — never let reset failure block /auto
+                    pass
         else:
             # Only clear the canonical key if it was set to AUTO; users may
             # have toggled to a different mode and we don't want /auto off to
@@ -70,6 +83,7 @@ class AutoCommand(SlashCommand):
             if runtime.custom.get("permission_mode") == "auto":
                 runtime.custom.pop("permission_mode", None)
             runtime.custom.pop("yolo_session", None)
+            runtime.custom.pop("m9_3_paused_session", None)
 
         msg = _ON_MESSAGE if new_state else _OFF_MESSAGE
         return SlashCommandResult(output=msg, handled=True)

@@ -10,6 +10,7 @@ background (kimi-cli pattern) so startup stays fast.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -34,6 +35,54 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 ConnectionState = Literal["connected", "disconnected", "error"]
 
 logger = logging.getLogger("opencomputer.mcp.client")
+
+
+#: Hermes-parity whitelist of parent env vars that MCP stdio subprocesses
+#: are allowed to inherit. Any other key — including everything that looks
+#: like a secret (API keys, tokens, OAuth credentials) — is stripped before
+#: spawn. ``XDG_*`` keys are admitted as a regex (see
+#: :func:`_build_mcp_subprocess_env`).
+#:
+#: Per-server ``env:`` declarations in ``mcp_servers.<name>.env`` config
+#: still pass through (caller intent — that's the whole point of the
+#: explicit declaration).
+_MCP_SAFE_ENV_KEYS: frozenset[str] = frozenset({
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
+})
+
+
+def _build_mcp_subprocess_env(
+    parent_env: dict[str, str],
+    declared_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Return the env dict an MCP stdio subprocess should receive.
+
+    Hermes-parity strict filter: only ``_MCP_SAFE_ENV_KEYS`` and any
+    ``XDG_*`` key from the parent env are admitted; everything else
+    (API keys, OAuth tokens, gateway credentials) is stripped.
+    Per-server ``declared_env`` (from ``mcp_servers.<name>.env``)
+    layers on top — this is explicit caller intent and IS allowed
+    through, since the user typed it into config.yaml deliberately.
+
+    Args:
+        parent_env: snapshot of the parent process's env (typically
+            ``os.environ.copy()``).
+        declared_env: explicit env list from the MCP server's config
+            (e.g., ``GITHUB_PERSONAL_ACCESS_TOKEN: ghp_...``). May be
+            ``None`` or empty.
+
+    Returns:
+        A new dict with the filtered env. Safe to pass directly to
+        ``StdioServerParameters(env=...)``.
+    """
+    out: dict[str, str] = {
+        k: v
+        for k, v in parent_env.items()
+        if k in _MCP_SAFE_ENV_KEYS or k.startswith("XDG_")
+    }
+    if declared_env:
+        out.update(declared_env)
+    return out
 
 
 class MCPLaunchBlockedError(RuntimeError):
@@ -73,6 +122,23 @@ class _OSVSecurityEvent(SignalEvent):
     high_severity: bool = False
     vuln_ids: tuple[str, ...] = ()
     blocked: bool = False
+
+
+def _passes_tool_filter(tool_name: str, cfg: MCPServerConfig) -> bool:
+    """Apply the per-server ``tools_allow`` / ``tools_deny`` filter (Wave 3).
+
+    Allow-list semantics:
+    - ``tools_allow=None`` (default) — no filter, every name passes.
+    - ``tools_allow=()`` (empty tuple) — deny all (no name matches an
+      empty allow-list; this is the intuitive reading).
+    - ``tools_allow=("a", "b")`` — only those names pass.
+
+    Deny-list applies AFTER allow-list. ``tools_deny=()`` (default) is a
+    no-op.
+    """
+    if cfg.tools_allow is not None and tool_name not in cfg.tools_allow:
+        return False
+    return not (cfg.tools_deny and tool_name in cfg.tools_deny)
 
 
 def _tool_is_internal(tool: Any) -> bool:
@@ -141,6 +207,10 @@ class MCPTool(BaseTool):
     """Tool that dispatches calls to an MCP session."""
 
     parallel_safe = False  # conservative — each server has its own state
+    #: G10 (Hermes parity, 2026-05-09) class-level default. Survives
+    #: ``MCPTool.__new__(MCPTool)`` constructions used by some test
+    #: doubles, so ``execute`` always finds a usable timeout value.
+    timeout: float = 30.0
 
     def __init__(
         self,
@@ -149,12 +219,15 @@ class MCPTool(BaseTool):
         description: str,
         parameters: dict[str, Any],
         session: ClientSession,
+        timeout: float = 30.0,
     ) -> None:
         self.server_name = server_name
         self.tool_name = tool_name
         self.description = description
         self.parameters = parameters
         self.session = session
+        # G10 (Hermes parity, 2026-05-09): per-tool-call timeout cap.
+        self.timeout = timeout
 
     @property
     def schema(self) -> ToolSchema:
@@ -168,8 +241,21 @@ class MCPTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        # Hermes-parity MCP credential redaction. MCP server output and
+        # exception strings can contain GitHub PATs, OpenAI-style keys,
+        # bearer tokens, postgres URLs etc. Pipe everything through the
+        # central redaction module BEFORE returning to the LLM.
+        from opencomputer.security.redact import redact_runtime_text
+
         try:
-            result = await self.session.call_tool(name=self.tool_name, arguments=call.arguments)
+            # G10 (Hermes parity, 2026-05-09): cap the per-tool-call wait
+            # so a wedged MCP server can't block the agent loop forever.
+            result = await asyncio.wait_for(
+                self.session.call_tool(
+                    name=self.tool_name, arguments=call.arguments
+                ),
+                timeout=self.timeout,
+            )
             # Convert MCP result to our string format — concatenate text blocks
             parts: list[str] = []
             is_error = bool(getattr(result, "isError", False))
@@ -180,17 +266,336 @@ class MCPTool(BaseTool):
                     parts.append("[image]")
                 else:
                     parts.append(str(block))
+            content = "\n".join(parts) or "[empty MCP response]"
             return ToolResult(
                 tool_call_id=call.id,
-                content="\n".join(parts) or "[empty MCP response]",
+                content=redact_runtime_text(content),
                 is_error=is_error,
             )
         except Exception as e:  # noqa: BLE001
+            err = (
+                f"MCP error from {self.server_name}.{self.tool_name}: "
+                f"{type(e).__name__}: {e}"
+            )
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP error from {self.server_name}.{self.tool_name}: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
+
+
+def hermes_alias_name(server_name: str, tool_name: str) -> str:
+    """Hermes-spec MCP tool name: ``mcp_<server>_<tool>`` (G8 — 2026-05-09).
+
+    OpenComputer's canonical form is ``<server>__<tool>`` (double underscore,
+    set in :class:`MCPTool.schema`). This helper produces the Hermes-spec
+    form for clients that key off it. Both names are registered side-by-side
+    via :class:`MCPAliasTool`, which keeps third-party tools written against
+    either spec discovering the toolset correctly.
+    """
+    return f"mcp_{server_name}_{tool_name}"
+
+
+class MCPAliasTool(BaseTool):
+    """Hermes-spec name alias for an :class:`MCPTool` (G8 — 2026-05-09).
+
+    Re-publishes a canonical :class:`MCPTool` under the Hermes-spec name
+    (``mcp_<server>_<tool>``) without duplicating the underlying MCP
+    session call. ``execute`` is a thin pass-through to the canonical
+    tool's dispatch path; both names invoke the same MCP server tool.
+
+    Avoids :class:`ToolRegistry` ``schema_name`` collision because each
+    alias has a distinct schema name from its canonical sibling.
+    """
+
+    parallel_safe = False  # mirrors MCPTool's conservative posture
+
+    def __init__(self, canonical: MCPTool) -> None:
+        self._canonical = canonical
+
+    @property
+    def server_name(self) -> str:
+        """Forward ``server_name`` so callers iterating mixed lists work."""
+        return self._canonical.server_name
+
+    @property
+    def tool_name(self) -> str:
+        """Forward ``tool_name`` so callers iterating mixed lists work."""
+        return self._canonical.tool_name
+
+    @property
+    def schema(self) -> ToolSchema:
+        base = self._canonical.schema
+        return ToolSchema(
+            name=hermes_alias_name(
+                self._canonical.server_name, self._canonical.tool_name
+            ),
+            description=base.description,
+            parameters=base.parameters,
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        return await self._canonical.execute(call)
+
+
+# ─── T1 — MCP utility tools (resources / prompts) ─────────────────
+#
+# Hermes-doc parity: when an MCP server's ``initialize`` reply
+# advertises the ``resources`` capability, expose two helper tools
+# (``<server>__list_resources`` + ``<server>__read_resource``) so the
+# agent can enumerate + fetch resources without the server having to
+# wrap them as tools. Same for ``prompts``.
+
+
+def _serialize_resource(r: Any) -> dict[str, Any]:
+    """Lift an mcp.types.Resource into a JSON-safe dict."""
+    return {
+        "uri": getattr(r, "uri", None),
+        "name": getattr(r, "name", None),
+        "description": getattr(r, "description", None),
+        "mimeType": getattr(r, "mimeType", None),
+    }
+
+
+def _serialize_prompt(p: Any) -> dict[str, Any]:
+    return {
+        "name": getattr(p, "name", None),
+        "description": getattr(p, "description", None),
+        "arguments": [
+            {
+                "name": getattr(a, "name", None),
+                "description": getattr(a, "description", None),
+                "required": getattr(a, "required", False),
+            }
+            for a in (getattr(p, "arguments", None) or [])
+        ],
+    }
+
+
+class _MCPListResourcesTool(BaseTool):
+    """``<server>__list_resources`` — enumerate the server's resources."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__list_resources",
+            description=(
+                f"List resources exposed by MCP server '{self._server_name}'. "
+                "Returns a JSON array of {uri, name, description, mimeType}."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
+        try:
+            result = await self._session.list_resources()
+            payload = [_serialize_resource(r) for r in (getattr(result, "resources", None) or [])]
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(json.dumps(payload)),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.list_resources: {type(e).__name__}: {e}"
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(err),
+                is_error=True,
+            )
+
+
+class _MCPReadResourceTool(BaseTool):
+    """``<server>__read_resource(uri)`` — fetch one resource's contents."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__read_resource",
+            description=f"Read a resource by URI from MCP server '{self._server_name}'.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string", "description": "Resource URI"},
+                },
+                "required": ["uri"],
+            },
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
+        uri = call.arguments.get("uri")
+        if not uri:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="Missing required argument 'uri'.",
+                is_error=True,
+            )
+        try:
+            result = await self._session.read_resource(uri)
+            contents = getattr(result, "contents", None) or []
+            payload = {
+                "contents": [
+                    {"uri": getattr(c, "uri", None), "text": getattr(c, "text", None)}
+                    for c in contents
+                ],
+            }
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(json.dumps(payload)),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.read_resource: {type(e).__name__}: {e}"
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(err),
+                is_error=True,
+            )
+
+
+class _MCPListPromptsTool(BaseTool):
+    """``<server>__list_prompts`` — enumerate prompts the server offers."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__list_prompts",
+            description=(
+                f"List prompts exposed by MCP server '{self._server_name}'. "
+                "Returns a JSON array of {name, description, arguments}."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
+        try:
+            result = await self._session.list_prompts()
+            payload = [_serialize_prompt(p) for p in (getattr(result, "prompts", None) or [])]
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(json.dumps(payload)),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.list_prompts: {type(e).__name__}: {e}"
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(err),
+                is_error=True,
+            )
+
+
+class _MCPGetPromptTool(BaseTool):
+    """``<server>__get_prompt(name, arguments?)`` — render a server prompt."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__get_prompt",
+            description=f"Get a prompt by name from MCP server '{self._server_name}'.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Prompt name"},
+                    "arguments": {
+                        "type": "object",
+                        "description": "Prompt template arguments (optional).",
+                    },
+                },
+                "required": ["name"],
+            },
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
+        name = call.arguments.get("name")
+        if not name:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="Missing required argument 'name'.",
+                is_error=True,
+            )
+        arguments = call.arguments.get("arguments")
+        try:
+            result = await self._session.get_prompt(name, arguments=arguments)
+            messages = getattr(result, "messages", None) or []
+            payload = {"messages": [m if isinstance(m, dict) else dict(m) for m in messages]}
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(json.dumps(payload, default=str)),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.get_prompt: {type(e).__name__}: {e}"
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(err),
+                is_error=True,
+            )
+
+
+def _build_utility_tools(
+    server_name: str,
+    session: Any,
+    capabilities: dict[str, Any] | None,
+    *,
+    prompts_enabled: bool = True,
+    resources_enabled: bool = True,
+) -> list[BaseTool]:
+    """Return MCP resource/prompt utility tools, capability-gated.
+
+    ``capabilities`` is the ``capabilities`` block of the MCP server's
+    ``initialize`` reply (or ``None`` / empty dict when nothing was
+    advertised). Each present capability adds 2 tools.
+
+    G9 (Hermes parity, 2026-05-09): per-server ``prompts_enabled`` /
+    ``resources_enabled`` suppress the corresponding utility tools even
+    when the server advertises the capability. Default is to register
+    both, matching the prior behavior.
+    """
+    tools: list[BaseTool] = []
+    if not capabilities:
+        return tools
+    # An MCP capability is "advertised" when its key is present with a
+    # non-None value (the spec uses an empty object ``{}`` to mean
+    # "supported, no sub-features").
+    if resources_enabled and capabilities.get("resources") is not None:
+        tools.append(_MCPListResourcesTool(server_name=server_name, session=session))
+        tools.append(_MCPReadResourceTool(server_name=server_name, session=session))
+    if prompts_enabled and capabilities.get("prompts") is not None:
+        tools.append(_MCPListPromptsTool(server_name=server_name, session=session))
+        tools.append(_MCPGetPromptTool(server_name=server_name, session=session))
+    return tools
 
 
 # ─── MCPConnection — one live server connection ───────────────────
@@ -201,7 +606,7 @@ class MCPConnection:
     config: MCPServerConfig
     session: ClientSession | None = None
     exit_stack: AsyncExitStack | None = None
-    tools: list[MCPTool] = field(default_factory=list)
+    tools: list[BaseTool] = field(default_factory=list)
     #: Lifecycle state used by :meth:`MCPManager.status_snapshot` (IV.4).
     #: Starts ``disconnected``; flips to ``connected`` after a successful
     #: ``connect()``, ``error`` on failure, and back to ``disconnected``
@@ -219,6 +624,16 @@ class MCPConnection:
     reconnect_attempts: int = 0
     #: T3 — start of current 60s reconnect window (monotonic).
     reconnect_window_start: float | None = None
+    #: Hermes-doc dynamic tool discovery — fired when the server pushes
+    #: ``notifications/tools/list_changed`` and reconciliation has updated
+    #: ``self.tools``. Callback receives ``(added: list[BaseTool],
+    #: removed: list[BaseTool])`` so the registry can sync. ``MCPManager``
+    #: wires this in :meth:`MCPManager.connect_all`. Synchronous — must
+    #: not block on the asyncio loop.
+    tools_changed_callback: Any = None
+    #: T3 (dynamic discovery) — true while reconciliation is in flight to
+    #: prevent re-entrant reconcile races on rapid notification bursts.
+    _reconcile_in_flight: bool = False
 
     def _osv_pre_flight(self, *, fail_closed: bool) -> str | None:
         """Run the OSV pre-flight check; return an error string if blocking.
@@ -324,30 +739,30 @@ class MCPConnection:
                         self.last_error = blocked
                         await self.disconnect(_preserve_error_state=True)
                         return False
-                # Layer the per-MCP config env on top of the parent's
-                # environment, then scope HOME / XDG_* to the active
-                # profile. This gives MCP servers per-profile credential
-                # isolation (git/ssh/npm caches) without polluting the
-                # parent process — see _apply_profile_override in cli.py
-                # for the architectural rationale.
+                # Strict env filter (Hermes parity): only safe parent
+                # vars + XDG_* + per-MCP declared env reach the
+                # subprocess. Then profile-scope HOME / XDG_* so MCP
+                # servers get per-profile credential isolation
+                # (git/ssh/npm caches).
                 try:
                     from opencomputer.profiles import (
                         read_active_profile,
                         scope_subprocess_env,
                     )
 
-                    base_env = os.environ.copy()
-                    if self.config.env:
-                        base_env.update(self.config.env)
+                    filtered = _build_mcp_subprocess_env(
+                        dict(os.environ), self.config.env,
+                    )
                     spawn_env = scope_subprocess_env(
-                        base_env, profile=read_active_profile()
+                        filtered, profile=read_active_profile()
                     )
                 except Exception:
                     # Defensive — never block an MCP launch on profile
-                    # lookup edge cases. Fall back to the per-config env
-                    # only (or None for parent inheritance), preserving
-                    # the previous behaviour.
-                    spawn_env = self.config.env or None
+                    # lookup edge cases. Fall back to the strict filter
+                    # alone (still secret-safe).
+                    spawn_env = _build_mcp_subprocess_env(
+                        dict(os.environ), self.config.env,
+                    )
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=list(self.config.args),
@@ -380,8 +795,18 @@ class MCPConnection:
                     f"(supported: stdio, sse, http)"
                 )
 
+            # T71 — sampling/createMessage host bridge. Lets MCP servers
+            # ask US to run LLM completions; we route through aux_llm so
+            # the configured provider (+ fallback chain) handles them.
+            from opencomputer.mcp.sampling import make_sampling_callback
+
             session = await self.exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
+                ClientSession(
+                    read_stream,
+                    write_stream,
+                    message_handler=self._handle_session_message,
+                    sampling_callback=make_sampling_callback(),
+                )
             )
             init_result = await session.initialize()
             # Capture server version from the InitializeResult.serverInfo block
@@ -399,6 +824,7 @@ class MCPConnection:
             # them in its schema. P-16 sub-item (a).
             tool_list = await session.list_tools()
             hidden = 0
+            filtered = 0
             for t in tool_list.tools:
                 if _tool_is_internal(t):
                     hidden += 1
@@ -408,20 +834,63 @@ class MCPConnection:
                         t.name,
                     )
                     continue
-                self.tools.append(
-                    MCPTool(
-                        server_name=self.config.name,
-                        tool_name=t.name,
-                        description=t.description or "",
-                        parameters=t.inputSchema or {"type": "object", "properties": {}},
-                        session=session,
+                # Wave 3 (2026-05-08) — per-server tools_allow / tools_deny.
+                if not _passes_tool_filter(t.name, self.config):
+                    filtered += 1
+                    logger.debug(
+                        "MCP server '%s' tool '%s' filtered by tools_allow/tools_deny",
+                        self.config.name,
+                        t.name,
                     )
+                    continue
+                tool_obj = MCPTool(
+                    server_name=self.config.name,
+                    tool_name=t.name,
+                    description=t.description or "",
+                    parameters=t.inputSchema or {"type": "object", "properties": {}},
+                    session=session,
+                    timeout=self.config.timeout,
                 )
+                self.tools.append(tool_obj)
+                # G8 (Hermes parity, 2026-05-09): also register the
+                # spec-named ``mcp_<server>_<tool>`` alias as a sibling.
+                self.tools.append(MCPAliasTool(tool_obj))
             if hidden:
                 logger.info(
                     "MCP server '%s' suppressed %d internal tool(s)",
                     self.config.name,
                     hidden,
+                )
+            if filtered:
+                logger.info(
+                    "MCP server '%s' filtered %d tool(s) per tools_allow/tools_deny",
+                    self.config.name,
+                    filtered,
+                )
+
+            # T1 — register Hermes-doc utility tools when the server
+            # advertises ``resources`` / ``prompts`` capabilities. The
+            # ServerCapabilities object exposes one attribute per
+            # capability; presence (non-None) means "supported."
+            try:
+                caps_obj = getattr(init_result, "capabilities", None)
+                cap_dict: dict[str, Any] = {
+                    "resources": getattr(caps_obj, "resources", None),
+                    "prompts": getattr(caps_obj, "prompts", None),
+                }
+                for utility in _build_utility_tools(
+                    self.config.name,
+                    session,
+                    cap_dict,
+                    prompts_enabled=self.config.prompts_enabled,
+                    resources_enabled=self.config.resources_enabled,
+                ):
+                    self.tools.append(utility)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "MCP server '%s' utility-tool registration skipped (defensive)",
+                    self.config.name,
+                    exc_info=True,
                 )
             self.state = "connected"
             self.connect_time = time.monotonic()
@@ -438,6 +907,115 @@ class MCPConnection:
             self.last_error = f"{type(e).__name__}: {e}"
             await self.disconnect(_preserve_error_state=True)
             return False
+
+    async def _handle_session_message(self, message: Any) -> None:
+        """Receive notifications from the MCP server.
+
+        Hermes-doc dynamic discovery: when a ``notifications/tools/list_changed``
+        arrives, schedule a tool-list reconciliation in the background.
+        Other notifications (logging/progress/etc.) are ignored — the
+        SDK's default handler already logs them at debug level.
+        """
+        # Lazy-import to avoid a hard dep on mcp.types in unit tests that
+        # mock MCPConnection's internals.
+        try:
+            from mcp.types import (
+                ServerNotification,
+                ToolListChangedNotification,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        # Notifications arrive wrapped in a ServerNotification union; the
+        # inner ``root`` carries the typed notification.
+        notif = getattr(message, "root", message)
+        if isinstance(message, ServerNotification):
+            notif = message.root
+        if isinstance(notif, ToolListChangedNotification):
+            if self._reconcile_in_flight:
+                return
+            self._reconcile_in_flight = True
+            asyncio.create_task(self._reconcile_tools_safely())
+
+    async def _reconcile_tools_safely(self) -> None:
+        try:
+            await self._reconcile_tools()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "MCP server '%s' reconcile failed: %s",
+                self.config.name,
+                exc,
+            )
+        finally:
+            self._reconcile_in_flight = False
+
+    async def _reconcile_tools(self) -> None:
+        """Re-fetch tools from the live session and diff against ``self.tools``.
+
+        Notifies ``tools_changed_callback`` with ``(added, removed)`` so
+        the registry can sync. Internal tools and per-server filter
+        rules are honored.
+        """
+        if self.session is None:
+            return
+        tool_list = await self.session.list_tools()
+        # Build the desired tool set with the same filter rules as connect().
+        new_tools_by_name: dict[str, BaseTool] = {}
+        allow = self.config.tools_allow
+        deny = self.config.tools_deny or ()
+        for t in tool_list.tools:
+            if _tool_is_internal(t):
+                continue
+            if allow is not None and t.name not in allow:
+                continue
+            if t.name in deny:
+                continue
+            new_tools_by_name[t.name] = MCPTool(
+                server_name=self.config.name,
+                tool_name=t.name,
+                description=t.description or "",
+                parameters=t.inputSchema or {"type": "object", "properties": {}},
+                session=self.session,
+                timeout=self.config.timeout,
+            )
+        old_tools_by_name = {tool.tool_name: tool for tool in self.tools if isinstance(tool, MCPTool)}
+        added_names = set(new_tools_by_name) - set(old_tools_by_name)
+        removed_names = set(old_tools_by_name) - set(new_tools_by_name)
+        added = [new_tools_by_name[n] for n in added_names]
+        removed = [old_tools_by_name[n] for n in removed_names]
+        # Update self.tools — preserve utility tools (resources/prompts)
+        # because list_changed only signals tool-list changes.
+        # G8 (2026-05-09): MCPAliasTool entries are regenerated below
+        # so they always point at the live canonical MCPTool.
+        utility_tools = [
+            t
+            for t in self.tools
+            if not isinstance(t, (MCPTool, MCPAliasTool))
+        ]
+        # Keep tools that survived (in old + new) plus the new ones.
+        survivors = [
+            old_tools_by_name[n] for n in (set(old_tools_by_name) & set(new_tools_by_name))
+        ]
+        canonical_after = survivors + added
+        # G8: re-issue Hermes-spec aliases for every canonical tool.
+        aliases = [MCPAliasTool(t) for t in canonical_after]
+        self.tools = canonical_after + aliases + utility_tools
+        if added or removed:
+            logger.info(
+                "MCP server '%s' tools/list_changed: +%d -%d",
+                self.config.name,
+                len(added),
+                len(removed),
+            )
+            cb = self.tools_changed_callback
+            if cb is not None:
+                try:
+                    cb(self, added, removed)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "MCP server '%s' tools_changed_callback failed: %s",
+                        self.config.name,
+                        exc,
+                    )
 
     async def disconnect(self, *, _preserve_error_state: bool = False) -> None:
         if self.exit_stack is not None:
@@ -564,7 +1142,10 @@ class MCPManager:
         for cfg in servers:
             if not cfg.enabled:
                 continue
-            conn = MCPConnection(config=cfg)
+            conn = MCPConnection(
+                config=cfg,
+                tools_changed_callback=self._on_connection_tools_changed,
+            )
             ok = await conn.connect(
                 osv_check_enabled=osv_check_enabled,
                 osv_check_fail_closed=osv_check_fail_closed,
@@ -579,6 +1160,37 @@ class MCPManager:
                 except ValueError:
                     logger.warning("MCP tool name collision (skipped): %s", tool.schema.name)
         return total
+
+    def _on_connection_tools_changed(
+        self,
+        conn: MCPConnection,
+        added: list[BaseTool],
+        removed: list[BaseTool],
+    ) -> None:
+        """Sync the tool registry when an MCP server pushes tools/list_changed.
+
+        Called synchronously from the connection's reconcile loop. Both
+        registry mutations (unregister + register) are best-effort;
+        unknown-name unregister is logged but not raised.
+        """
+        for tool in removed:
+            try:
+                self.tool_registry.unregister(tool.schema.name)
+            except KeyError:
+                logger.debug(
+                    "MCP server '%s' removed tool %s already absent from registry",
+                    conn.config.name,
+                    tool.schema.name,
+                )
+        for tool in added:
+            try:
+                self.tool_registry.register(tool)
+            except ValueError:
+                logger.warning(
+                    "MCP server '%s' tool name collision on dynamic add: %s",
+                    conn.config.name,
+                    tool.schema.name,
+                )
 
     async def shutdown(self) -> None:
         """Disconnect all servers and remove their tools from the registry."""

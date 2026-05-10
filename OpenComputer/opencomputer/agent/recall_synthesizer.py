@@ -187,6 +187,16 @@ def synthesize_recall(
         _log.debug("recall synthesizer: LLM call failed: %s", exc)
         return None
 
+    # Hermes-followup 2026-05-07 — record cost into active session.
+    try:
+        from opencomputer.agent.usage_pricing import record_response_for_provider
+
+        record_response_for_provider(
+            provider=provider, model=_SYNTH_MODEL, response=response
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     if not text or not text.strip():
         return None
 

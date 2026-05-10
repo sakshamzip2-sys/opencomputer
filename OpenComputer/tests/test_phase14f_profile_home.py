@@ -375,9 +375,15 @@ class TestMemoryManagerReadSoul:
             declarative_path=tmp_path / "MEMORY.md",
             skills_path=tmp_path / "skills",
             user_path=tmp_path / "USER.md",
+            # Hermes v2 D4 (2026-05-08): isolate from the user's real
+            # ~/.opencomputer/SOUL.md global fallback — without this the
+            # test would resolve a global SOUL on dev machines where
+            # one is configured.
+            global_soul_path=tmp_path / "non-existent-global-SOUL.md",
         )
-        # Default soul_path is <declarative_path.parent>/SOUL.md which doesn't
-        # exist in this fresh tmp — should return "".
+        # Per-profile soul_path defaults to <declarative_path.parent>/SOUL.md
+        # which doesn't exist in this fresh tmp; global_soul_path also
+        # points at a non-existent file — should return "".
         assert mem.read_soul() == ""
 
     def test_memory_manager_read_soul_reads_from_file(self, tmp_path):

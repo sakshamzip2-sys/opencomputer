@@ -29,10 +29,18 @@ DELEGATE_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "AskUserQuestion",   # subagent has no user
     "Clarify",           # subagent has no user (Sub-project 1.G — same reason as AskUserQuestion)
     "ExitPlanMode",      # subagent doesn't own plan mode
+    # Hermes spec parity (2026-05-08): subagents must not write to shared
+    # persistent memory, push messages cross-platform, or run arbitrary
+    # code. Each escape vector is closed individually since explicit
+    # allowlists from the parent could otherwise re-grant them.
+    "Memory",            # no writes to shared persistent memory
+    "SendMessage",       # no cross-platform side effects
+    "ExecuteCode",       # no escape via arbitrary code execution
 })
 """Tools the parent must NEVER pass to a subagent. Caller-supplied
 `allowed_tools` containing any of these is a hard error; implicit-inherit
-strips them. Mirrors Hermes `DELEGATE_BLOCKED_TOOLS`."""
+strips them. Mirrors Hermes `DELEGATE_BLOCKED_TOOLS` (extended 2026-05-08
+to include Memory / SendMessage / ExecuteCode per the Hermes spec)."""
 
 
 class DelegateTool(BaseTool):
@@ -189,13 +197,87 @@ class DelegateTool(BaseTool):
                             "Defaults to false when omitted."
                         ),
                     },
+                    # v1.1 plan-2 M4.1 + M4.2 (2026-05-09): per-subagent
+                    # filesystem isolation. 'none' (default) shares parent
+                    # cwd. 'worktree' = git worktree on a fresh branch
+                    # (parent must be in a git repo). 'copy' = shutil.copytree
+                    # to a tmpdir (works on non-git cwd; honours
+                    # .opencomputer/sandbox.ignore for skipping node_modules).
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["none", "worktree", "copy"],
+                        "description": (
+                            "Per-subagent filesystem isolation. 'none' (default) "
+                            "= share parent cwd. 'worktree' = git worktree on a "
+                            "fresh branch (parent must be in a git repo). "
+                            "'copy' = shutil.copytree to a tmpdir. Use 'worktree' "
+                            "for parallel agents editing the same files; 'copy' "
+                            "for one-shot exploration that mustn't touch the "
+                            "working tree."
+                        ),
+                    },
+                    # Hermes parity (2026-05-08): parallel batch shape.
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "context": {"type": "string"},
+                                "toolsets": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["goal"],
+                        },
+                        "description": (
+                            "Hermes parity: parallel batch. Mutually "
+                            "exclusive with `task`. Each entry runs in its "
+                            "own subagent with isolated context. Concurrency "
+                            "capped by LoopConfig.max_concurrent_children "
+                            "(default 3); batches larger than that cap return "
+                            "a tool error rather than silently truncating."
+                        ),
+                    },
+                    # Hermes parity (2026-05-08): role-based nested delegation.
+                    "role": {
+                        "type": "string",
+                        "enum": ["leaf", "orchestrator"],
+                        "description": (
+                            "Hermes parity. 'leaf' (default) — subagent "
+                            "cannot delegate. 'orchestrator' — subagent "
+                            "retains the delegate tool, allowing nested "
+                            "delegation up to LoopConfig.max_delegation_depth. "
+                            "Requires LoopConfig.orchestrator_enabled=True. "
+                            "Cost warning: depth=3 + concurrency=3 yields up "
+                            "to 27 leaves; default depth=4 / concurrency=3 = "
+                            "up to 81. Use orchestrators sparingly."
+                        ),
+                    },
                 },
-                "required": ["task"],
+                # `task` is no longer required when `tasks` is supplied — the
+                # execute() handler enforces mutual exclusion at runtime.
+                "required": [],
             },
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        task = call.arguments.get("task", "").strip()
+        # Hermes parity (2026-05-08): tasks=[...] parallel batch.
+        # Mutually exclusive with single-task `task` arg.
+        raw_tasks = call.arguments.get("tasks")
+        raw_task = (call.arguments.get("task") or "").strip()
+        if raw_tasks is not None and raw_task:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="Error: supply either `task` OR `tasks`, not both.",
+                is_error=True,
+            )
+        if raw_tasks is not None:
+            return await self._execute_batch(call.id, raw_tasks)
+
+        task = raw_task
         if not task:
             return ToolResult(
                 tool_call_id=call.id,
@@ -226,6 +308,37 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+
+        # Hermes parity (2026-05-08): role-based nested delegation.
+        # role="orchestrator" + orchestrator_enabled=True keeps `delegate` in
+        # the child's allowlist so the child can spawn its own leaves. At
+        # max_depth, promote orchestrator → leaf with a warning (no point
+        # giving an orchestrator role to a child that can't spawn anyway).
+        raw_role = (call.arguments.get("role") or "leaf").strip().lower()
+        if raw_role not in ("leaf", "orchestrator"):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: 'role' must be 'leaf' or 'orchestrator' "
+                    f"(got {raw_role!r})."
+                ),
+                is_error=True,
+            )
+        orchestrator_enabled = True
+        if parent_loop is not None and hasattr(parent_loop, "config"):
+            orchestrator_enabled = getattr(
+                parent_loop.config.loop, "orchestrator_enabled", True
+            )
+        is_orchestrator = (raw_role == "orchestrator") and orchestrator_enabled
+        if is_orchestrator and self._current_runtime.delegation_depth + 1 >= max_depth:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "delegate role=orchestrator promoted to leaf "
+                "(child would be at max_depth=%d with no room to delegate)",
+                max_depth,
+            )
+            is_orchestrator = False
+
         # III.1: parse the allowlist input. ``None`` / missing → unrestricted
         # (parent's full registry); explicit ``[]`` → no tools at all; list
         # of strings → exactly those tool names.
@@ -247,9 +360,19 @@ class DelegateTool(BaseTool):
                 is_error=True,
             )
 
+        # Hermes parity: orchestrators keep `delegate` so they can spawn
+        # leaves of their own; leaves still strip it. The other entries in
+        # DELEGATE_BLOCKED_TOOLS (AskUserQuestion, Clarify, ExitPlanMode)
+        # remain unsafe regardless of role.
+        effective_blocked = (
+            DELEGATE_BLOCKED_TOOLS - {"delegate"}
+            if is_orchestrator
+            else DELEGATE_BLOCKED_TOOLS
+        )
+
         # T1.2: enforce blocklist regardless of allowlist mode
         if allowed is not None:
-            overlap = allowed & DELEGATE_BLOCKED_TOOLS
+            overlap = allowed & effective_blocked
             if overlap:
                 return ToolResult(
                     tool_call_id=call.id,
@@ -268,7 +391,7 @@ class DelegateTool(BaseTool):
             try:
                 from opencomputer.tools.registry import registry as _reg
                 all_names = frozenset(_reg.names())
-                allowed = all_names - DELEGATE_BLOCKED_TOOLS
+                allowed = all_names - effective_blocked
             except Exception:
                 # If registry isn't loaded (test/edge case), fall back to passing
                 # `None` to the child — the child loop's existing allowlist filter
@@ -367,6 +490,18 @@ class DelegateTool(BaseTool):
         )
 
         subagent_loop = self._factory()
+        # T70 — share the parent's CredentialPool with the child so a
+        # quarantined key in one is quarantined for both. Best-effort:
+        # skip if either provider isn't pool-aware. Lookup is defensive
+        # in case the factory returned a mock without these attrs.
+        try:
+            parent_loop_for_pool = getattr(self._factory, "__self__", None)
+            parent_provider = getattr(parent_loop_for_pool, "provider", None)
+            child_provider = getattr(subagent_loop, "provider", None)
+            if parent_provider is not None and child_provider is not None:
+                inherit_credential_pool(parent_provider, child_provider)
+        except Exception:  # noqa: BLE001 — never break delegation on this
+            pass
         # II.1: cap the subagent's iteration budget at the parent's
         # ``delegation_max_iterations`` (default 50) instead of letting it
         # inherit the full ``max_iterations``. Mirrors Hermes's pattern
@@ -381,75 +516,379 @@ class DelegateTool(BaseTool):
                 child_cfg.loop,
                 max_iterations=child_cfg.loop.delegation_max_iterations,
             )
-            subagent_loop.config = dataclasses.replace(child_cfg, loop=new_loop_cfg)
+            new_model_cfg = child_cfg.model
+            # Hermes parity (2026-05-08): apply DelegationConfig overrides if
+            # the parent's loop config has any non-None field. None values
+            # inherit the parent's provider/model. ``base_url`` and ``api_key``
+            # require plugin-level wiring (provider plugins consume their own
+            # env vars / config); v1 swaps env vars at run-time so the active
+            # provider picks them up. Read DelegationConfig from the PARENT
+            # (not the child) — the override is configured by the user on the
+            # parent loop and flows down to children at delegation time.
+            parent_loop_for_delegation = getattr(self._factory, "__self__", None)
+            delegation = None
+            if parent_loop_for_delegation is not None and hasattr(
+                parent_loop_for_delegation, "config"
+            ):
+                delegation = getattr(
+                    parent_loop_for_delegation.config.loop, "delegation", None
+                )
+            if delegation is not None:
+                replace_kwargs: dict = {}
+                if delegation.model:
+                    replace_kwargs["model"] = delegation.model
+                if delegation.provider:
+                    replace_kwargs["provider"] = delegation.provider
+                if replace_kwargs:
+                    new_model_cfg = dataclasses.replace(
+                        child_cfg.model, **replace_kwargs
+                    )
+                if delegation.base_url or delegation.api_key:
+                    import os as _os
+                    if delegation.base_url:
+                        _os.environ["OPENCOMPUTER_DELEGATION_BASE_URL"] = delegation.base_url
+                    if delegation.api_key:
+                        _os.environ["OPENCOMPUTER_DELEGATION_API_KEY"] = delegation.api_key
+            subagent_loop.config = dataclasses.replace(
+                child_cfg,
+                loop=new_loop_cfg,
+                model=new_model_cfg,
+            )
         # III.1: push the allowlist onto the child BEFORE it runs. ``None``
         # is also explicitly assigned so callers who re-use a loop factory
         # don't inherit a stale allowlist from a prior delegation.
         subagent_loop.allowed_tools = allowed
 
+        # Hermes parity (2026-05-08): SubagentRegistry — register the child so
+        # `oc agents running` / `oc agents kill <id>` can see/cancel it.
+        # Best-effort: registry import / register failure must not break
+        # delegation. Update the record on completion/failure in the
+        # try/except below.
+        _registry_record = None
+        try:
+            from opencomputer.agent.subagent_registry import SubagentRegistry
+            _registry_record = SubagentRegistry.instance().register(
+                parent_id=self._current_runtime.custom.get("agent_id")
+                if self._current_runtime.custom
+                else None,
+                goal=task,
+            )
+        except Exception:
+            _registry_record = None
+
+        # v1.1 plan-2 M4.1 + M4.2 (2026-05-09): isolation sandbox for
+        # the child. 'none' (default) is a no-op — equivalent to the
+        # pre-M4 behavior.
+        raw_isolation = (call.arguments.get("isolation") or "none").strip().lower()
+        if raw_isolation not in ("none", "worktree", "copy"):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: 'isolation' must be one of "
+                    f"none / worktree / copy (got {raw_isolation!r})."
+                ),
+                is_error=True,
+            )
+
+        from opencomputer.agent.delegate_isolation import (
+            IsolationFailed,
+            WorktreeNotAvailable,
+            acquire_isolation,
+        )
+
         coordinator = get_default_coordinator()
         try:
-            async with coordinator.acquire_paths(raw_paths):
-                # Propagate the parent's runtime context — plan mode, yolo mode,
-                # etc. must apply to subagents too, otherwise delegating becomes
-                # an escape hatch.
-                # III.5: pass the template's system_prompt to the child loop.
-                # When ``template is None`` the kwarg is ``None`` and the child
-                # builds its usual declarative + skills + memory + SOUL prompt
-                # (existing behavior). With a template, the template BODY is the
-                # whole prompt — no further injection on top.
-                result = await subagent_loop.run_conversation(
-                    user_message=task,
-                    runtime=child_runtime,   # ← was self._current_runtime
-                    system_prompt_override=(
-                        template.system_prompt if template is not None else None
-                    ),
-                    initial_messages=child_initial_messages or None,
-                )
-                # D7: emit SubagentStop hook when the delegated subagent finishes
-                # so plugins can log / summarize / react. Fire-and-forget.
-                try:
-                    from opencomputer.hooks.engine import engine as _hook_engine
-                    from plugin_sdk.hooks import HookContext, HookEvent
+            async with acquire_isolation(raw_isolation) as _iso_ctx:
+                # When the sandbox switched the cwd, propagate it into the
+                # child loop via runtime.custom. RuntimeContext is frozen
+                # so we rebuild it; existing custom keys are preserved.
+                if raw_isolation != "none":
+                    _child_custom = dict(child_runtime.custom or {})
+                    _child_custom["delegate_isolation_cwd"] = str(_iso_ctx.cwd)
+                    _child_custom["delegate_isolation_mode"] = raw_isolation
+                    child_runtime = dataclasses.replace(
+                        child_runtime, custom=_child_custom
+                    )
 
-                    _hook_engine.fire_and_forget(
-                        HookContext(
-                            event=HookEvent.SUBAGENT_STOP,
-                            session_id=result.session_id,
-                            runtime=child_runtime,
+                async with coordinator.acquire_paths(raw_paths):
+                    # Propagate the parent's runtime context — plan mode, yolo mode,
+                    # etc. must apply to subagents too, otherwise delegating becomes
+                    # an escape hatch.
+                    # III.5: pass the template's system_prompt to the child loop.
+                    # When ``template is None`` the kwarg is ``None`` and the child
+                    # builds its usual declarative + skills + memory + SOUL prompt
+                    # (existing behavior). With a template, the template BODY is the
+                    # whole prompt — no further injection on top.
+                    result = await subagent_loop.run_conversation(
+                        user_message=task,
+                        runtime=child_runtime,   # ← was self._current_runtime
+                        system_prompt_override=(
+                            template.system_prompt if template is not None else None
+                        ),
+                        initial_messages=child_initial_messages or None,
+                    )
+                    # D7: emit SubagentStop hook when the delegated subagent finishes
+                    # so plugins can log / summarize / react. Fire-and-forget.
+                    try:
+                        from opencomputer.hooks.engine import engine as _hook_engine
+                        from plugin_sdk.hooks import HookContext, HookEvent
+
+                        _hook_engine.fire_and_forget(
+                            HookContext(
+                                event=HookEvent.SUBAGENT_STOP,
+                                session_id=result.session_id,
+                                runtime=child_runtime,
+                            )
                         )
+                    except Exception:
+                        # Hook emission must never break the main delegate flow.
+                        pass
+
+                    # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
+                    # subscribers (and any other bus listener) can react. Best-effort.
+                    try:
+                        from opencomputer.ingestion.bus import default_bus as _bus
+                        from plugin_sdk.ingestion import DelegationCompleteEvent
+
+                        _child_outcome = "failure" if result.final_message.content is None else "success"
+                        _bus.publish(DelegationCompleteEvent(
+                            session_id=call.id,  # parent tool-call id as session context
+                            source="agent_loop",
+                            parent_session_id="",  # parent session_id unavailable here; set to empty
+                            child_session_id=result.session_id,
+                            child_outcome=_child_outcome,
+                        ))
+                    except Exception:
+                        pass
+
+                    # Hermes parity: mark the subagent record completed.
+                    if _registry_record is not None:
+                        try:
+                            from datetime import UTC
+                            from datetime import datetime as _dt
+
+                            from opencomputer.agent.subagent_registry import SubagentRegistry
+                            SubagentRegistry.instance().update(
+                                _registry_record.agent_id,
+                                state="completed",
+                                ended_at=_dt.now(UTC),
+                            )
+                        except Exception:
+                            pass
+
+                    return ToolResult(
+                        tool_call_id=call.id,
+                        content=result.final_message.content,
+                    )
+        except WorktreeNotAvailable as exc:
+            # M4.1: parent cwd isn't a git repo. Surface a clean error so
+            # the caller can switch to isolation='copy' or omit isolation.
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
                     )
                 except Exception:
-                    # Hook emission must never break the main delegate flow.
                     pass
-
-                # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
-                # subscribers (and any other bus listener) can react. Best-effort.
-                try:
-                    from opencomputer.ingestion.bus import default_bus as _bus
-                    from plugin_sdk.ingestion import DelegationCompleteEvent
-
-                    _child_outcome = "failure" if result.final_message.content is None else "success"
-                    _bus.publish(DelegationCompleteEvent(
-                        session_id=call.id,  # parent tool-call id as session context
-                        source="agent_loop",
-                        parent_session_id="",  # parent session_id unavailable here; set to empty
-                        child_session_id=result.session_id,
-                        child_outcome=_child_outcome,
-                    ))
-                except Exception:
-                    pass
-
-                return ToolResult(
-                    tool_call_id=call.id,
-                    content=result.final_message.content,
-                )
-        except DelegationLockTimeout as exc:
             return ToolResult(
                 tool_call_id=call.id,
                 content=f"Error: {exc}",
                 is_error=True,
             )
+        except IsolationFailed as exc:
+            # M4.1 + M4.2: sandbox creation failed (e.g. git worktree
+            # add returned non-zero, or copytree raised OSError).
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
+            )
+        except DelegationLockTimeout as exc:
+            # Hermes parity: mark the subagent record failed on lock timeout.
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
+            )
+        except BaseException as exc:
+            # Hermes parity: mark the subagent record failed on any other error.
+            # Re-raise after recording (don't swallow asyncio.CancelledError etc.).
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+            raise
+
+    async def _execute_batch(
+        self, call_id: str, tasks: list[dict[str, object]]
+    ) -> ToolResult:
+        """Hermes parity (2026-05-08): tasks=[...] parallel batch dispatch.
+
+        Each task is a dict with at least ``goal`` (Hermes naming). We map
+        ``goal`` → OC's single-task ``task`` field and re-enter ``execute``
+        per child via an asyncio.gather under a semaphore sized to
+        ``LoopConfig.max_concurrent_children`` (env override:
+        ``DELEGATION_MAX_CONCURRENT_CHILDREN``).
+
+        Batches larger than the cap return a tool error rather than silently
+        truncating — matches the Hermes documented behavior.
+        """
+        import asyncio as _asyncio
+        import os as _os
+
+        if not isinstance(tasks, list) or not tasks:
+            return ToolResult(
+                tool_call_id=call_id,
+                content="Error: `tasks` must be a non-empty list.",
+                is_error=True,
+            )
+
+        # Resolve cap (parent_loop.config takes precedence; env var is the
+        # operational override; default 3 mirrors Hermes).
+        parent_loop = getattr(self._factory, "__self__", None)
+        cap = 3
+        if parent_loop is not None and hasattr(parent_loop, "config"):
+            cap = getattr(parent_loop.config.loop, "max_concurrent_children", 3)
+        env_cap = _os.environ.get("DELEGATION_MAX_CONCURRENT_CHILDREN", "").strip()
+        if env_cap:
+            try:
+                cap = max(1, int(env_cap))
+            except ValueError:
+                pass
+
+        if len(tasks) > cap:
+            return ToolResult(
+                tool_call_id=call_id,
+                content=(
+                    f"Error: batch size {len(tasks)} exceeds "
+                    f"max_concurrent_children={cap}. Submit fewer tasks per call "
+                    f"or raise LoopConfig.max_concurrent_children."
+                ),
+                is_error=True,
+            )
+
+        sem = _asyncio.Semaphore(cap)
+
+        async def _run_one(idx: int, spec: dict[str, object]) -> str:
+            async with sem:
+                # Hermes uses `goal`; OC's existing single-task uses `task`.
+                # Map goal → task internally; preserve `toolsets` → `allowed_tools`.
+                goal = (spec.get("goal") or spec.get("task") or "")
+                if not isinstance(goal, str) or not goal.strip():
+                    return f"## Task {idx + 1}: ERROR\nempty/invalid goal in batch entry"
+                ctx = (spec.get("context") or "").strip() if isinstance(spec.get("context"), str) else ""
+                # Inline the optional context block into the task text.
+                task_text = f"{goal.strip()}\n\nContext:\n{ctx}" if ctx else goal.strip()
+                toolsets = spec.get("toolsets")
+                child_args: dict[str, object] = {"task": task_text}
+                if isinstance(toolsets, list):
+                    child_args["allowed_tools"] = toolsets
+                child_call = ToolCall(
+                    id=f"{call_id}-batch-{idx}",
+                    name="delegate",
+                    arguments=child_args,
+                )
+                res = await self.execute(child_call)
+                return res.content or ""
+
+        results = await _asyncio.gather(
+            *[_run_one(i, t) for i, t in enumerate(tasks)],
+            return_exceptions=True,
+        )
+        output_lines: list[str] = []
+        any_error = False
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                any_error = True
+                output_lines.append(
+                    f"## Task {i + 1}: ERROR\n{type(r).__name__}: {r}"
+                )
+            else:
+                output_lines.append(f"## Task {i + 1}\n{r}")
+        return ToolResult(
+            tool_call_id=call_id,
+            content="\n\n".join(output_lines),
+            is_error=any_error,
+        )
 
 
-__all__ = ["DelegateTool", "DELEGATE_BLOCKED_TOOLS"]
+def inherit_credential_pool(parent_provider, child_provider) -> None:
+    """T70 — share the parent's CredentialPool with the subagent's provider.
+
+    Without inheritance, the child instantiates a fresh pool from
+    config — quarantine state, current key selection, and JWT refresh
+    timing all diverge. Sharing the pool object unifies them.
+
+    Skip rules (in order):
+      1. Either provider lacks ``_credential_pool`` (not a pool-aware
+         provider) — leave both alone.
+      2. Parent has no pool (single-key provider, no rotation needed).
+      3. Child already has its own pool (operator opted out by passing
+         a fresh pool when constructing the child explicitly).
+      4. Provider classes differ (OpenAI parent must not hand keys to
+         an Anthropic child — they're scoped per provider).
+    """
+    if not hasattr(parent_provider, "_credential_pool") or not hasattr(
+        child_provider, "_credential_pool"
+    ):
+        return
+    parent_pool = parent_provider._credential_pool
+    if parent_pool is None:
+        return
+    if child_provider._credential_pool is not None:
+        return
+    if type(parent_provider) is not type(child_provider):
+        return
+    child_provider._credential_pool = parent_pool
+
+
+__all__ = [
+    "DelegateTool",
+    "DELEGATE_BLOCKED_TOOLS",
+    "inherit_credential_pool",
+]

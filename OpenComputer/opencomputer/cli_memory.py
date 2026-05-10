@@ -528,6 +528,104 @@ def _doctor_dreaming_row() -> tuple[str, str]:
     )
 
 
+def _doctor_active_memory_row() -> tuple[str, str]:
+    """(status, detail) for OpenClaw 1.B-alt Active Memory pre-loop injection.
+
+    Distinct from MEMORY.md hybrid retrieval — this layer queries SessionDB
+    FTS5 + episodic on every turn and prepends a `<relevant-memories>`
+    block. Off by default; useful when the user has rich session history.
+    """
+    try:
+        cfg = load_config().memory
+    except Exception as e:  # noqa: BLE001
+        return ("disabled", f"config read error: {e}")
+    if cfg.active_memory_enabled:
+        return (
+            "enabled",
+            f"top_n={cfg.active_memory_top_n} (FTS5 + episodic prepend per turn)",
+        )
+    return (
+        "disabled",
+        "opt-in via memory.active_memory_enabled=true — recalls relevant "
+        "past turns each request",
+    )
+
+
+def _doctor_vector_retrieval_row() -> tuple[str, str]:
+    """(status, detail) for MEMORY.md hybrid retrieval (M6.3 BM25+vector RRF).
+
+    Status mapping:
+      * disabled  — memory_md_retrieval_enabled=false in config
+      * active    — enabled AND active provider supports embeddings
+      * bm25-only — enabled BUT provider raises EmbeddingsUnsupportedError
+                    at probe-time; falls back gracefully but the user
+                    isn't getting vector recall. Includes the provider's
+                    own message so the fix hint (e.g. set VOYAGE_API_KEY)
+                    surfaces here instead of buried in DEBUG logs.
+    """
+    try:
+        full_cfg = load_config()
+    except Exception as e:  # noqa: BLE001
+        return ("disabled", f"config read error: {e}")
+
+    if not getattr(full_cfg.memory, "memory_md_retrieval_enabled", False):
+        return (
+            "disabled",
+            "opt-in via memory.memory_md_retrieval_enabled=true",
+        )
+
+    # Probe the active provider's embed() with an empty list. By contract
+    # this is cheap (most providers short-circuit) and raises
+    # EmbeddingsUnsupportedError when the provider can't embed.
+    try:
+        from opencomputer.cli import _resolve_provider
+        from plugin_sdk.embeddings import EmbeddingsUnsupportedError
+    except Exception as e:  # noqa: BLE001
+        return ("active", f"could not resolve embedding probe: {e}")
+
+    try:
+        provider = _resolve_provider(full_cfg.model.provider)
+    except Exception as e:  # noqa: BLE001
+        return (
+            "bm25-only",
+            f"active provider {full_cfg.model.provider!r} not resolvable: {e}",
+        )
+
+    if provider is None or not hasattr(provider, "embed"):
+        return (
+            "bm25-only",
+            f"active provider {full_cfg.model.provider!r} has no embed() method",
+        )
+
+    import asyncio
+
+    async def _probe() -> str:
+        try:
+            await provider.embed([])
+            return ""
+        except EmbeddingsUnsupportedError as exc:
+            return f"unsupported: {exc}"
+        except Exception as exc:  # noqa: BLE001 — surface the real error
+            return f"probe failed: {type(exc).__name__}: {exc}"
+
+    try:
+        msg = asyncio.run(_probe())
+    except RuntimeError:
+        # Already in an event loop (rare for `oc memory doctor`); fall
+        # back to "active" with a hint.
+        return (
+            "active",
+            "probe skipped (already in event loop) — assume provider supports embed",
+        )
+
+    if msg:
+        return ("bm25-only", msg)
+    return (
+        "active",
+        f"hybrid BM25+vector via {full_cfg.model.provider!r}.embed()",
+    )
+
+
 @memory_app.command("doctor")
 def memory_doctor() -> None:
     """Health report for every memory layer — baseline, episodic, docker,
@@ -578,6 +676,25 @@ def memory_doctor() -> None:
         d_status, d_detail = "disabled", f"error: {e}"
     rows.append(("dreaming", d_status, d_detail))
 
+    # Active Memory (OpenClaw 1.B-alt) — opt-in pre-loop FTS5 + episodic
+    # injection. Surface even when disabled so users know the layer
+    # exists and can opt in.
+    try:
+        am_status, am_detail = _doctor_active_memory_row()
+    except Exception as e:  # noqa: BLE001
+        am_status, am_detail = "disabled", f"error: {e}"
+    rows.append(("active_memory", am_status, am_detail))
+
+    # Vector retrieval (M6.3 hybrid BM25+vector RRF) — surfaces silent
+    # bm25-only fallback caused by unconfigured embedding providers
+    # (e.g., Anthropic without VOYAGE_API_KEY). Prevents the user from
+    # thinking hybrid retrieval is active when it has degraded silently.
+    try:
+        vr_status, vr_detail = _doctor_vector_retrieval_row()
+    except Exception as e:  # noqa: BLE001
+        vr_status, vr_detail = "bm25-only", f"probe error: {e}"
+    rows.append(("vector_retrieval", vr_status, vr_detail))
+
     table = Table(title="Memory doctor")
     table.add_column("Layer", style="bold cyan", no_wrap=True)
     table.add_column("Status", no_wrap=True)
@@ -594,6 +711,7 @@ def memory_doctor() -> None:
         "down": "yellow",
         "n/a": "dim",
         "fallback": "yellow",
+        "bm25-only": "yellow",  # vector retrieval degraded
         "disabled": "dim",
     }
 
@@ -819,6 +937,72 @@ def memory_dream_off() -> None:
     console.print(msg)
 
 
+# ─── 2026-05-09 — dream-v2 enable/disable ───────────────────────────
+
+
+@memory_app.command("dream-v2-on")
+def memory_dream_v2_on() -> None:
+    """EXPERIMENTAL — enable Dreaming v2 (pure local episodic→MEMORY.md).
+
+    Sets ``memory.dreaming_v2_enabled = True``. Unlike the v1
+    ``dream-on`` flow, v2 does NOT register a separate cron job —
+    instead it fires inside the system cron tick (see
+    ``opencomputer.cron.system_jobs.run_system_tick``) which is
+    invoked on every ``oc cron daemon`` tick alongside the four other
+    system jobs. So flipping the flag is sufficient: as soon as the
+    cron daemon ticks again, v2 will run.
+
+    For the cron daemon itself, see ``oc cron daemon`` (foreground)
+    or the LaunchAgent setup at ``oc cron install``.
+
+    Idempotent: re-running with the flag already True is a no-op.
+    Distinct from v1 ``dream-on`` — both can coexist (v1 reads
+    ``dreaming_enabled``, v2 reads ``dreaming_v2_enabled``); typical
+    usage is one or the other.
+    """
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+        save_config,
+        set_value,
+    )
+
+    cfg = load_config()
+    cfg = set_value(cfg, "memory.dreaming_v2_enabled", True)
+    save_config(cfg)
+
+    console.print(
+        "[green]✓[/green] dreaming_v2 enabled\n"
+        f"[dim]saved to {config_file_path()}[/dim]\n"
+        "[dim]v2 fires from the system cron tick — make sure "
+        "[cyan]oc cron daemon[/cyan] is running.[/dim]"
+    )
+
+
+@memory_app.command("dream-v2-off")
+def memory_dream_v2_off() -> None:
+    """EXPERIMENTAL — disable Dreaming v2.
+
+    Only writes the config flag; existing MEMORY.md / DREAMS.md rows
+    are left intact. Pairs with :func:`memory_dream_v2_on`.
+    """
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+        save_config,
+        set_value,
+    )
+
+    cfg = load_config()
+    cfg = set_value(cfg, "memory.dreaming_v2_enabled", False)
+    save_config(cfg)
+
+    console.print(
+        "[green]✓[/green] dreaming_v2 disabled\n"
+        f"[dim]saved to {config_file_path()}[/dim]"
+    )
+
+
 # ─── 2026-04-28 — passive-education learning-moment controls ────────
 
 
@@ -876,3 +1060,137 @@ def memory_learning_status() -> None:
     ):
         when = _dt.datetime.fromtimestamp(fired_at).isoformat(timespec="seconds")
         console.print(f"  - {moment_id} [dim]({when})[/dim]")
+
+
+# ─── v1.1 plan-3 M6.4 — Dreaming v2 (three-gate consolidation INTO MEMORY.md) ──
+
+
+@memory_app.command("dream-v2")
+def memory_dream_v2(
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        "-n",
+        help="Max recent un-dreamed episodic events to score (1-500).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Run even when dreaming_v2 is disabled in config.yaml.",
+    ),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="text|json"
+    ),
+) -> None:
+    """Run one Dreaming v2 pass NOW.
+
+    Three gates (score / recall-count / diversity) decide whether each
+    candidate episodic event is promoted into MEMORY.md, held in
+    DREAMS.md, or dropped. Default cron cadence runs the same engine
+    via the system tick (gated by ``cfg.memory.dreaming_v2_enabled``).
+    """
+    import asyncio
+    import json as _json
+
+    from opencomputer.cron.dreaming_v2_tick import (
+        build_production_dependencies,
+        run_dreaming_v2_async,
+    )
+
+    limit = max(1, min(int(limit), 500))
+    deps = build_production_dependencies()
+
+    if not deps.config.enabled and not force:
+        console.print(
+            "[yellow]dreaming_v2 is disabled[/yellow] "
+            "(cfg.memory.dreaming_v2_enabled = false). "
+            "Re-run with [cyan]--force[/cyan] to override, or enable in "
+            "[cyan]~/.opencomputer/<profile>/config.yaml[/cyan]."
+        )
+        raise typer.Exit(code=0)
+
+    if force and not deps.config.enabled:
+        # Build a one-shot deps with config.enabled forced True so the
+        # engine actually runs (engine's own enabled-check otherwise
+        # short-circuits).
+        from opencomputer.agent.dreaming_v2 import DreamingV2Config
+
+        deps = type(deps)(
+            profile_home=deps.profile_home,
+            memory=deps.memory,
+            db=deps.db,
+            provider=deps.provider,
+            model=deps.model,
+            config=DreamingV2Config(
+                enabled=True,
+                score_threshold=deps.config.score_threshold,
+                min_recall_count=deps.config.min_recall_count,
+                diversity_threshold=deps.config.diversity_threshold,
+                max_promotions_per_run=deps.config.max_promotions_per_run,
+                dreams_md_max_bytes=deps.config.dreams_md_max_bytes,
+            ),
+        )
+
+    summary = asyncio.run(
+        run_dreaming_v2_async(deps=deps, candidate_limit=limit)
+    )
+
+    payload = {
+        "promoted": [
+            {
+                "event_id": r.candidate.event_id,
+                "score": r.score,
+                "recall_count": r.recall_count,
+                "diversity": r.diversity_score,
+                "rationale": r.rationale,
+                "preview": r.candidate.raw_text[:120],
+            }
+            for r in summary.promoted
+        ],
+        "held": [
+            {
+                "event_id": r.candidate.event_id,
+                "score": r.score,
+                "recall_count": r.recall_count,
+                "diversity": r.diversity_score,
+                "rationale": r.rationale,
+            }
+            for r in summary.held
+        ],
+        "dropped": [
+            {
+                "event_id": r.candidate.event_id,
+                "rationale": r.rationale,
+            }
+            for r in summary.dropped
+        ],
+        "skipped_already_processed": summary.skipped_already_processed,
+        "total_evaluated": summary.total_evaluated,
+        "catch_up_run": summary.catch_up_run,
+    }
+
+    if output == "json":
+        typer.echo(_json.dumps(payload, indent=2))
+        return
+
+    console.print(
+        f"[green]✓[/green] dream-v2 finished: "
+        f"promoted={len(summary.promoted)}, "
+        f"held={len(summary.held)}, "
+        f"dropped={len(summary.dropped)}, "
+        f"skipped_already_processed={summary.skipped_already_processed}, "
+        f"total_evaluated={summary.total_evaluated}"
+        + (" (catch-up run)" if summary.catch_up_run else "")
+    )
+    if summary.promoted:
+        console.print("\n[bold green]Promoted to MEMORY.md:[/bold green]")
+        for r in summary.promoted:
+            console.print(
+                f"  • [dim]score={r.score:.2f} recall={r.recall_count} "
+                f"div={r.diversity_score:.2f}[/dim] "
+                f"{r.candidate.raw_text[:80]}"
+            )
+    if summary.held:
+        console.print("\n[bold yellow]Held in DREAMS.md:[/bold yellow]")
+        for r in summary.held:
+            console.print(f"  • [dim]{r.rationale}[/dim]")

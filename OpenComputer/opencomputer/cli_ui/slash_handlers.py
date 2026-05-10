@@ -138,6 +138,14 @@ class SlashContext:
     on_sources_dispatch: Callable[[str], str] = lambda _args: (
         "/sources callback not wired"
     )
+    #: ``/goal <text>`` mid-run race-guard — returns True iff the AgentLoop
+    #: is currently streaming a turn for this session. The slash handler
+    #: refuses the SET form when this is True (status / pause / resume /
+    #: clear are still allowed). CLI input loop attaches a closure over
+    #: its in-flight flag; gateway path inserts its own check at dispatch
+    #: time. Default ``lambda: False`` keeps callers that don't care
+    #: about race-guarding agnostic.
+    is_running_agent: Callable[[], bool] = lambda: False
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -437,13 +445,24 @@ def _handle_footer(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/steer <text>`` — Wave 5 T3 — Hermes-port (e27b0b765).
+    """``/steer <text>`` — Wave 5 T3 — Hermes-port (e27b0b765) + PR-A.
 
-    In the CLI the chat loop is never mid-turn when the slash dispatcher
-    runs (the prompt is awaiting input), so this is a queue-at-head
-    convenience alias for ``/queue <text>``. In ACP/IDE clients the
-    same command actually interrupts an in-flight turn — see
-    ``opencomputer/acp/server.py::_handle_steer``.
+    Two integration paths:
+
+    1. **Queue-at-head** (legacy, always fires): ``ctx.on_queue_add``
+       drains as the next turn's user message via the existing wave-5
+       T3 mechanism. Keeps the long-standing CLI behaviour where /steer
+       on an idle prompt simply schedules the next message.
+    2. **PR-A cancel-event** (2026-05-07): also calls
+       ``SteerRegistry.submit`` so if a tool is mid-flight (e.g. a
+       long Bash) the agent loop's cancel-aware dispatcher reacts and
+       interrupts. The ack distinguishes "interrupted" (a dispatch was
+       in flight and got cancelled) vs "steered" (queue-only path).
+
+    Cross-references:
+        ``opencomputer/acp/server.py::_handle_steer`` — same contract
+        for IDE clients (also calls SteerRegistry.submit via
+        ``ACPSession.steer``).
     """
     text = " ".join(args).strip()
     if not text:
@@ -451,11 +470,33 @@ def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
             "[red]/steer needs text[/red] — e.g. `/steer change direction please`"
         )
         return SlashResult(handled=True)
+
+    # PR-A — figure out whether a dispatch was mid-flight BEFORE submit.
+    sid = getattr(ctx, "session_id", "") or ""
+    was_mid_dispatch = False
+    try:
+        from opencomputer.agent.steer import default_registry as _steer_reg
+        if sid and _steer_reg.has_cancel_listener(sid):
+            ev = _steer_reg.cancel_event(sid)
+            # If the event is unset and the listener exists, the agent
+            # loop allocated it for an active dispatch (the loop clears
+            # stale events at the top of each dispatch, so an unset
+            # event means "actively listening").
+            was_mid_dispatch = not ev.is_set()
+        # Always submit so the cancel signal reaches the dispatcher.
+        if sid:
+            _steer_reg.submit(sid, text)
+    except Exception:  # noqa: BLE001 — never break the slash path
+        pass
+
+    # Queue-add for legacy compat (drains as next-turn user message).
     ok = ctx.on_queue_add(text)
+
     if ok:
         preview = text if len(text) <= 80 else text[:77] + "..."
+        status = "interrupted" if was_mid_dispatch else "steered"
         ctx.console.print(
-            f"[green]steered[/green] — next turn will use: [dim]{preview}[/dim]"
+            f"[green]{status}[/green] — next turn will use: [dim]{preview}[/dim]"
         )
     else:
         ctx.console.print(
@@ -464,23 +505,40 @@ def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+_GOAL_SAFE_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"status", "pause", "resume", "clear"}
+)
+
+
 def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/goal [<text>|status|pause|resume|clear]`` — manage persistent goal.
 
-    No args / ``status``: show current goal.
-    ``pause``: stop continuation loop.
-    ``resume``: resume + reset turn counter.
-    ``clear``: drop the goal.
-    Anything else: set ``args`` joined with spaces as the new goal text.
+    v2 surface (Kanban-Goals v2, 2026-05-08):
 
-    Persists in the ``sessions`` table (schema v11+ ``goal_*`` columns).
-    Direct DB access bypasses callback wiring — db_path comes from
-    ``ctx.config.session.db_path`` so this handler is self-contained.
+    - Rich UX with icons: ``⊙`` set, ``↻`` resume/continue, ``✓`` achieved,
+      ``⏸`` paused, ``✗`` cleared.
+    - ``status`` surfaces ``GoalState.last_judge_reason`` (the most recent
+      judge rationale) when present.
+    - SET form (``/goal <new text>``) is refused while the AgentLoop is
+      streaming a turn — set form races with the in-flight continuation
+      prompt. Status / pause / resume / clear remain unrestricted because
+      they only touch the control plane.
+
+    Persists in the ``sessions`` table (schema v14 ``goal_*`` columns).
+    Direct DB access — db_path comes from ``ctx.config.session.db_path``.
     """
     from opencomputer.agent.state import SessionDB
 
     db = SessionDB(ctx.config.session.db_path)
     sub = (args[0].lower() if args else "status")
+    is_set_form = bool(args) and sub not in _GOAL_SAFE_SUBCOMMANDS
+
+    if is_set_form and ctx.is_running_agent():
+        ctx.console.print(
+            "[yellow]/goal: agent is currently running — "
+            "use [cyan]/stop[/cyan] first, then set the new goal.[/yellow]"
+        )
+        return SlashResult(handled=True)
 
     if sub == "status" or not args:
         g = db.get_session_goal(ctx.session_id)
@@ -490,11 +548,26 @@ def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
                 "Use [cyan]/goal <text>[/cyan] to set one.[/dim]"
             )
             return SlashResult(handled=True)
+        if g.budget_exhausted():
+            ctx.console.print(
+                f"[yellow]⏸ goal paused — {g.turns_used}/{g.budget} "
+                f"turns used. Use [cyan]/goal resume[/cyan] to keep going, "
+                f"or [cyan]/goal clear[/cyan] to stop.[/yellow]\n"
+                f"  [bold]goal:[/bold] {g.text}"
+            )
+            if g.last_judge_reason:
+                ctx.console.print(
+                    f"  last judge: [dim]{g.last_judge_reason}[/dim]"
+                )
+            return SlashResult(handled=True)
         state = "[green]active[/green]" if g.active else "[yellow]paused[/yellow]"
-        ctx.console.print(
+        body = (
             f"[bold]goal:[/bold] {g.text}\n"
-            f"  status: {state}, turn {g.turns_used}/{g.budget}"
+            f"  status: {state} · turns {g.turns_used}/{g.budget}"
         )
+        if g.last_judge_reason:
+            body += f"\n  last judge: [dim]{g.last_judge_reason}[/dim]"
+        ctx.console.print(body)
         return SlashResult(handled=True)
 
     if sub == "pause":
@@ -502,15 +575,22 @@ def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
             ctx.console.print("[red]no goal set.[/red]")
         else:
             db.update_session_goal(ctx.session_id, active=False)
-            ctx.console.print("[yellow]goal paused.[/yellow]")
+            ctx.console.print("[yellow]⏸ goal paused.[/yellow]")
         return SlashResult(handled=True)
 
     if sub == "resume":
         if db.get_session_goal(ctx.session_id) is None:
             ctx.console.print("[red]no goal set.[/red]")
         else:
-            db.update_session_goal(ctx.session_id, active=True, turns_used=0)
-            ctx.console.print("[green]goal resumed.[/green] (turn counter reset)")
+            db.update_session_goal(
+                ctx.session_id,
+                active=True,
+                turns_used=0,
+                clear_last_judge_reason=True,
+            )
+            ctx.console.print(
+                "[green]↻ goal resumed[/green] (turn counter reset to 0)."
+            )
         return SlashResult(handled=True)
 
     if sub == "clear":
@@ -518,19 +598,21 @@ def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
             ctx.console.print("[dim]no goal to clear.[/dim]")
         else:
             db.clear_session_goal(ctx.session_id)
-            ctx.console.print("[green]goal cleared.[/green]")
+            ctx.console.print("[green]✗ goal cleared.[/green]")
         return SlashResult(handled=True)
 
-    # Otherwise, treat the full args as the new goal text
+    # SET form — args are the goal text.
     text = " ".join(args).strip()
     if not text:
         ctx.console.print("[red]/goal: empty text[/red]")
         return SlashResult(handled=True)
     db.set_session_goal(ctx.session_id, text=text)
+    g = db.get_session_goal(ctx.session_id)
+    budget = g.budget if g else 20
     preview = text if len(text) <= 80 else text[:77] + "..."
     ctx.console.print(
-        f"[green]goal set:[/green] {preview}\n"
-        f"  [dim]budget=20 continuations · use /goal status to check progress[/dim]"
+        f"[green]⊙ Goal set[/green] ({budget}-turn budget): {preview}\n"
+        f"  [dim]check progress with [cyan]/goal status[/cyan][/dim]"
     )
     return SlashResult(handled=True)
 
@@ -828,23 +910,389 @@ def _handle_skills_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/cron`` — list active cron jobs (best-effort)."""
+    """``/cron [list|add|pause|resume|run|remove|help] [args...]`` — Hermes parity.
+
+    Bare ``/cron`` lists jobs (back-compat with the prior read-only
+    handler; the prior code referenced a nonexistent
+    ``opencomputer.cron.store.CronStore`` and silently failed — fixed
+    here). Subcommands wrap :mod:`opencomputer.cron.jobs` directly.
+    """
+    sub = args[0].lower() if args else "list"
+    rest = args[1:]
+
     try:
-        from opencomputer.agent.config import _home
-        from opencomputer.cron.store import CronStore
-        store = CronStore(_home() / "cron" / "cron.json")
-        jobs = store.list()
+        from opencomputer.cron.jobs import (
+            create_job,
+            get_job,
+            list_jobs,
+            pause_job,
+            remove_job,
+            resume_job,
+            trigger_job,
+        )
+        from opencomputer.cron.threats import CronThreatBlocked
     except Exception as e:  # noqa: BLE001
         ctx.console.print(f"[yellow]Cron unavailable: {e}[/yellow]")
         return SlashResult(handled=True)
-    if not jobs:
-        ctx.console.print("[dim]No cron jobs configured.[/dim]")
+
+    if sub == "list":
+        jobs = list_jobs(include_disabled=("all" in rest or "-a" in rest))
+        if not jobs:
+            ctx.console.print(
+                "[dim]No cron jobs configured. Use `/cron add <schedule> <prompt>`.[/dim]"
+            )
+            return SlashResult(handled=True)
+        lines = [f"## Cron jobs ({len(jobs)})\n"]
+        for j in jobs:
+            target = (
+                j.get("skill")
+                or (",".join(j["skills"]) if j.get("skills") else None)
+                or (j.get("prompt") or "")[:40]
+            )
+            lines.append(
+                f"  {j['id'][:8]} {j['name'][:30]:<30} "
+                f"{j.get('schedule_display', ''):<18} {target}"
+            )
+        ctx.console.print("\n".join(lines))
         return SlashResult(handled=True)
-    lines = [f"## Cron jobs ({len(jobs)})\n"]
-    for j in jobs:
-        name = getattr(j, "name", None) or getattr(j, "id", "?")
-        sched = getattr(j, "schedule", "?")
-        lines.append(f"  {name} — {sched}")
+
+    if sub == "add":
+        if not rest:
+            ctx.console.print(
+                "[yellow]Usage: /cron add <schedule> [prompt] [--skill name]\n"
+                "Examples:\n"
+                "  /cron add every 1h --skill blogwatcher\n"
+                "  /cron add 'every 1h' Check on the server\n"
+                "  /cron add '0 9 * * *' --skill morning-briefing[/yellow]"
+            )
+            return SlashResult(handled=True)
+
+        # The slash dispatcher whitespace-splits, so multi-token schedules
+        # like ``every 1h`` arrive as two tokens. Detect schedule by
+        # consuming tokens until the first ``--flag`` or until the prefix
+        # parses cleanly as a schedule. This makes ``/cron add every 1h
+        # --skill X`` and ``/cron add 0 9 * * * --skill X`` both work.
+        from opencomputer.cron.jobs import parse_schedule
+
+        sched_tokens: list[str] = []
+        consumed = 0
+        for tok in rest:
+            if tok.startswith("--"):
+                break
+            sched_tokens.append(tok)
+            consumed += 1
+            try:
+                parse_schedule(" ".join(sched_tokens))
+                break  # prefix parses → that's our schedule
+            except ValueError:
+                continue  # need more tokens
+        if not sched_tokens:
+            ctx.console.print("[yellow]Missing schedule[/yellow]")
+            return SlashResult(handled=True)
+        sched = " ".join(sched_tokens)
+        post_sched = rest[consumed:]
+
+        skills: list[str] = []
+        prompt_parts: list[str] = []
+        i = 0
+        while i < len(post_sched):
+            tok = post_sched[i]
+            if tok == "--skill" and i + 1 < len(post_sched):
+                skills.append(post_sched[i + 1])
+                i += 2
+            else:
+                prompt_parts.append(tok)
+                i += 1
+        prompt_text = " ".join(prompt_parts).strip() or None
+        if not prompt_text and not skills:
+            ctx.console.print("[yellow]Need either a prompt or --skill name[/yellow]")
+            return SlashResult(handled=True)
+        try:
+            kwargs: dict = {"schedule": sched}
+            if skills and len(skills) == 1:
+                kwargs["skill"] = skills[0]
+            elif skills:
+                kwargs["skills"] = skills
+            else:
+                kwargs["prompt"] = prompt_text
+            job = create_job(**kwargs)
+        except CronThreatBlocked as e:
+            ctx.console.print(f"[red]Blocked: {e}[/red]")
+            return SlashResult(handled=True)
+        except ValueError as e:
+            ctx.console.print(f"[red]Error: {e}[/red]")
+            return SlashResult(handled=True)
+        ctx.console.print(
+            f"[green]✓[/green] Created cron {job['id']} ({job['schedule_display']})"
+        )
+        return SlashResult(handled=True)
+
+    if sub in ("pause", "resume", "run", "remove"):
+        if not rest:
+            ctx.console.print(f"[yellow]Usage: /cron {sub} <job_id>[/yellow]")
+            return SlashResult(handled=True)
+        job_id = rest[0]
+        if sub == "pause":
+            result = pause_job(job_id)
+        elif sub == "resume":
+            result = resume_job(job_id)
+        elif sub == "run":
+            result = trigger_job(job_id)
+        else:  # remove
+            result = remove_job(job_id)
+        if not result:
+            ctx.console.print(f"[red]Cron job {job_id!r} not found[/red]")
+            return SlashResult(handled=True)
+        ctx.console.print(f"[green]✓[/green] /cron {sub} {job_id}")
+        return SlashResult(handled=True)
+
+    if sub == "edit":
+        # /cron edit <job_id> [--schedule "every 4h"] [--prompt "..."]
+        # [--skill X] [--add-skill Y] [--remove-skill Z] [--clear-skills]
+        # [--notify telegram:123]
+        if not rest:
+            ctx.console.print(
+                "[yellow]Usage: /cron edit <job_id> [--schedule X] "
+                "[--prompt X] [--skill X] [--add-skill X] [--remove-skill X] "
+                "[--clear-skills] [--notify X][/yellow]"
+            )
+            return SlashResult(handled=True)
+        from opencomputer.cron.jobs import update_job
+        from opencomputer.cron.threats import assert_cron_prompt_safe
+
+        edit_job_id = rest[0]
+        existing = get_job(edit_job_id)
+        if not existing:
+            ctx.console.print(f"[red]Cron job {edit_job_id!r} not found[/red]")
+            return SlashResult(handled=True)
+
+        edit_updates: dict = {}
+        edit_skills: list[str] = []
+        edit_add_skills: list[str] = []
+        edit_remove_skills: list[str] = []
+        clear_skills = False
+        i = 1
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--schedule" and i + 1 < len(rest):
+                # Schedule may span tokens (every 1h, 0 9 * * *) — consume
+                # until next --flag or end, then parse.
+                j = i + 1
+                tokens = []
+                while j < len(rest) and not rest[j].startswith("--"):
+                    tokens.append(rest[j])
+                    j += 1
+                edit_updates["schedule"] = " ".join(tokens)
+                i = j
+            elif tok == "--prompt" and i + 1 < len(rest):
+                # --prompt consumes until next --flag.
+                j = i + 1
+                tokens = []
+                while j < len(rest) and not rest[j].startswith("--"):
+                    tokens.append(rest[j])
+                    j += 1
+                try:
+                    assert_cron_prompt_safe(" ".join(tokens))
+                except CronThreatBlocked as e:
+                    ctx.console.print(f"[red]Blocked: {e}[/red]")
+                    return SlashResult(handled=True)
+                edit_updates["prompt"] = " ".join(tokens)
+                i = j
+            elif tok == "--skill" and i + 1 < len(rest):
+                edit_skills.append(rest[i + 1])
+                i += 2
+            elif tok == "--add-skill" and i + 1 < len(rest):
+                edit_add_skills.append(rest[i + 1])
+                i += 2
+            elif tok == "--remove-skill" and i + 1 < len(rest):
+                edit_remove_skills.append(rest[i + 1])
+                i += 2
+            elif tok == "--clear-skills":
+                clear_skills = True
+                i += 1
+            elif tok == "--notify" and i + 1 < len(rest):
+                edit_updates["notify"] = rest[i + 1] or None
+                i += 2
+            else:
+                ctx.console.print(f"[yellow]Unknown flag: {tok}[/yellow]")
+                return SlashResult(handled=True)
+
+        # Apply skill mutations (clear → set → add → remove).
+        new_skills = list(
+            existing.get("skills") or ([existing["skill"]] if existing.get("skill") else [])
+        )
+        skill_touched = False
+        if clear_skills:
+            new_skills = []
+            skill_touched = True
+        if edit_skills:
+            new_skills = list(edit_skills)
+            skill_touched = True
+        if edit_add_skills:
+            for s in edit_add_skills:
+                if s not in new_skills:
+                    new_skills.append(s)
+            skill_touched = True
+        if edit_remove_skills:
+            new_skills = [s for s in new_skills if s not in set(edit_remove_skills)]
+            skill_touched = True
+        if skill_touched:
+            edit_updates["skills"] = new_skills if new_skills else None
+            edit_updates["skill"] = None
+            # Mutual exclusion: skill active ⇒ clear stale prompt.
+            if new_skills and "prompt" not in edit_updates:
+                edit_updates["prompt"] = None
+        # Mirror: --prompt active ⇒ clear stale skills.
+        if "prompt" in edit_updates and edit_updates["prompt"] and not skill_touched:
+            if existing.get("skills") or existing.get("skill"):
+                edit_updates["skills"] = None
+                edit_updates["skill"] = None
+
+        if not edit_updates:
+            ctx.console.print(
+                "[yellow]Nothing to update. Pass at least one of "
+                "--schedule/--prompt/--skill/etc.[/yellow]"
+            )
+            return SlashResult(handled=True)
+
+        try:
+            updated = update_job(edit_job_id, edit_updates)
+        except CronThreatBlocked as e:
+            ctx.console.print(f"[red]Blocked: {e}[/red]")
+            return SlashResult(handled=True)
+        except ValueError as e:
+            ctx.console.print(f"[red]Error: {e}[/red]")
+            return SlashResult(handled=True)
+        if not updated:
+            ctx.console.print(f"[red]Cron job {edit_job_id!r} not found[/red]")
+            return SlashResult(handled=True)
+        ctx.console.print(
+            f"[green]✓[/green] Updated cron {updated['id']} "
+            f"({updated['schedule_display']})"
+        )
+        return SlashResult(handled=True)
+
+    if sub in ("help", "?"):
+        ctx.console.print(
+            "## /cron commands\n"
+            "  /cron list [all]                    — show jobs (default)\n"
+            "  /cron add <schedule> <prompt>       — create with prompt\n"
+            "  /cron add <schedule> --skill X      — create with skill\n"
+            "  /cron pause|resume|run|remove <id>  — manage by id\n"
+        )
+        return SlashResult(handled=True)
+
+    ctx.console.print(
+        f"[yellow]Unknown /cron subcommand: {sub!r}. Try /cron help.[/yellow]"
+    )
+    return SlashResult(handled=True)
+
+
+def _handle_agents_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/agents [list|kill <id>|help]`` — Hermes parity TUI-overlay-lite.
+
+    Hermes parity (2026-05-08, extended 2026-05-09): the spec mentions a
+    TUI overlay with kill/pause controls. This is the slash version:
+    bare ``/agents`` prints the live tree (read-only), ``/agents kill <id>``
+    cancels a running subagent. Pause is not implemented (Hermes itself
+    treats it as advisory; OC's asyncio-task model only supports cancel).
+    """
+    sub = args[0].lower() if args else "list"
+    rest = args[1:]
+
+    try:
+        from opencomputer.agent.subagent_registry import SubagentRegistry
+        registry = SubagentRegistry.instance()
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Subagent registry unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+
+    if sub == "kill":
+        if not rest:
+            ctx.console.print("[yellow]Usage: /agents kill <agent_id>[/yellow]")
+            return SlashResult(handled=True)
+        target_id = rest[0]
+        # Allow ID prefix match for convenience (mirrors `oc agents kill`).
+        running = registry.list_running()
+        match = next(
+            (r for r in running if r.agent_id == target_id or r.agent_id.startswith(target_id)),
+            None,
+        )
+        if match is None:
+            ctx.console.print(
+                f"[red]No running subagent matches {target_id!r}.[/red] "
+                "Try `/agents list` for ids."
+            )
+            return SlashResult(handled=True)
+        ok = registry.kill(match.agent_id)
+        if ok:
+            ctx.console.print(
+                f"[green]✓[/green] Killed subagent {match.agent_id[:8]} "
+                f"({match.goal[:40] if match.goal else '?'})"
+            )
+        else:
+            ctx.console.print(
+                f"[yellow]Subagent {match.agent_id[:8]} could not be killed "
+                "(already finished?)[/yellow]"
+            )
+        return SlashResult(handled=True)
+
+    if sub in ("help", "?"):
+        ctx.console.print(
+            "## /agents commands\n"
+            "  /agents [list]             — show subagent tree (default)\n"
+            "  /agents kill <agent_id>    — cancel a running subagent\n"
+        )
+        return SlashResult(handled=True)
+
+    if sub != "list":
+        ctx.console.print(
+            f"[yellow]Unknown /agents subcommand: {sub!r}. Try /agents help.[/yellow]"
+        )
+        return SlashResult(handled=True)
+
+    try:
+        from datetime import UTC, datetime
+
+        running = registry.list_running()
+        finished = registry.history(limit=20)
+        records = list(running) + list(finished)
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Subagent registry unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+
+    if not records:
+        ctx.console.print("[dim]No subagents running or recently finished.[/dim]")
+        return SlashResult(handled=True)
+
+    # Group by parent_id. None == top-level.
+    by_parent: dict[str | None, list] = {}
+    for r in records:
+        by_parent.setdefault(r.parent_id, []).append(r)
+
+    state_icon = {"running": "▶", "completed": "✓", "failed": "✗", "killed": "⊘"}
+    lines = [f"## Subagents ({len(records)})\n"]
+
+    def _emit(rec, depth: int) -> None:
+        indent = "  " * depth
+        icon = state_icon.get(rec.state, "?")
+        if rec.ended_at:
+            elapsed = f" ({(rec.ended_at - rec.started_at).total_seconds():.1f}s)"
+        elif rec.state == "running":
+            elapsed = (
+                f" ({(datetime.now(UTC) - rec.started_at).total_seconds():.0f}s)"
+            )
+        else:
+            elapsed = ""
+        goal = (rec.goal or "")[:60]
+        lines.append(
+            f"{indent}{icon} {rec.agent_id[:8]} [{rec.state}]{elapsed}  {goal}"
+        )
+        for child in by_parent.get(rec.agent_id, []):
+            _emit(child, depth + 1)
+
+    for top in by_parent.get(None, []):
+        _emit(top, 0)
     ctx.console.print("\n".join(lines))
     return SlashResult(handled=True)
 
@@ -1014,6 +1462,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "insights": _handle_insights,
     "skills":   _handle_skills_inline,
     "cron":     _handle_cron_inline,
+    "agents":   _handle_agents_inline,
     "plugins":  _handle_plugins_inline,
     "profile":  _handle_profile_inline,
     "image":    _handle_image,

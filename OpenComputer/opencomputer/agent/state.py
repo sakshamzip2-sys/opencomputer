@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 15
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     goal_text         TEXT,            -- Wave 5 (2026-05-04): /goal persistent target
     goal_active       INTEGER DEFAULT 0,
     goal_turns_used   INTEGER DEFAULT 0,
-    goal_budget       INTEGER DEFAULT 20
+    goal_budget       INTEGER DEFAULT 20,
+    goal_last_judge_reason TEXT         -- Kanban-Goals v2 (2026-05-08): structured judge rationale
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -207,6 +208,26 @@ CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
 BEFORE DELETE ON audit_log BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only');
 END;
+
+-- v1.1 plan-2 M5.2 (2026-05-09): per-prompt message-history checkpoints.
+-- The agent loop fires CheckpointManager.create() before each tool_use
+-- block so `oc session rewind` can restore message state at a chosen
+-- prior point. files_snapshot_json is NULL by default (opt-in via
+-- checkpoints.snapshot_files config); messages_snapshot_json carries
+-- the JSON-serialized message history at that point.
+CREATE TABLE IF NOT EXISTS prompt_checkpoints (
+    id                       TEXT PRIMARY KEY,
+    session_id               TEXT NOT NULL,
+    prompt_index             INTEGER NOT NULL,
+    messages_snapshot_json   TEXT NOT NULL,
+    files_snapshot_json      TEXT,
+    label                    TEXT NOT NULL,
+    created_at               REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_checkpoints_session
+    ON prompt_checkpoints(session_id, created_at);
 """
 
 
@@ -225,6 +246,9 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (9, 10): "_migrate_v9_to_v10",
     (10, 11): "_migrate_v10_to_v11",
     (11, 12): "_migrate_v11_to_v12",
+    (12, 13): "_migrate_v12_to_v13",
+    (13, 14): "_migrate_v13_to_v14",
+    (14, 15): "_migrate_v14_to_v15",
 }
 
 
@@ -612,6 +636,7 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("sessions", "vibe", "TEXT"),
     ("sessions", "vibe_updated", "REAL"),
     ("sessions", "cwd", "TEXT"),  # Plan 3 (2026-05-01) — profile-suggester input
+    ("sessions", "goal_last_judge_reason", "TEXT"),  # Kanban-Goals v2 (2026-05-08)
     ("episodic_events", "dreamed_into", "INTEGER"),
 )
 
@@ -725,6 +750,94 @@ def _migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
             _create_fts("porter unicode61")
         else:
             raise
+
+
+def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """Hermes B4 (2026-05-06) — per-LLM-call usage + cost recording.
+
+    Adds a new ``llm_calls`` table that records one row per provider
+    completion request. Distinct from ``tool_usage`` (which records tool
+    dispatches): an LLM call is the agent talking to its model, a tool
+    call is the agent talking to its environment.
+
+    Schema:
+
+    - ``provider`` / ``model`` — duplicated so cost rollups don't need
+      to join messages.
+    - ``input_tokens`` / ``output_tokens`` — raw counts as reported by
+      the provider's usage block.
+    - ``cost_usd`` — nullable: the cost-guard pricing table doesn't have
+      every model, and we'd rather record None than fake zero.
+    - ``batch`` — 0/1; batch API discounts factor into cost_usd.
+
+    Indexes mirror ``tool_usage`` for symmetry.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS llm_calls (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            ts              REAL NOT NULL,
+            provider        TEXT NOT NULL,
+            model           TEXT NOT NULL,
+            input_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens   INTEGER NOT NULL DEFAULT 0,
+            cost_usd        REAL,
+            batch           INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_session
+            ON llm_calls(session_id);
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_ts
+            ON llm_calls(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_model
+            ON llm_calls(model);
+        """
+    )
+
+
+def _migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """Kanban-Goals v2 (2026-05-08) — add ``goal_last_judge_reason``.
+
+    Spec: docs/superpowers/specs/2026-05-08-kanban-goals-v2-design.md §6.
+    Additive nullable column; old goals read NULL → ``GoalState.last_judge_reason``
+    becomes ``None``. Self-heal-friendly: skip the ALTER if a column already
+    exists (e.g. mixed-version rollouts).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "goal_last_judge_reason" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN goal_last_judge_reason TEXT")
+
+
+def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """v1.1 plan-2 M5.2 (2026-05-09) — per-prompt message-history checkpoints.
+
+    The DDL above already declares ``prompt_checkpoints`` with
+    ``CREATE TABLE IF NOT EXISTS`` so fresh DBs get the table at v0→v1
+    via the baseline DDL. Legacy DBs (v14) need an explicit create
+    here so the table appears without re-running baseline DDL.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prompt_checkpoints (
+            id                       TEXT PRIMARY KEY,
+            session_id               TEXT NOT NULL,
+            prompt_index             INTEGER NOT NULL,
+            messages_snapshot_json   TEXT NOT NULL,
+            files_snapshot_json      TEXT,
+            label                    TEXT NOT NULL,
+            created_at               REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prompt_checkpoints_session
+            ON prompt_checkpoints(session_id, created_at)
+        """
+    )
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -945,6 +1058,44 @@ class SessionDB:
         title = row["title"]
         return title if title else None
 
+    def find_session_by_title(self, title: str) -> dict[str, Any] | None:
+        """Return the session row whose ``title`` exactly matches *title*.
+
+        Hermes-CLI parity (doc line 405) — ``oc chat --resume "title"``.
+        Titles already have a unique index (NULL allowed, non-NULL
+        unique), so at most one row matches. Returns ``None`` when not
+        found.
+        """
+        with self._txn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM sessions WHERE title = ? LIMIT 1", (title,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [c[0] for c in cur.description]
+            return dict(zip(cols, row, strict=True))
+
+    def find_sessions_by_title_lineage(self, base: str) -> list[dict[str, Any]]:
+        """Return all sessions in *base*'s `name [#N]` lineage.
+
+        Hermes-CLI parity (doc lines 442-447). ``oc chat -c "my project"``
+        resolves to the latest session whose title is ``"my project"`` or
+        ``"my project #2"``, ``"my project #3"``, … Rows ordered by
+        ``started_at DESC`` so callers can pick row 0 as "latest".
+        """
+        pattern = base + " #*"
+        with self._txn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM sessions "
+                "WHERE title = ? OR title GLOB ? "
+                "ORDER BY started_at DESC",
+                (base, pattern),
+            )
+            rows = cur.fetchall()
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, r, strict=True)) for r in rows]
+
     def set_session_title(self, session_id: str, title: str) -> None:
         """Persist ``title`` on the session row, creating a minimal row
         if it doesn't exist yet.
@@ -1092,19 +1243,27 @@ class SessionDB:
     # ─── Wave 5 (2026-05-04) — /goal persistent cross-turn goals ────────
 
     def set_session_goal(
-        self, session_id: str, *, text: str, budget: int = 20
+        self, session_id: str, *, text: str, budget: int | None = None
     ) -> None:
         """Set or replace the goal for ``session_id``. Resets turns_used to 0.
 
         Mirrors hermes-agent ``265bd59c1``. ``budget`` is the maximum number of
         continuation turns the loop is allowed to inject before auto-stopping.
+        When ``budget`` is ``None`` the default is read from
+        :class:`opencomputer.agent.config.GoalsConfig` (Kanban-Goals v2).
+        Setting a fresh goal also nulls any prior ``goal_last_judge_reason``.
         """
+        if budget is None:
+            from opencomputer.agent.config import default_config
+
+            budget = default_config().goals.max_turns
         with self._txn() as conn:
             conn.execute(
                 """
                 UPDATE sessions
                    SET goal_text = ?, goal_active = 1,
-                       goal_turns_used = 0, goal_budget = ?
+                       goal_turns_used = 0, goal_budget = ?,
+                       goal_last_judge_reason = NULL
                  WHERE id = ?
                 """,
                 (text, int(budget), session_id),
@@ -1117,7 +1276,8 @@ class SessionDB:
         with self._txn() as conn:
             row = conn.execute(
                 """
-                SELECT goal_text, goal_active, goal_turns_used, goal_budget
+                SELECT goal_text, goal_active, goal_turns_used, goal_budget,
+                       goal_last_judge_reason
                   FROM sessions WHERE id = ?
                 """,
                 (session_id,),
@@ -1129,6 +1289,7 @@ class SessionDB:
             active=bool(row[1]),
             turns_used=int(row[2] or 0),
             budget=int(row[3] or 20),
+            last_judge_reason=row[4],
         )
 
     def update_session_goal(
@@ -1139,8 +1300,14 @@ class SessionDB:
         active: bool | None = None,
         turns_used: int | None = None,
         budget: int | None = None,
+        last_judge_reason: str | None = None,
+        clear_last_judge_reason: bool = False,
     ) -> None:
-        """Patch one or more goal fields. No-op if all kwargs are None."""
+        """Patch one or more goal fields. No-op if all kwargs are None.
+
+        ``last_judge_reason=None`` means "leave unchanged"; pass
+        ``clear_last_judge_reason=True`` to explicitly null the column.
+        """
         sets: list[str] = []
         params: list[object] = []
         if text is not None:
@@ -1155,6 +1322,11 @@ class SessionDB:
         if budget is not None:
             sets.append("goal_budget = ?")
             params.append(int(budget))
+        if last_judge_reason is not None:
+            sets.append("goal_last_judge_reason = ?")
+            params.append(last_judge_reason)
+        elif clear_last_judge_reason:
+            sets.append("goal_last_judge_reason = NULL")
         if not sets:
             return
         params.append(session_id)
@@ -1168,12 +1340,15 @@ class SessionDB:
 
         ``goal_budget`` is preserved so a subsequent ``set_session_goal``
         without an explicit budget falls back to the default.
+        ``goal_last_judge_reason`` is also nulled (a cleared goal has no
+        live judge history).
         """
         with self._txn() as conn:
             conn.execute(
                 """
                 UPDATE sessions
-                   SET goal_text = NULL, goal_active = 0, goal_turns_used = 0
+                   SET goal_text = NULL, goal_active = 0, goal_turns_used = 0,
+                       goal_last_judge_reason = NULL
                  WHERE id = ?
                 """,
                 (session_id,),
@@ -1810,6 +1985,105 @@ class SessionDB:
             out.append(d)
         return out
 
+
+    # ─── Hermes B4: per-LLM-call usage + cost recording ──────────────
+
+    def record_llm_call(
+        self,
+        *,
+        session_id: str,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float | None = None,
+        batch: bool = False,
+        ts: float | None = None,
+    ) -> None:
+        """Record one provider completion call into ``llm_calls``.
+
+        Caller is the agent loop's post-LLM-call site, after
+        ``resp.usage`` is populated. ``cost_usd`` should be computed via
+        :func:`opencomputer.agent.usage_pricing.compute_call_cost` (or
+        omitted, in which case it is recorded as NULL).
+
+        Failures swallowed silently: telemetry must never wedge the loop.
+        """
+        try:
+            with self._txn() as conn:
+                conn.execute(
+                    "INSERT INTO llm_calls "
+                    "(session_id, ts, provider, model, input_tokens, "
+                    " output_tokens, cost_usd, batch) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        ts if ts is not None else time.time(),
+                        provider,
+                        model,
+                        int(input_tokens or 0),
+                        int(output_tokens or 0),
+                        cost_usd,
+                        1 if batch else 0,
+                    ),
+                )
+        except sqlite3.OperationalError:
+            # Pre-v13 DB or transient lock. Drop the row rather than wedge
+            # the loop. ``apply_migrations`` will catch up next session.
+            pass
+
+    def query_llm_calls(
+        self,
+        *,
+        days: int | None = 7,
+        group_by: str = "model",
+    ) -> list[dict[str, Any]]:
+        """Aggregate ``llm_calls`` rows for ``oc insights cost``.
+
+        Returns rows shaped like
+        ``{"key": ..., "calls": N, "input_tokens": ..., "output_tokens":
+        ..., "cost_usd": Optional[float]}``.
+
+        ``cost_usd`` is ``None`` when no row had pricing data; ``0.0``
+        only when every row had pricing data summing to zero. The CLI
+        renders ``None`` as ``—`` (not ``$0.00``) to keep totals honest.
+        """
+        col = (
+            group_by
+            if group_by in ("model", "provider", "session_id")
+            else "model"
+        )
+        params: list[Any] = []
+        sql = (
+            f"SELECT {col} as key, "
+            "COUNT(*) as calls, "
+            "SUM(input_tokens) as input_tokens, "
+            "SUM(output_tokens) as output_tokens, "
+            "SUM(cost_usd) as cost_usd, "
+            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) as missing_cost "
+            "FROM llm_calls "
+        )
+        if days is not None:
+            sql += "WHERE ts >= ? "
+            params.append(time.time() - days * 86400)
+        sql += f"GROUP BY {col} ORDER BY calls DESC"
+
+        with self._connect() as conn:
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                # Pre-v13 DB; return empty.
+                return []
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            # Promote missing_cost into a friendlier flag for callers.
+            missing = int(d.pop("missing_cost") or 0)
+            d["has_partial_cost"] = bool(missing) and bool(d.get("cost_usd"))
+            d["all_cost_missing"] = missing == int(d.get("calls") or 0)
+            out.append(d)
+        return out
 
     # ─── Phase 0 outcome-aware learning helpers ─────────────────────
 

@@ -5,8 +5,78 @@ from __future__ import annotations
 import asyncio
 import os
 
+from opencomputer.security.tirith import (
+    TirithResult,
+    format_findings_for_user,
+)
+from opencomputer.security.tirith import (
+    check_command as tirith_check_command,
+)
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+#: Hermes-parity infrastructure-var blocklist. These keys are stripped
+#: from the BashTool subprocess env regardless of user passthrough.
+#:
+#: Rationale (Hermes spec, "What Each Sandbox Filters"): the agent's own
+#: provider keys, gateway tokens, and OpenComputer-internal control vars
+#: must not leak into shell-spawned children (npm install, git push,
+#: arbitrary user scripts) — those callers should never need them, and
+#: prompt-injected commands could exfiltrate them.
+#:
+#: Third-party tool API keys (NPM_TOKEN, AWS_ACCESS_KEY_ID, GH_TOKEN
+#: when used by the user's own scripts) are NOT in this list — users
+#: routinely need them in shell subprocesses.
+_OC_INFRASTRUCTURE_VARS: frozenset[str] = frozenset({
+    # OC + Hermes control vars
+    # (matches every var with these prefixes too — see _strip_infra_env_vars).
+    # Channel platform tokens — the gateway needs these, but user shells don't.
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "MATTERMOST_BOT_TOKEN",
+    "MATRIX_ACCESS_TOKEN",
+    "WHATSAPP_API_TOKEN",
+    "SIGNAL_BOT_TOKEN",
+    "SMS_BOT_TOKEN",
+    "EMAIL_BOT_TOKEN",
+    "DINGTALK_BOT_TOKEN",
+    "FEISHU_BOT_TOKEN",
+    "WECOM_BOT_TOKEN",
+    "TEAMS_BOT_TOKEN",
+    # Gateway control
+    "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_ALLOWED_USERS",
+    "OPENCOMPUTER_ALLOW_ROOT_GATEWAY",
+})
+
+#: Variable-name prefixes that imply OC / Hermes infrastructure ownership.
+#: Any env var starting with one of these is stripped.
+_OC_INFRASTRUCTURE_PREFIXES: tuple[str, ...] = (
+    "OPENCOMPUTER_",
+    "HERMES_",
+    "OC_",  # OpenComputer-prefixed knobs
+)
+
+
+def _strip_infra_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
+    """Strip OC infrastructure vars from a copy of ``env``.
+
+    Returns ``None`` unchanged so the caller's "use parent env" fallback
+    still works. Only OC's own vars are removed — third-party tool keys
+    (NPM_TOKEN, AWS_*, etc.) pass through untouched because user scripts
+    routinely need them.
+    """
+    if env is None:
+        return None
+    out = dict(env)
+    for k in list(out.keys()):
+        if k in _OC_INFRASTRUCTURE_VARS:
+            del out[k]
+            continue
+        if any(k.startswith(p) for p in _OC_INFRASTRUCTURE_PREFIXES):
+            del out[k]
+    return out
 
 
 class BashTool(BaseTool):
@@ -57,6 +127,63 @@ class BashTool(BaseTool):
             return ToolResult(
                 tool_call_id=call.id, content="Error: empty command", is_error=True
             )
+        # Hardline blocklist — non-bypassable. Fires before profile
+        # scoping and any consent gate so a tripped hardline never
+        # produces a user-visible approval prompt. See
+        # opencomputer/security/hardline.py for the pattern list.
+        from opencomputer.security.hardline import (
+            check_command as _check_hardline,
+        )
+
+        _hardline_hit = _check_hardline(cmd)
+        if _hardline_hit is not None:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Refused: {_hardline_hit.reason} "
+                    f"(hardline pattern '{_hardline_hit.pattern_id}'). "
+                    f"This pattern is non-bypassable."
+                ),
+                is_error=True,
+            )
+
+        # Hermes parity: Tirith pre-exec scan. Subprocess call is
+        # synchronous — wrapped in to_thread so the agent loop's async
+        # dispatch isn't blocked. fail_open default per Tirith config;
+        # binary absent → action='allow' under fail_open and is a no-op.
+        try:
+            tirith_result: TirithResult = await asyncio.to_thread(
+                tirith_check_command, cmd,
+            )
+        except Exception:  # noqa: BLE001 — never let scan break exec
+            tirith_result = TirithResult(action="allow")
+
+        if tirith_result.action == "block":
+            findings_text = (
+                format_findings_for_user(tirith_result)
+                or tirith_result.summary
+                or "blocked by Tirith"
+            )
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    "Refused: Tirith pre-exec scan flagged this command.\n"
+                    f"{findings_text}"
+                ),
+                is_error=True,
+            )
+
+        # warn: don't refuse, but surface findings as a prefix to the
+        # tool result so the model + user see them. allow: silent.
+        warn_prefix = ""
+        if tirith_result.action == "warn":
+            findings_text = format_findings_for_user(tirith_result)
+            if findings_text:
+                warn_prefix = (
+                    "[Tirith warning — command allowed but flagged]\n"
+                    f"{findings_text}\n---\n"
+                )
+
         # Scope HOME / XDG_* to the active profile's home/ subdir so
         # spawned subprocesses (git, ssh, npm, etc.) get per-profile
         # tool-config isolation for credentials and caches. The parent
@@ -68,15 +195,17 @@ class BashTool(BaseTool):
                 scope_subprocess_env,
             )
 
-            env = scope_subprocess_env(
+            scoped = scope_subprocess_env(
                 os.environ.copy(), profile=read_active_profile()
             )
+            env = _strip_infra_env_vars(scoped)
         except Exception:
-            # If profile scoping fails for any reason, fall back to the
-            # parent's env so the command still runs. BashTool MUST NOT
-            # be brittle to profile lookup edge cases.
-            env = None
+            # If profile scoping fails for any reason, fall back to a
+            # bare strip of the parent env so a tool-internal token can
+            # never leak into the subprocess.
+            env = _strip_infra_env_vars(os.environ.copy())
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
@@ -87,11 +216,67 @@ class BashTool(BaseTool):
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             exit_code = proc.returncode or 0
         except TimeoutError:
+            # PR-A Feature 1: terminate the proc so partial output can
+            # be captured; the call site treats timeout same as cancel.
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except (TimeoutError, ProcessLookupError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
             return ToolResult(
                 tool_call_id=call.id,
                 content=f"Error: command timed out after {timeout}s",
                 is_error=True,
             )
+        except asyncio.CancelledError:
+            # PR-A Feature 1 — Steer Replan-with-Context. The agent
+            # loop's cancel-aware dispatch fires CancelledError on the
+            # _run_one task; we terminate the subprocess and pre-build
+            # a result with whatever stdout was captured before re-
+            # raising so the loop's _make_cancelled_result helper can
+            # surface partial output to the model on replan.
+            partial_stdout = ""
+            if proc is not None:
+                try:
+                    if proc.returncode is None:
+                        proc.terminate()
+                        try:
+                            await asyncio.wait_for(proc.wait(), timeout=1.0)
+                        except (TimeoutError, ProcessLookupError):
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                    # Drain whatever already buffered. communicate() may
+                    # have queued data on the pipe even though the await
+                    # was cancelled.
+                    try:
+                        if proc.stdout is not None:
+                            buf = await asyncio.wait_for(
+                                proc.stdout.read(), timeout=0.5,
+                            )
+                            partial_stdout = buf.decode("utf-8", errors="replace")
+                    except (TimeoutError, Exception):  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
+            # Stash the partial output on the cancelled task so the
+            # dispatcher's _make_cancelled_result can pick it up.
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                # Attach as an attribute on the task object — read by
+                # _make_cancelled_result via getattr fallback.
+                try:
+                    object.__setattr__(
+                        current_task, "_pr_a_partial_stdout", partial_stdout,
+                    )
+                except (AttributeError, TypeError):
+                    pass
+            raise
         except Exception as e:
             return ToolResult(
                 tool_call_id=call.id,
@@ -108,5 +293,7 @@ class BashTool(BaseTool):
             + (f"\n--- stderr ---\n{err}" if err else "")
         )
         return ToolResult(
-            tool_call_id=call.id, content=combined, is_error=exit_code != 0
+            tool_call_id=call.id,
+            content=warn_prefix + combined,
+            is_error=exit_code != 0,
         )

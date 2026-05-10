@@ -26,20 +26,26 @@ from typing import Any
 
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
+from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
+from opencomputer.agent.slash_commands_impl.batch_cmd import BatchCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
+from opencomputer.agent.slash_commands_impl.busy_cmd import BusyCommand
 from opencomputer.agent.slash_commands_impl.capabilities_cmd import (
     CapabilitiesCommand,
 )
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
+from opencomputer.agent.slash_commands_impl.details_cmd import DetailsCommand
 from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
     StatusbarCommand,
     VerboseCommand,
 )
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
+from opencomputer.agent.slash_commands_impl.footer_cmd import FooterCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
+from opencomputer.agent.slash_commands_impl.mouse_cmd import MouseCommand
 from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
     PersonaModeCommand,
 )
@@ -54,13 +60,19 @@ from opencomputer.agent.slash_commands_impl.policy import (
 from opencomputer.agent.slash_commands_impl.profile_suggest_cmd import (
     ProfileSuggestCommand,
 )
+from opencomputer.agent.slash_commands_impl.queue_mode_cmd import (
+    QueueModeCommand,
+)
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
+from opencomputer.agent.slash_commands_impl.rollback_cmd import RollbackCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
+from opencomputer.agent.slash_commands_impl.sethome_cmd import SethomeCommand
 from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
     PersonalityCommand,
     SkinCommand,
 )
+from opencomputer.agent.slash_commands_impl.status_cmd import StatusCommand
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
 from opencomputer.agent.slash_commands_impl.update_cmd import UpdateCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
@@ -110,12 +122,34 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-04-30 — profile-suggest analyzes recent persona usage and
     # recommends create/switch actions. User-pull only.
     ProfileSuggestCommand,
+    # 2026-05-06 — Phase 2 (S1 from OpenClaw deep-comparison) — inbound
+    # queue mode override. /queue-mode [followup|interrupt|status].
+    QueueModeCommand,
+    # 2026-05-08 — Hermes-parity /background <prompt>. Spawns isolated
+    # AgentLoop on a daemon thread, captures result for `/background show`.
+    BackgroundCommand,
+    # v1.1 plan-3 M11.2 — /batch fan-out via DelegateTool isolation=worktree.
+    BatchCommand,
+    # Hermes CLI/TUI/Sessions v2 parity (2026-05-08):
+    # B1 /rollback [N], B2 /busy [interrupt|queue|steer|status],
+    # B3 /details [section] [mode], D5 /mouse [on|off|toggle|status].
+    RollbackCommand,
+    BusyCommand,
+    DetailsCommand,
+    MouseCommand,
     # 2026-05-03 — Phase 2 v0 outcome-aware learning policy commands.
     PolicyChangesCommand,
     PolicyApproveCommand,
     PolicyRevertCommand,
     PolicyMetricsCommand,
     PolicyToolRiskCommand,
+    # 2026-05-08 — messaging-gateway parity (PR-2 Task B7) — three new
+    # built-in slash commands. /sethome and /footer have CLI/Typer twins
+    # already; this exposes them on the SlashCommand class dispatch path
+    # used by gateway / wire / ACP. /status is a fresh read-only summary.
+    SethomeCommand,
+    StatusCommand,
+    FooterCommand,
 )
 
 

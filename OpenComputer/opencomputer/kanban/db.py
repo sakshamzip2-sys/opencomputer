@@ -1156,6 +1156,49 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
+def apply_specify(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    expanded_body: str,
+    new_status: str = "todo",
+) -> bool:
+    """Persist the result of a triage→spec expansion.
+
+    Idempotent on identical inputs (re-running specify with the same body
+    produces the same row state). Returns False if the task does not
+    exist; raises :class:`ValueError` if ``new_status`` is not a member
+    of :data:`VALID_STATUSES` (catches typos at the call site rather
+    than letting bad data into the DB).
+
+    The function is intentionally decoupled from the LLM call —
+    :mod:`opencomputer.kanban.specify` produces ``expanded_body`` and
+    delegates persistence here so the DB layer stays sync + testable
+    without an LLM dependency.
+    """
+    if new_status not in VALID_STATUSES:
+        raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if not row:
+            return False
+        old_status = row["status"]
+        conn.execute(
+            "UPDATE tasks SET body = ?, status = ? WHERE id = ?",
+            (expanded_body, new_status, task_id),
+        )
+        _append_event(
+            conn, task_id, "specified",
+            {
+                "old_status": old_status, "new_status": new_status,
+                "body_chars": len(expanded_body),
+            },
+        )
+        return True
+
+
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: str | None) -> bool:
     """Assign or reassign a task.  Returns True on success.
 
@@ -2748,6 +2791,49 @@ def _rotate_worker_log(log_path: Path, max_bytes: int) -> None:
         pass
 
 
+def _resolve_oc_executable() -> list[str]:
+    """Return the argv prefix for spawning a kanban worker.
+
+    Three-tier resolution so the dispatcher works regardless of how the
+    parent was launched (interactive shell, systemd, launchd, Docker,
+    `pip install --user`, venv, ...):
+
+    1. ``shutil.which("oc")`` — fastest path; honours the dispatcher's
+       inherited ``$PATH``. Works for the common `pip install --user`
+       case where the user's shell adds ``~/.local/bin`` to PATH.
+    2. ``Path(sys.executable).parent / "oc"`` — covers venv installs
+       where the CLI script sits next to the interpreter even if the
+       venv's ``bin/`` is not on the dispatcher's ``$PATH``. This is
+       the most common cause of the "`oc` not on PATH" spawn failure:
+       the dispatcher inherits a daemon-launch ``$PATH`` (launchd /
+       systemd) that doesn't include the venv.
+    3. ``[sys.executable, "-m", "opencomputer"]`` — bulletproof
+       bootstrap when neither script is reachable. The ``opencomputer``
+       package always exposes ``__main__.py``-style module dispatch
+       via ``opencomputer.cli:main``, so spawning the same Python
+       interpreter as the parent dispatcher is guaranteed to work.
+
+    Returns a list (rather than a single string) so callers can splat
+    it into argv: ``cmd = [*_resolve_oc_executable(), "-p", profile, ...]``.
+    """
+    import shutil
+    import sys
+
+    # 1. PATH lookup
+    found = shutil.which("oc")
+    if found:
+        return [found]
+
+    # 2. Sibling of sys.executable (venv layout)
+    sibling = Path(sys.executable).parent / "oc"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return [str(sibling)]
+
+    # 3. Module-form bootstrap — guaranteed to work because
+    # ``opencomputer`` always declares the cli entry point.
+    return [sys.executable, "-m", "opencomputer"]
+
+
 def _default_spawn(task: Task, workspace: str) -> int | None:
     """Fire-and-forget ``oc -p <profile> chat -q ...`` subprocess.
 
@@ -2832,29 +2918,21 @@ def _default_spawn(task: Task, workspace: str) -> int | None:
     env["OC_PROFILE"] = task.assignee
 
     cmd = [
-        "oc",
+        *_resolve_oc_executable(),
         "-p", task.assignee,
-        # Auto-load the kanban-worker skill so every dispatched worker
-        # has the pattern library (good summary/metadata shapes, retry
-        # diagnostics, block-reason examples) in its context, even if
-        # the profile hasn't wired it into skills config. The MANDATORY
-        # lifecycle is already in the system prompt via KANBAN_GUIDANCE;
-        # this skill is the deeper reference. Users can point a profile
-        # at a different/additional skill via config if they want —
-        # --skills is additive to the profile's default skill set.
-        "--skills", "kanban-worker",
     ]
-    # Per-task force-loaded skills. Each name goes in its own
-    # `--skills X` pair rather than a single comma-joined arg: the CLI
-    # accepts both forms (action='append' + comma-split), but
-    # per-name pairs are easier to read in `ps` output and avoid any
-    # quoting ambiguity if a skill name ever contains unusual chars.
-    # Dedupe against the built-in so we don't double-load kanban-worker
-    # if a task author asks for it explicitly.
-    if task.skills:
-        for sk in task.skills:
-            if sk and sk != "kanban-worker":
-                cmd.extend(["--skills", sk])
+    # NOTE: a previous iteration of this dispatcher passed `--skills
+    # kanban-worker` (and per-task `task.skills` entries) to inject
+    # extra skill payloads into the worker's system prompt. That CLI
+    # flag was never wired (`oc chat --help` has no `--skills` option,
+    # nor does the top-level `oc` command), so spawn invocations exited
+    # immediately with `Error: No such option: --skills`. The KANBAN_GUIDANCE
+    # block in the system prompt already carries the kanban-worker
+    # lifecycle, so dropping the flag does NOT remove behavior — it
+    # just stops poisoning the spawn argv. If skill auto-loading per
+    # spawn is wanted, add a real CLI flag first and re-introduce it
+    # here. ``task.skills`` is dropped from the spawn argv for the same
+    # reason; we keep the field in the schema for forward compat.
     cmd.extend([
         "chat",
         "-q", prompt,

@@ -1,0 +1,56 @@
+name: warm-lightmode
+description: Warm parchment — light terminals, easy on eyes.
+
+colors:
+  # Banner
+  banner_border:    "#92400E"
+  banner_title:     "#78350F"
+  banner_accent:    "#B45309"
+  banner_dim:       "#A8A29E"
+  banner_text:      "#44403C"
+  # UI semantic
+  ui_accent:        "#B45309"
+  ui_label:         "#9A3412"
+  ui_ok:            "#3F6212"
+  ui_error:         "#991B1B"
+  ui_warn:          "#854D0E"
+  # Prompt + input area
+  prompt:           "#7C2D12"
+  input_rule:       "#92400E"
+  # Agent response box
+  response_border:  "#92400E"
+  # Session badge + border
+  session_label:    "#44403C"
+  session_border:   "#A8A29E"
+  # Status bars
+  status_bar_bg:    "#FEF3C7"
+  status_bar_fg:    "#78350F"
+  voice_status_bg:  "#FDE68A"
+  # TUI selection highlight
+  selection_bg:     "#FED7AA"
+  # Completion menu panes
+  completion_menu_bg:               "#FEF3C7"
+  completion_menu_current_bg:       "#FDE68A"
+  completion_menu_meta_bg:          "#FEF9E7"
+  completion_menu_meta_current_bg:  "#FED7AA"
+  # Legacy / extra
+  user_text:        "#1C1917"
+  agent_text:       "#44403C"
+  agent_label:      "#92400E"
+  tool_label:       "#9A3412"
+  tool_output:      "#3F6212"
+  error:            "#991B1B"
+  warning:          "#854D0E"
+  info:             "#3730A3"
+  dim:              "#A8A29E"
+
+spinner:
+  thinking_verbs: [contemplating, brewing, settling]
+  wings: [["~", "~"]]
+  waiting_faces: ["(◡‿◡)", "(¯‿¯)", "(˘ᴗ˘)"]
+  thinking_faces: ["(◕‿◕)", "(◠‿◠)", "(✿‿✿)"]
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " ☀ OC "
+  prompt_symbol: ">"

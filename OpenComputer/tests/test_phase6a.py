@@ -117,11 +117,12 @@ def _mk_msgs(n: int) -> list[Message]:
 def test_compaction_does_not_fire_below_threshold() -> None:
     from opencomputer.agent.compaction import CompactionEngine
 
+    # Wave 3 (2026-05-08) — Opus 4.7 ships a 1M context window; the
+    # threshold is now 80% of 1M = 800k, not 80% of 200k = 160k.
     eng = CompactionEngine(provider=MagicMock(), model="claude-opus-4-7")
     assert eng.should_compact(last_input_tokens=100) is False
-    # 80% of 200k = 160k
-    assert eng.should_compact(last_input_tokens=159_000) is False
-    assert eng.should_compact(last_input_tokens=170_000) is True
+    assert eng.should_compact(last_input_tokens=799_000) is False
+    assert eng.should_compact(last_input_tokens=850_000) is True
 
 
 def test_compaction_disabled_never_fires() -> None:

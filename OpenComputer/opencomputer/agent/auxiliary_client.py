@@ -140,6 +140,17 @@ class AuxiliaryClient:
         except Exception:
             logger.exception("auxiliary task %r failed on model %r", task, model)
             raise
+        # Hermes-followup 2026-05-07 — record cost into active session.
+        try:
+            from opencomputer.agent.usage_pricing import (
+                record_response_for_provider,
+            )
+
+            record_response_for_provider(
+                provider=self.provider, model=model, response=resp
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return (resp.message.content or "").strip()
 
     # ─── task-typed entrypoints ─────────────────────────────────────

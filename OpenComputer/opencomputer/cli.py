@@ -15,7 +15,6 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.theme import Theme as _RichTheme
 
-from opencomputer import __version__
 from opencomputer.agent.config import Config, default_config
 from opencomputer.agent.config_store import (
     config_file_path,
@@ -281,6 +280,89 @@ _OC_THEME = _RichTheme(
 console = Console(record=True, theme=_OC_THEME)
 
 
+def _profile_config_path() -> Path:
+    """Resolve the active profile's config.yaml path.
+
+    Honors ``OPENCOMPUTER_HOME`` and ``OPENCOMPUTER_PROFILE`` envs to
+    match the slash command + profile-bootstrap conventions.
+    """
+    home = os.environ.get(
+        "OPENCOMPUTER_HOME",
+        str(Path.home() / ".opencomputer"),
+    )
+    profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+    return Path(home) / profile / "config.yaml"
+
+
+def _apply_personality_skin_at_startup(
+    runtime: object, personality_flag: str, skin_flag: str,
+) -> None:
+    """Seed runtime.custom with personality + apply skin at session start.
+
+    Resolution order for personality:
+      1. ``--personality NAME`` CLI flag
+      2. ``runtime.custom["personality"]`` (already set by an external caller)
+      3. ``agent.default_personality`` from active profile config
+
+    Resolution order for skin:
+      1. ``--skin NAME`` CLI flag
+      2. ``OPENCOMPUTER_SKIN`` env var
+      3. ``display.skin`` from active profile config
+      4. ``default``
+
+    Fail-soft: any error logs a warning and returns without crashing.
+    """
+    try:
+        from opencomputer.agent.profile_yaml import (
+            get_default_personality,
+            get_display_skin,
+        )
+
+        cfg = _profile_config_path()
+
+        runtime_custom = getattr(runtime, "custom", None)
+        if isinstance(runtime_custom, dict):
+            chosen_personality = (
+                personality_flag
+                or runtime_custom.get("personality", "")
+                or get_default_personality(cfg)
+            )
+            if chosen_personality:
+                runtime_custom["personality"] = chosen_personality
+
+            chosen_skin = (
+                skin_flag
+                or os.environ.get("OPENCOMPUTER_SKIN", "")
+                or get_display_skin(cfg)
+                or "default"
+            )
+            runtime_custom["skin"] = chosen_skin
+        else:
+            chosen_skin = (
+                skin_flag
+                or os.environ.get("OPENCOMPUTER_SKIN", "")
+                or get_display_skin(cfg)
+                or "default"
+            )
+
+        # Apply skin immediately on the live console.
+        try:
+            from opencomputer.cli_ui.skin import apply_skin, load_skin
+            apply_skin(load_skin(chosen_skin), console)
+        except Exception as exc:  # noqa: BLE001 — never crash startup on theme
+            import logging as _logging
+            _logging.getLogger("opencomputer.cli").warning(
+                "skin: apply at startup failed for %r — %s",
+                chosen_skin,
+                exc,
+            )
+    except Exception as exc:  # noqa: BLE001 — outer guard, never crash
+        import logging as _logging
+        _logging.getLogger("opencomputer.cli").warning(
+            "startup: personality/skin init failed — %s", exc,
+        )
+
+
 def _register_builtin_tools() -> None:
     """Register the core bundled tools. Only runs once per process."""
     if "Read" in registry.names():
@@ -299,6 +381,11 @@ def _register_builtin_tools() -> None:
     registry.register(WriteTool())
     registry.register(BashTool())
     registry.register(PythonExec())
+    # 2026-05-08 — Hermes Doc-2 ``execute_code`` parity. Thin wrapper
+    # over PTC mode with broader default toolset + env scrub + stderr cap.
+    from opencomputer.tools.execute_code import ExecuteCode
+
+    registry.register(ExecuteCode())
     registry.register(GrepTool())
     registry.register(GlobTool())
     registry.register(SkillManageTool())
@@ -454,7 +541,51 @@ def _discover_plugins() -> int:
     search_paths = standard_search_paths()
     enabled = _resolve_plugin_filter()
     loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
+
+    # v1.1 plan-3 M11.5 — Mount any plugin-registered CLI subcommand
+    # trees into the main typer app.  Idempotent: typer.Typer.add_typer
+    # accepts the same plugin's app once; re-running plugin discovery
+    # in tests doesn't add the same registration twice because the
+    # plugin's register(api) call is also gated by the registry.
+    try:
+        api = plugin_registry.api()
+        registered = getattr(api, "all_cli_commands", lambda: {})()
+        for ns, sub_app in registered.items():
+            # Skip if this namespace was already mounted (test re-runs).
+            if ns in _MOUNTED_PLUGIN_CLI_NAMESPACES:
+                continue
+            try:
+                app.add_typer(sub_app, name=ns)
+                _MOUNTED_PLUGIN_CLI_NAMESPACES.add(ns)
+            except Exception as exc:  # noqa: BLE001
+                # A bad plugin must NEVER prevent the CLI from starting.
+                _log_cli_mount_failure(ns, exc)
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — extremely unlikely (registry.api always returns).
+        # If something pathological happens, log + proceed; the rest of
+        # the CLI must still work.
+        _log_cli_mount_failure("<plugin-cli-discovery>", exc)
+
     return len(loaded)
+
+
+# v1.1 plan-3 M11.5 — process-wide set of mounted plugin CLI namespaces.
+# Idempotent across multiple ``_discover_plugins()`` calls so test runs +
+# multi-profile dispatch don't double-mount.
+_MOUNTED_PLUGIN_CLI_NAMESPACES: set[str] = set()
+
+
+def _log_cli_mount_failure(namespace: str, exc: Exception) -> None:
+    """Log a plugin-CLI mount failure without crashing the CLI."""
+    import logging
+
+    logging.getLogger("opencomputer.cli").warning(
+        "Failed to mount plugin CLI subcommands for %r (%s: %s); "
+        "the rest of the CLI is unaffected",
+        namespace,
+        type(exc).__name__,
+        exc,
+    )
 
 
 def _apply_model_overrides() -> int:
@@ -513,6 +644,10 @@ def _register_settings_hooks(cfg: Config) -> int:
     :func:`opencomputer.hooks.shell_handlers.make_shell_hook_handler`)
     then registers it against the global hook engine.
 
+    v1.1 plan-2 M8.1 (2026-05-09) — also iterates ``cfg.prompt_hooks``
+    and registers each :class:`HookPromptConfig` via
+    :func:`opencomputer.hooks.prompt_handlers.make_prompt_hook_handler`.
+
     Settings-declared hooks run AFTER plugin-declared hooks because
     plugins call ``api.register_hook`` at plugin-load time (which is
     earlier than this CLI-time call). Coexistence is by design — both
@@ -522,8 +657,6 @@ def _register_settings_hooks(cfg: Config) -> int:
     so a single bad entry can't wedge CLI startup. Returns the count
     successfully registered (used by the chat banner).
     """
-    if not cfg.hooks:
-        return 0
     registered = 0
     for h in cfg.hooks:
         try:
@@ -535,14 +668,75 @@ def _register_settings_hooks(cfg: Config) -> int:
                 h.command,
             )
             continue
+        # 2026-05-08 G4 — settings hooks for PRE_LLM_CALL register with
+        # fire_and_forget=False so they participate in
+        # engine.collect_inject_contexts (which runs ONLY blocking-eligible
+        # handlers). Plugin PRE_LLM_CALL handlers stay fire-and-forget by
+        # default; their existing semantics are preserved.
+        fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
         hook_engine.register(
             HookSpec(
                 event=event,
                 handler=make_shell_hook_handler(h),
                 matcher=h.matcher,
+                fire_and_forget=fire_and_forget,
             )
         )
         registered += 1
+
+    # v1.1 plan-2 M8.1 — prompt hooks. Lazy import so command-only
+    # configs don't pay for the aux-LLM module load at CLI start.
+    if getattr(cfg, "prompt_hooks", ()):
+        from opencomputer.hooks.prompt_handlers import (  # noqa: PLC0415
+            make_prompt_hook_handler,
+        )
+
+        for ph in cfg.prompt_hooks:
+            try:
+                event = HookEvent(ph.event)
+            except ValueError:
+                _log.warning(
+                    "prompt hook: unknown event %r; skipping",
+                    ph.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_prompt_hook_handler(ph),
+                    matcher=ph.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
+
+    # v1.1 plan-2 M8.2 — agent hooks. Same lazy-import pattern; pulls in
+    # the delegate tool only when the user actually configured one.
+    if getattr(cfg, "agent_hooks", ()):
+        from opencomputer.hooks.agent_handlers import (  # noqa: PLC0415
+            make_agent_hook_handler,
+        )
+
+        for ah in cfg.agent_hooks:
+            try:
+                event = HookEvent(ah.event)
+            except ValueError:
+                _log.warning(
+                    "agent hook: unknown event %r; skipping",
+                    ah.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_agent_hook_handler(ah),
+                    matcher=ah.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
     return registered
 
 
@@ -610,7 +804,14 @@ def default(
     if headless:
         os.environ["OPENCOMPUTER_HEADLESS"] = "1"
     if version:
-        console.print(f"opencomputer {__version__}")
+        # Long form when running from a git checkout — includes the
+        # current sha + behind/ahead vs origin/main. Helps users diagnose
+        # the "merged but not deployed" gotcha (editable installs bind
+        # to a filesystem path, not a branch). Falls back to plain
+        # version string for PyPI installs / non-git environments.
+        from opencomputer.doctor import get_source_version_string
+
+        console.print(get_source_version_string())
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
         _run_chat_session(resume="", plan=False, no_compact=False, yolo=False)
@@ -619,14 +820,18 @@ def default(
 def _resolve_resume_target(spec: str) -> str | None:
     """Resolve a magic ``--resume`` value to a concrete session id.
 
-    Supports two magic spellings:
+    Supports several spellings:
 
-    - ``last`` → most-recent session by ``started_at``
-    - ``pick`` → interactive prompt listing the last 10 sessions
+    - ``last``    — most-recent session by ``started_at``.
+    - ``pick``    — interactive prompt listing the last 10 sessions.
+    - exact title — Hermes-parity C6: ``oc chat --resume "refactor auth"``
+                     resolves to the unique session with that title.
+    - lineage     — Hermes-parity C5: ``oc chat -c "my project"`` resolves
+                     to the most-recent session with title ``my project``
+                     or ``my project #2``, ``my project #3``, …
 
-    Returns the resolved id, or ``None`` when there are no sessions to
-    pick from (caller falls back to a fresh session). Reuses
-    :meth:`SessionDB.list_sessions` — no duplicate query path.
+    Returns the resolved id, or ``None`` when nothing matches (caller
+    treats as a fresh session, or as an id-prefix downstream).
     """
     from opencomputer.agent.config import default_config
     from opencomputer.agent.state import SessionDB
@@ -635,31 +840,54 @@ def _resolve_resume_target(spec: str) -> str | None:
     db = SessionDB(cfg.session.db_path)
     rows = db.list_sessions(limit=10)
     if not rows:
+        # Even with no recent sessions, an exact-title lookup may still
+        # find a row beyond the first 10 (e.g., a long-lived named
+        # session). Try the title path before bailing.
+        if spec not in ("last", "pick"):
+            row = db.find_session_by_title(spec)
+            if row:
+                return str(row["id"])
+            lineage = db.find_sessions_by_title_lineage(spec)
+            if lineage:
+                return str(lineage[0]["id"])
         return None
     if spec == "last":
         return str(rows[0]["id"])
 
-    # spec == "pick" — open the polished alt-screen picker (PR #207).
-    # Falls back to None if the user cancels (Esc / Ctrl+C).
-    from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
+    if spec == "pick":
+        # Open the polished alt-screen picker (PR #207).
+        # Falls back to None if the user cancels (Esc / Ctrl+C).
+        from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
 
-    def _coerce_started_at(v) -> float:
-        try:
-            return float(v) if v is not None else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+        def _coerce_started_at(v) -> float:
+            try:
+                return float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                return 0.0
 
-    picker_rows = [
-        SessionRow(
-            id=str(r.get("id", "")),
-            title=r.get("title") or "",
-            started_at=_coerce_started_at(r.get("started_at")),
-            message_count=int(r.get("message_count", 0) or 0),
-        )
-        for r in rows
-        if r.get("id")
-    ]
-    return run_resume_picker(picker_rows, db=db)
+        picker_rows = [
+            SessionRow(
+                id=str(r.get("id", "")),
+                title=r.get("title") or "",
+                started_at=_coerce_started_at(r.get("started_at")),
+                message_count=int(r.get("message_count", 0) or 0),
+            )
+            for r in rows
+            if r.get("id")
+        ]
+        return run_resume_picker(picker_rows, db=db)
+
+    # Hermes-CLI parity C5/C6 — title and lineage resolution.
+    # Exact-title match first (titles have a UNIQUE index, so at most 1).
+    row = db.find_session_by_title(spec)
+    if row:
+        return str(row["id"])
+    # Lineage match — newest session in `spec`, `spec #2`, `spec #3` family.
+    lineage = db.find_sessions_by_title_lineage(spec)
+    if lineage:
+        return str(lineage[0]["id"])
+    # Fall through — caller treats as id-prefix downstream.
+    return None
 
 
 _STREAM_HOOKS_WIRED = False
@@ -902,12 +1130,18 @@ def _run_chat_session(
     yolo: bool = False,
     accept_edits: bool = False,
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
+    personality: str = "",
+    skin: str = "",
 ) -> None:
     """Shared interactive REPL used by ``chat`` and ``code`` commands.
 
     V3.A-T7 — extracted from ``chat`` so ``code`` can reuse the full
     setup/loop without copy-paste. ``yolo`` threads through ``RuntimeContext``
     so the consent layer can skip per-action prompts when the user opts in.
+
+    ``personality`` / ``skin``: optional CLI-flag values; if empty, the
+    startup helper reads from the active profile config and falls back
+    to safe defaults.
     """
     _configure_logging_once()
     if not config_file_path().exists() and not _has_any_provider_configured():
@@ -952,11 +1186,43 @@ def _run_chat_session(
     runtime = RuntimeContext(
         plan_mode=plan, yolo_mode=yolo, permission_mode=permission_mode,
     )
+    # Hermes v2 D7 (2026-05-08) — expose the live Rich Console under
+    # ``runtime.custom["live_console"]`` so slash commands that need to
+    # repaint a live surface (currently /skin) can hot-swap the theme
+    # without a session restart. Channel adapters and the gateway don't
+    # have a live console, so the key stays absent there and slash
+    # commands fall back to throwaway-console + module-state updates.
+    runtime.custom["live_console"] = console
+    # Personality / skin: --flag wins, then config default, then nothing.
+    # Values land in runtime.custom so the agent loop and rendering
+    # paths pick them up uniformly. apply_personality_skin_at_startup
+    # is fail-soft — bad config never crashes the chat loop.
+    _apply_personality_skin_at_startup(runtime, personality, skin)
     # One ReasoningStore per chat session — survives across turns,
     # accessed by /reasoning show and the renderer's finalize().
     from opencomputer.cli_ui import ReasoningStore as _ReasoningStore
     if "_reasoning_store" not in runtime.custom:
         runtime.custom["_reasoning_store"] = _ReasoningStore()
+
+    # Hermes-CLI parity A3 — per-prompt elapsed clock. status_line.py
+    # reads this if present; turn dispatch calls .start() / .stop().
+    from opencomputer.cli_ui.per_prompt_elapsed import PromptClock as _PromptClock
+    if "_prompt_clock" not in runtime.custom:
+        runtime.custom["_prompt_clock"] = _PromptClock()
+
+    # Hermes-CLI parity A6 — quick commands. Loaded once per session;
+    # slash_dispatcher checks runtime.custom["_quick_commands"] BEFORE
+    # the registry so user aliases / exec quick wins can shadow slash.
+    if "_quick_commands" not in runtime.custom:
+        try:
+            from opencomputer.agent.quick_commands import (
+                QuickCommands as _QuickCommands,
+            )
+
+            runtime.custom["_quick_commands"] = _QuickCommands.load(config_file_path())
+        except Exception:  # noqa: BLE001
+            # Quick commands are optional — never crash session start.
+            pass
 
     # Phase B (model-agnostic thinking): stash the active provider's
     # native-thinking capability for the configured model on
@@ -979,7 +1245,45 @@ def _run_chat_session(
     from opencomputer.agent.thinking_injector import ThinkingInjector
     injection_engine.unregister("thinking_tags_fallback")
     injection_engine.register(ThinkingInjector())
+
+    # v1.1 plan-2 M7 (2026-05-09) — register the path-glob rules
+    # injector so .opencomputer/rules/*.md fire on the next turn after
+    # any path-touching tool call. Empty rules list → provider stays
+    # registered but contributes nothing (cheap no-op per turn).
+    try:
+        from opencomputer.agent.path_rules_injection import (
+            PathGlobRulesProvider,
+            load_rules_for_active_profile,
+        )
+
+        injection_engine.unregister("path_glob_rules")
+        injection_engine.register(
+            PathGlobRulesProvider(rules=load_rules_for_active_profile())
+        )
+    except Exception:  # noqa: BLE001 — never break loop boot on rules load fail
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").debug(
+            "path-glob rules registration failed (suppressed)", exc_info=True
+        )
+
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+
+    # Kanban-Goals v2 (2026-05-08) — banner callback for the Ralph loop.
+    # AgentLoop._maybe_continue_goal fires this once per turn end with
+    # kind ∈ {"continue", "achieved", "pause_budget"}; the formatter
+    # lives in cli_ui.goal_banner so the same lines render identically
+    # whether a future gateway adapter forwards them to a chat channel
+    # or the CLI prints them inline.
+    def _print_goal_banner(*, session_id, kind, verdict, goal):  # noqa: D401
+        try:
+            from opencomputer.cli_ui.goal_banner import format_banner
+
+            console.print(format_banner(kind=kind, verdict=verdict, goal=goal))
+        except Exception:  # noqa: BLE001 — banner errors must never wedge the loop
+            pass
+
+    loop.goal_banner_callback = _print_goal_banner
+
     mcp_mgr = MCPManager(tool_registry=registry)
 
     # Wire the delegate factory so the model can spawn subagents
@@ -987,6 +1291,47 @@ def _run_chat_session(
         lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     )
     DelegateTool.set_runtime(runtime)
+
+    # Wire the /background slash factory — same shape as the delegate
+    # factory but spawns a fresh AgentLoop per submitted job, ensuring
+    # "no shared history" between foreground and background turns.
+    from opencomputer.agent.background_jobs import (
+        BackgroundJob as _BgJob,
+    )
+    from opencomputer.agent.background_jobs import (
+        get_default_registry as _bg_get_default_registry,
+    )
+
+    _bg_registry = _bg_get_default_registry()
+    _bg_registry.set_factory(
+        lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+    )
+
+    # Push-on-completion for the CLI: print a Rich panel when a background
+    # job finishes. Runs from the worker thread, so we marshal the print
+    # call through ``console.print`` (which is thread-safe per Rich's
+    # internal lock). Failure is swallowed by the registry — the worker
+    # thread can never be torn down by a notifier exception.
+    def _cli_bg_completion_notifier(job: _BgJob) -> None:  # noqa: D401
+        head = job.prompt.splitlines()[0] if job.prompt else ""
+        if len(head) > 60:
+            head = head[:57] + "…"
+        if job.status == "complete":
+            body = job.result or "(empty response)"
+            title = f"[green]✓ background {job.job_id}[/green] · {head}"
+        else:  # error
+            body = job.error or "(no detail)"
+            title = f"[red]✗ background {job.job_id}[/red] · {head}"
+        try:
+            from rich.panel import Panel
+
+            console.print(
+                Panel.fit(body, title=title, border_style="dim"),
+            )
+        except Exception:  # noqa: BLE001 — fall back to plain print if Rich misbehaves
+            console.print(f"\n{title}\n{body}\n")
+
+    _bg_registry.set_completion_notifier(_cli_bg_completion_notifier)
 
     # social-traces post-task subscriber (Phase 9 production wiring).
     # Opt-in via ``oc traces enable``; only wires when the on-disk
@@ -1000,8 +1345,12 @@ def _run_chat_session(
         from opencomputer.cost_guard import get_default_guard
 
         _ensure_st_alias()
-        from extensions.social_traces.plugin import wire_subscriber as _wire_st  # type: ignore[import-not-found]
-        from extensions.social_traces.state import is_enabled as _st_enabled  # type: ignore[import-not-found]
+        from extensions.social_traces.plugin import (
+            wire_subscriber as _wire_st,  # type: ignore[import-not-found]
+        )
+        from extensions.social_traces.state import (
+            is_enabled as _st_enabled,  # type: ignore[import-not-found]
+        )
 
         if _st_enabled(_oc_home()):
             try:
@@ -1324,6 +1673,10 @@ def _run_chat_session(
 
     def _on_clear() -> None:
         nonlocal session_id
+        # 2026-05-08 — Hermes Doc-2 parity: capture the rotated-out id so
+        # SESSION_RESET handlers can carry forward in-memory caches keyed
+        # on the previous session.
+        _previous_session_id = session_id
         session_id = str(uuid.uuid4())
         _token_tally["in"] = 0
         _token_tally["out"] = 0
@@ -1333,6 +1686,17 @@ def _run_chat_session(
         # Drop folded-paste blobs — placeholder ids reset to #1 on the new session.
         paste_folder.clear()
         console.clear()
+        # Fire SESSION_RESET after rotation so handlers see the new id as
+        # ``ctx.session_id`` and the rotated-out id as ``previous_session_id``.
+        from opencomputer.hooks.session_lifecycle import (
+            fire_session_reset as _fire_reset,
+        )
+
+        _fire_reset(
+            new_session_id=session_id,
+            previous_session_id=_previous_session_id,
+            surface="cli",
+        )
 
     def _on_snapshot_create(label: str | None) -> str | None:
         from opencomputer.snapshot import create_snapshot
@@ -1582,6 +1946,17 @@ def _run_chat_session(
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]bye.[/dim]")
                 _print_update_hint_if_any()
+                # 2026-05-08 — Hermes Doc-2 parity: SESSION_FINALIZE fires
+                # once when a surface tears down, distinct from per-turn
+                # SESSION_END. Plugins use this for last-chance state
+                # flushes that must NOT happen between turns.
+                from opencomputer.hooks.session_lifecycle import (
+                    fire_session_finalize as _fire_finalize,
+                )
+
+                _fire_finalize(
+                    session_id=session_id, reason="cli_exit", surface="cli",
+                )
                 return
         if not user_input.strip():
             continue
@@ -1648,10 +2023,42 @@ def _run_chat_session(
                 so subsequent turns pick up the new id. AgentLoop reads
                 ``self.config.model.model`` per turn (loop.py:1971), so the
                 swap takes effect immediately.
+
+                Wave 3 (2026-05-08) — also accepts the
+                ``custom:<name>:<model_id>`` form, which dispatches to
+                the named entry under ``custom_providers:`` in
+                config.yaml (swaps both provider AND model).
                 """
                 import dataclasses as _dc
 
                 from opencomputer.agent.model_resolver import resolve_model
+
+                # Wave 3 — custom:<name>:<model_id> branch
+                if new_model.startswith("custom:"):
+                    from opencomputer.agent.custom_provider_client import (
+                        build_custom_provider,
+                        parse_custom_model_spec,
+                    )
+
+                    try:
+                        cp_name, model_id = parse_custom_model_spec(new_model)
+                        new_provider_inst = build_custom_provider(cp_name, loop.config)
+                    except (ValueError, RuntimeError) as e:
+                        return (False, str(e))
+                    loop.provider = new_provider_inst
+                    new_model_cfg = _dc.replace(
+                        loop.config.model,
+                        provider=f"custom:{cp_name}",
+                        model=model_id,
+                    )
+                    loop.config = _dc.replace(loop.config, model=new_model_cfg)
+                    try:
+                        runtime.custom["_provider_supports_native_thinking"] = (
+                            loop.provider.supports_native_thinking_for(model_id)
+                        )
+                    except Exception:  # noqa: BLE001
+                        runtime.custom["_provider_supports_native_thinking"] = False
+                    return (True, f"swapped to custom:{cp_name}:{model_id}")
 
                 aliases = getattr(loop.config.model, "model_aliases", None) or {}
                 try:
@@ -1660,6 +2067,24 @@ def _run_chat_session(
                     return (False, str(e))
                 if not canonical or not isinstance(canonical, str):
                     return (False, f"invalid model id: {new_model!r}")
+                # Wave 3 (2026-05-08) — strip + warn on :nitro / :floor
+                # suffix when the active provider is NOT OpenRouter.
+                # Those suffixes are OR-specific routing sugar; passing
+                # them verbatim to (e.g.) Anthropic returns 404. Strip
+                # them here so the swap succeeds; emit a one-shot warning
+                # to alert the user that their preference is being
+                # ignored.
+                from opencomputer.agent.config import split_or_routing_suffix
+                _stripped, _suffix = split_or_routing_suffix(canonical)
+                if _suffix is not None and loop.config.model.provider != "openrouter":
+                    if not getattr(_on_model_swap, "_or_suffix_warned", False):
+                        console.print(
+                            f"[yellow]⚠[/yellow] :{_suffix} suffix is OpenRouter-only; "
+                            f"stripping and using {_stripped!r} on provider "
+                            f"{loop.config.model.provider!r}."
+                        )
+                        _on_model_swap._or_suffix_warned = True  # type: ignore[attr-defined]
+                    canonical = _stripped
                 new_model_cfg = _dc.replace(loop.config.model, model=canonical)
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
                 # Phase B: refresh native-thinking flag for the new model so
@@ -1878,6 +2303,16 @@ def _run_chat_session(
                 if result.message:
                     console.print(f"[dim]{result.message}[/dim]")
                 _print_update_hint_if_any()
+                # 2026-05-08 — fire SESSION_FINALIZE before /exit returns
+                # so plugins flush state. See cli_exit branch above for
+                # rationale.
+                from opencomputer.hooks.session_lifecycle import (
+                    fire_session_finalize as _fire_finalize,
+                )
+
+                _fire_finalize(
+                    session_id=session_id, reason="cli_exit", surface="cli",
+                )
                 return
             continue
 
@@ -1900,12 +2335,19 @@ def _run_chat_session(
                 finally:
                     listener.stop()
 
+        # Hermes-CLI parity A3 — per-prompt elapsed clock.
+        _ppc = runtime.custom.get("_prompt_clock")
+        if _ppc is not None:
+            _ppc.start()
         try:
             asyncio.run(
                 _run_turn_cancellable(cleaned_text, _image_paths or None)
             )
         except Exception as e:
             console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+        finally:
+            if _ppc is not None:
+                _ppc.stop()
 
 
 @app.command()
@@ -1925,6 +2367,21 @@ def chat(
         help=(
             "Resume a session. Pass a session id, or `last` for the most "
             "recent, or `pick` for an interactive picker of the last 10."
+        ),
+    ),
+    cont: bool = typer.Option(
+        False,
+        "--continue",
+        "-c",
+        help="Resume the most recent session (alias for ``--resume last``).",
+    ),
+    query: str = typer.Option(
+        "",
+        "--query",
+        "-q",
+        help=(
+            "Run a single non-interactive turn with this prompt and exit "
+            "(alias for ``oc oneshot``)."
         ),
     ),
     plan: bool = typer.Option(
@@ -1948,18 +2405,54 @@ def chat(
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
     ),
+    personality: str = typer.Option(
+        "",
+        "--personality",
+        help=(
+            "Active personality NAME (overrides agent.default_personality "
+            "config). Built-in: helpful, concise, technical, creative, "
+            "teacher, kawaii, catgirl, pirate, shakespeare, surfer, noir, "
+            "uwu, philosopher, hype. Custom names from agent.personalities "
+            "config also accepted."
+        ),
+    ),
+    skin: str = typer.Option(
+        "",
+        "--skin",
+        help=(
+            "TUI skin NAME (overrides display.skin config). Built-in: "
+            "default, ares, mono, slate, daylight, warm-lightmode, "
+            "poseidon, sisyphus, charizard. Custom YAML at "
+            "~/.opencomputer/skins/<name>.yaml also accepted."
+        ),
+    ),
 ) -> None:
     """Start an interactive chat session.
 
     ``oc chat`` starts fresh. ``oc chat resume`` opens the polished
     picker. ``oc chat <id-prefix>`` resumes that session directly.
+    ``oc chat -c`` resumes the most recent session.
+    ``oc chat -q "..."`` runs one non-interactive turn (Hermes-parity alias
+    for ``oc oneshot``).
     """
+    # ``-q "..."`` short-circuits the REPL — delegate to the shared oneshot
+    # helper. Hermes-parity alias for ``hermes chat -q``. Done before any
+    # session-resume munging. Calling the typer-decorated ``oneshot`` directly
+    # would pass OptionInfo objects in place of defaults, so we route through
+    # the shared helper that both ``oc oneshot`` and this branch use.
+    if query:
+        _run_oneshot_turn(query, plan=plan)
+        return
     if action == "resume":
         # Delegate to the picker flow.
         resume = "pick"
     elif action:
         # Treat as a session-id (or prefix) to resume directly.
         resume = action
+    # ``-c`` / ``--continue`` is sugar for ``--resume last`` and only applies
+    # when no explicit resume target was given.
+    if cont and not resume:
+        resume = "last"
     if yolo:
         _emit_yolo_deprecation()
         auto = True
@@ -1971,6 +2464,8 @@ def chat(
         yolo=auto,
         accept_edits=accept_edits,
         permission_mode=permission_mode,
+        personality=personality,
+        skin=skin,
     )
 
 
@@ -2000,41 +2495,51 @@ def kanban(ctx: typer.Context) -> None:
     raise typer.Exit(rc or 0)
 
 
-@app.command(name="oneshot")
-def oneshot(
-    prompt: str = typer.Argument(
-        ..., help="The single user message to send. Wrap in quotes for multi-word prompts.",
-    ),
-    model: str = typer.Option(
-        "", "--model", "-m",
-        help="Override the configured model for this run.",
-    ),
-    provider_name: str = typer.Option(
-        "", "--provider", "-p",
-        help="Override the configured provider (anthropic, openai, openrouter, ...).",
-    ),
-    plan: bool = typer.Option(
-        False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
-    ),
+def _run_oneshot_turn(
+    prompt: str,
+    *,
+    model: str = "",
+    provider_name: str = "",
+    plan: bool = False,
+    output: str = "text",
 ) -> None:
-    """Run a single agent turn non-interactively, print the response, exit.
+    """Single-turn non-interactive run shared by ``oc oneshot`` and ``oc chat -q``.
 
-    Wave 6.A — Hermes-port (7c8c031f6 ``hermes -z``). Non-interactive
-    one-shot mode for shell scripts, CI hooks, and quick "ask the agent"
-    invocations. Differs from ``oc chat`` by NOT entering the REPL: one
-    user turn, full agent loop (compaction + tools + hooks), final
-    assistant text printed to stdout, exit.
+    Same flow Hermes uses for ``hermes -z``: configure → discover → run one
+    turn → drain fire-and-forget tasks → print final assistant text → exit.
+    Extracted so ``oc chat -q "..."`` can reuse this path without going through
+    Typer's command machinery (calling typer-decorated functions directly
+    would pass OptionInfo objects in place of defaults).
 
-    Examples:
-        oc oneshot "what's in the README?"
-        oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
-        oc oneshot "describe a kanban board" --plan
+    ``output`` (v1.1 plan-1 M2.2, 2026-05-09) controls stdout shape:
+
+    * ``"text"`` (default) — prints the assistant's final message.
+    * ``"json"`` — emits one summary JSON object at end of run.
+    * ``"stream-json"`` — emits one NDJSON line per LLM call as the
+      run proceeds, plus a final ``{"event": "summary", ...}`` line.
+
+    Modes other than text route stdout through
+    :mod:`opencomputer.oneshot_output` and the
+    :mod:`opencomputer.inference.observability` subscriber bus.
     """
     import asyncio as _asyncio
 
     from opencomputer.agent.loop import AgentLoop as _AgentLoop
+    from opencomputer.headless import parse_output_mode as _parse_output_mode
+    from opencomputer.oneshot_output import (
+        OneshotResult as _OneshotResult,
+    )
+    from opencomputer.oneshot_output import (
+        emit_final as _emit_final,
+    )
+    from opencomputer.oneshot_output import (
+        stream_subscriber as _stream_subscriber,
+    )
     from opencomputer.tools.delegate import DelegateTool as _DelegateTool
     from plugin_sdk.runtime_context import RuntimeContext as _RuntimeContext
+
+    output_mode = _parse_output_mode(output)
+    oneshot_result = _OneshotResult()
 
     _configure_logging_once()
     cfg = load_config()
@@ -2064,8 +2569,12 @@ def oneshot(
         from opencomputer.cost_guard import get_default_guard
 
         _ensure_st_alias()
-        from extensions.social_traces.plugin import wire_subscriber as _wire_st  # type: ignore[import-not-found]
-        from extensions.social_traces.state import is_enabled as _st_enabled  # type: ignore[import-not-found]
+        from extensions.social_traces.plugin import (
+            wire_subscriber as _wire_st,  # type: ignore[import-not-found]
+        )
+        from extensions.social_traces.state import (
+            is_enabled as _st_enabled,  # type: ignore[import-not-found]
+        )
 
         if _st_enabled(_oc_home()):
             try:
@@ -2086,9 +2595,10 @@ def oneshot(
     permission_mode = _derive_permission_mode(plan=plan, auto=False, accept_edits=False)
     runtime = _RuntimeContext(plan_mode=plan, permission_mode=permission_mode)
 
-    async def _run() -> str:
+    async def _run() -> tuple[str, str]:
         result = await loop.run_conversation(prompt, runtime=runtime)
         msg = getattr(result, "final_message", None)
+        sid = getattr(result, "session_id", "") or ""
         # Drain fire-and-forget tasks (e.g. social-traces post-task
         # distill+submit) before this coroutine returns, otherwise
         # ``asyncio.run`` cancels them when its event loop tears down.
@@ -2103,16 +2613,76 @@ def oneshot(
         except Exception:  # noqa: BLE001
             pass
         if msg is None:
-            return ""
+            return "", str(sid)
         content = getattr(msg, "content", "")
-        return content if isinstance(content, str) else ""
+        return (content if isinstance(content, str) else ""), str(sid)
 
     try:
-        text = _asyncio.run(_run())
+        with _stream_subscriber(oneshot_result, output_mode):
+            text, session_id = _asyncio.run(_run())
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
-    if text:
-        typer.echo(text)
+
+    oneshot_result.final_message = text or ""
+    oneshot_result.session_id = session_id
+
+    _emit_final(oneshot_result, output_mode)
+
+
+@app.command(name="oneshot")
+def oneshot(
+    prompt: str = typer.Argument(
+        ..., help="The single user message to send. Wrap in quotes for multi-word prompts.",
+    ),
+    model: str = typer.Option(
+        "", "--model", "-m",
+        help="Override the configured model for this run.",
+    ),
+    provider_name: str = typer.Option(
+        "", "--provider", "-p",
+        help="Override the configured provider (anthropic, openai, openrouter, ...).",
+    ),
+    plan: bool = typer.Option(
+        False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
+    ),
+    output: str = typer.Option(
+        "text",
+        "--output",
+        "-o",
+        help=(
+            "Output mode for stdout. 'text' (default) prints the assistant's "
+            "final message. 'json' emits one summary JSON object at end of run "
+            "(session_id, num_turns, total_*_tokens, total_cost_usd, "
+            "final_message). 'stream-json' emits one NDJSON line per LLM call "
+            "as it fires plus a final {\"event\":\"summary\",...} line. "
+            "(v1.1 plan-1 M2.2)"
+        ),
+    ),
+) -> None:
+    """Run a single agent turn non-interactively, print the response, exit.
+
+    Wave 6.A — Hermes-port (7c8c031f6 ``hermes -z``). Non-interactive
+    one-shot mode for shell scripts, CI hooks, and quick "ask the agent"
+    invocations. Differs from ``oc chat`` by NOT entering the REPL: one
+    user turn, full agent loop (compaction + tools + hooks), final
+    assistant text printed to stdout, exit.
+
+    Examples:
+        oc oneshot "what's in the README?"
+        oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
+        oc oneshot "describe a kanban board" --plan
+        oc oneshot "say hi" --output json | jq .session_id
+        oc oneshot "do 3 things" --output stream-json | jq -c .event
+
+    See also: ``oc chat -q "..."`` is a Hermes-parity alias for this command.
+    """
+    _run_oneshot_turn(
+        prompt,
+        model=model,
+        provider_name=provider_name,
+        plan=plan,
+        output=output,
+    )
 
 
 @app.command()
@@ -2167,6 +2737,16 @@ def code(
         "--keep-worktree",
         help="Do NOT remove the worktree on exit (when --worktree is set).",
     ),
+    worktree_include_dry_run: bool = typer.Option(
+        False,
+        "--worktree-include-dry-run",
+        help=(
+            "When --worktree is set: read .worktreeinclude, print what "
+            "would be copied, then exit without entering chat. Useful "
+            "for verifying include patterns before committing to a "
+            "session."
+        ),
+    ),
 ) -> None:
     """Start the coding agent in [path] (or cwd). Snappy entry-point.
 
@@ -2174,7 +2754,9 @@ def code(
     MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
     ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
     confirmation prompts. Use ``--worktree`` to isolate this session in a
-    fresh git worktree (auto-removed on exit).
+    fresh git worktree (auto-removed on exit). Pair with
+    ``--worktree-include-dry-run`` to preview ``.worktreeinclude``
+    behaviour without starting chat.
     """
     if path:
         target = os.path.abspath(path)
@@ -2189,12 +2771,27 @@ def code(
         auto = True
     permission_mode = _derive_permission_mode(plan=plan, auto=auto, accept_edits=accept_edits)
 
+    if worktree_include_dry_run and not worktree:
+        console.print(
+            "[bold red]error:[/bold red] --worktree-include-dry-run requires --worktree."
+        )
+        raise typer.Exit(code=2)
+
     if worktree:
         from opencomputer.worktree import session_worktree
 
-        with session_worktree(Path.cwd(), keep=keep_worktree) as wt:
+        with session_worktree(
+            Path.cwd(),
+            keep=keep_worktree,
+            include_dry_run=worktree_include_dry_run,
+        ) as wt:
             if wt != Path.cwd().parent:  # i.e. the worktree was actually created
                 console.print(f"[dim]worktree: {wt}[/dim]")
+            if worktree_include_dry_run:
+                console.print(
+                    "[green]dry-run complete — exiting without starting chat.[/green]"
+                )
+                return
             _run_chat_session(
                 resume=resume,
                 plan=plan,
@@ -2217,6 +2814,13 @@ def code(
 
 @app.command()
 def resume(
+    session: str = typer.Argument(
+        None,
+        help=(
+            "Session id, id-prefix, or one of the magic words 'last' / 'pick'. "
+            "Omit to open the full-screen picker (the default)."
+        ),
+    ),
     plan: bool = typer.Option(
         False, "--plan", help="Resume in plan mode."
     ),
@@ -2239,12 +2843,19 @@ def resume(
         False, "--no-compact", help="Disable automatic context compaction."
     ),
 ) -> None:
-    """Open a full-screen session picker and resume the selected session.
+    """Resume a saved session — by id, by id-prefix, or via the picker.
 
-    Equivalent to ``oc chat --resume pick`` but with a polished alt-screen
-    picker (search + arrow nav + metadata rows). Alt-screen mode bypasses
-    Cursor-Position-Report, so it works in editor terminals (VS Code,
-    JetBrains) where the inline dropdown can't render.
+    Three call shapes:
+
+    - ``oc resume`` — opens the full-screen alt-screen picker (search +
+      arrow nav + delete). Equivalent to ``oc chat --resume pick``.
+    - ``oc resume last`` — resumes the most recent session.
+    - ``oc resume <id-prefix>`` — resumes the matching session directly,
+      skipping the picker. Mirrors ``claude --resume <id>``.
+
+    Alt-screen mode bypasses Cursor-Position-Report, so the picker works
+    in editor terminals (VS Code, JetBrains) where the inline dropdown
+    can't render.
     """
     from opencomputer.agent.config import _home as _profile_home_fn
     from opencomputer.agent.state import SessionDB
@@ -2252,6 +2863,57 @@ def resume(
 
     profile_home = _profile_home_fn()
     db = SessionDB(profile_home / "sessions.db")
+
+    # ── Direct-resume path: positional id (or 'last' / 'pick' magic) ──
+    # When the user typed `oc resume <id>`, skip the picker entirely.
+    # Resolution order mirrors the in-chat ``/resume <target>`` command:
+    #   1. Magic words ``last``/``pick`` → _resolve_resume_target.
+    #   2. Exact title or lineage → _resolve_resume_target (Hermes parity).
+    #   3. Id-prefix → DB list_sessions + startswith (with ambiguity check).
+    if session and session != "pick":
+        resolved: str | None = _resolve_resume_target(session)
+        if resolved is None:
+            # Try id-prefix match. Mirrors the in-chat /resume handler at
+            # cli.py::_on_resume so behavior is consistent.
+            all_rows = db.list_sessions(limit=200)
+            matches = [
+                str(r.get("id", "")) for r in all_rows
+                if str(r.get("id", "")).startswith(session)
+            ]
+            if len(matches) > 1:
+                console.print(
+                    f"[yellow]ambiguous prefix[/yellow] {session!r} "
+                    f"matches {len(matches)} sessions:"
+                )
+                for mid in matches[:10]:
+                    title = db.get_session_title(mid) or "(untitled)"
+                    console.print(f"  [dim]{mid[:8]}[/dim]  {title}")
+                raise typer.Exit(code=1)
+            resolved = matches[0] if matches else None
+        if resolved is None:
+            console.print(
+                f"[red]error:[/red] no session matches [cyan]{session!r}[/cyan]. "
+                "Run [bold]oc resume[/bold] (no args) to browse, or "
+                "[bold]oc sessions[/bold] to list ids."
+            )
+            raise typer.Exit(code=1)
+        if yolo:
+            _emit_yolo_deprecation()
+            auto = True
+        permission_mode = _derive_permission_mode(
+            plan=plan, auto=auto, accept_edits=accept_edits
+        )
+        _run_chat_session(
+            resume=resolved,
+            plan=plan,
+            no_compact=no_compact,
+            yolo=auto,
+            accept_edits=accept_edits,
+            permission_mode=permission_mode,
+        )
+        return
+
+    # ── Picker path: no positional, or explicit 'pick' magic ──────────
     db_rows = db.list_sessions(limit=200)
 
     def _coerce_started_at(v) -> float:
@@ -2266,6 +2928,7 @@ def resume(
             title=r.get("title") or "",
             started_at=_coerce_started_at(r.get("started_at")),
             message_count=int(r.get("message_count", 0) or 0),
+            cwd=r.get("cwd") or "",
         )
         for r in db_rows
         if r.get("id")
@@ -2314,6 +2977,111 @@ def search(
 
 
 @app.command()
+def pin(
+    path: str = typer.Argument(
+        None,
+        help="File path to pin into the system prompt. Omit to list current pins.",
+    ),
+    list_only: bool = typer.Option(
+        False, "--list", "-l", help="List currently pinned files and exit."
+    ),
+) -> None:
+    """Pin a file into the system prompt — stop the agent re-reading it.
+
+    The contents of the pinned file are injected into every session's
+    system prompt, so the agent SEES the file without ever calling the
+    `Read` tool. Targets the "reread_file" findings from `oc optimize`.
+
+    Usage:
+
+      oc pin                       # list current pins
+      oc pin --list                # list current pins
+      oc pin path/to/large.py      # add a file to the pin list
+      oc unpin path/to/large.py    # remove a file from the pin list
+
+    Storage: ``~/.opencomputer/<profile>/config.yaml`` under
+    ``prompt.pinned_files``. Combined size is capped (default 200 KB)
+    via ``prompt.max_total_bytes``.
+    """
+    from opencomputer.agent.config_store import load_config, save_config
+    from opencomputer.agent.pinned_files import (
+        add_pinned_file,
+        normalize_pinned_path,
+    )
+
+    cfg = load_config()
+
+    if path is None or list_only:
+        pins = cfg.prompt.pinned_files
+        if not pins:
+            console.print(
+                "[dim]no pinned files. "
+                "Run [bold]oc optimize[/bold] for candidates, then "
+                "[bold]oc pin <path>[/bold].[/dim]"
+            )
+            return
+        console.print(f"[bold]Pinned files ({len(pins)}):[/bold]")
+        for p in pins:
+            console.print(f"  [cyan]{p}[/cyan]")
+        console.print(
+            f"[dim]cap: {cfg.prompt.max_total_bytes} bytes total[/dim]"
+        )
+        return
+
+    try:
+        new_paths = add_pinned_file(cfg.prompt.pinned_files, path)
+    except (FileNotFoundError, IsADirectoryError) as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if new_paths == cfg.prompt.pinned_files:
+        norm = normalize_pinned_path(path)
+        console.print(
+            f"[dim]already pinned: [/dim][cyan]{norm}[/cyan]"
+        )
+        return
+
+    from dataclasses import replace as _dc_replace
+    new_prompt_cfg = _dc_replace(cfg.prompt, pinned_files=new_paths)
+    new_cfg = _dc_replace(cfg, prompt=new_prompt_cfg)
+    cfg_path = save_config(new_cfg)
+    console.print(
+        f"[green]pinned[/green] [cyan]{new_paths[-1]}[/cyan] "
+        f"({len(new_paths)} total)\n"
+        f"[dim]config: {cfg_path}[/dim]"
+    )
+
+
+@app.command()
+def unpin(
+    path: str = typer.Argument(..., help="File path to remove from the pin list."),
+) -> None:
+    """Remove a file from the pinned-files list. Inverse of `oc pin`."""
+    from opencomputer.agent.config_store import load_config, save_config
+    from opencomputer.agent.pinned_files import remove_pinned_file
+
+    cfg = load_config()
+    new_paths = remove_pinned_file(cfg.prompt.pinned_files, path)
+
+    if new_paths == cfg.prompt.pinned_files:
+        console.print(
+            f"[dim]not pinned: [/dim][cyan]{path}[/cyan]\n"
+            "[dim]list pins with [bold]oc pin --list[/bold].[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    from dataclasses import replace as _dc_replace
+    new_prompt_cfg = _dc_replace(cfg.prompt, pinned_files=new_paths)
+    new_cfg = _dc_replace(cfg, prompt=new_prompt_cfg)
+    cfg_path = save_config(new_cfg)
+    console.print(
+        f"[green]unpinned[/green] [cyan]{path}[/cyan] "
+        f"({len(new_paths)} remaining)\n"
+        f"[dim]config: {cfg_path}[/dim]"
+    )
+
+
+@app.command()
 def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
     """List recent sessions."""
     from opencomputer.agent.state import SessionDB
@@ -2326,12 +3094,82 @@ def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
         console.print(f"[dim]{r['id'][:8]}…[/dim] msgs={r['message_count']:<3} {title}")
 
 
+def _detach_to_background(*, pidfile_name: str, log_name: str) -> bool:
+    """Fork the current process into the background.
+
+    Writes ``<profile_home>/<pidfile_name>`` with the child PID and
+    redirects stdout/stderr to ``<profile_home>/<log_name>``. Returns
+    ``True`` in the parent (which should exit immediately) and
+    ``False`` in the child (which should continue running).
+
+    Uses os.fork — Linux/macOS only. On platforms without fork (Windows),
+    the function refuses and prints an actionable hint.
+    """
+    import os
+    import sys
+
+    from opencomputer.agent.config import _home
+
+    if not hasattr(os, "fork"):
+        typer.echo(
+            "--detach not supported on this platform (no os.fork). "
+            "Run without --detach in a terminal multiplexer (tmux/screen) instead.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    profile_home = _home()
+    profile_home.mkdir(parents=True, exist_ok=True)
+    pidfile = profile_home / pidfile_name
+    log_path = profile_home / log_name
+
+    if pidfile.exists():
+        try:
+            existing_pid = int(pidfile.read_text().strip())
+            os.kill(existing_pid, 0)
+            typer.echo(f"already running: pid {existing_pid} (pidfile {pidfile})")
+            raise typer.Exit(0)
+        except (OSError, ValueError):
+            pidfile.unlink(missing_ok=True)
+
+    pid = os.fork()
+    if pid > 0:
+        # Parent — wait briefly for child to write pidfile, then exit.
+        import time as _time
+        for _ in range(20):  # ~2s
+            if pidfile.exists():
+                break
+            _time.sleep(0.1)
+        if pidfile.exists():
+            typer.echo(f"detached: pid {pidfile.read_text().strip()} (logs: {log_path})")
+        else:
+            typer.echo(f"detached (pidfile not yet visible at {pidfile})")
+        return True
+
+    # Child — detach from controlling terminal, redirect stdio.
+    os.setsid()
+    pidfile.write_text(str(os.getpid()))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # NOTE: intentionally not closed — its fd backs stdout/stderr for
+    # the lifetime of the daemon. A context manager would close on
+    # exit and invalidate the redirect.
+    log_fh = open(log_path, "ab", buffering=0)  # noqa: SIM115
+    os.dup2(log_fh.fileno(), sys.stdout.fileno())
+    os.dup2(log_fh.fileno(), sys.stderr.fileno())
+    return False
+
+
 @app.command()
 def wire(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(18789, "--port"),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run in background; write pid + logs under profile home (M4)."),
 ) -> None:
     """Run the wire server — JSON-over-WebSocket API for TUI / IDE / web clients."""
+    if detach:
+        if _detach_to_background(pidfile_name="wire.pid", log_name="wire.log"):
+            return
     _configure_logging_once()
     from opencomputer.gateway.wire_server import WireServer
 
@@ -2352,6 +3190,13 @@ def wire(
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
+    # Wire /background slash factory (parity with chat path).
+    from opencomputer.agent.background_jobs import (
+        get_default_registry as _bg_wire_registry,
+    )
+
+    _bg_wire_registry().set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
     server = WireServer(loop=loop, host=host, port=port)
     console.print(f"[bold cyan]OpenComputer wire server[/bold cyan] — ws://{host}:{port}")
     console.print(f"[dim]model: {cfg.model.model} ({cfg.model.provider})[/dim]")
@@ -2370,98 +3215,15 @@ def wire(
         console.print("\n[dim]wire server stopped[/dim]")
 
 
-@app.command()
-def gateway(
-    install_daemon: bool = typer.Option(
-        False, "--install-daemon",
-        help=(
-            "Install OpenComputer as an always-on system service and exit "
-            "(does not run the gateway in the foreground)."
-        ),
-    ),
-    daemon_profile: str = typer.Option(
-        "default", "--daemon-profile",
-        help="Profile to install the daemon for (only with --install-daemon).",
-    ),
-) -> None:
-    """Run the gateway daemon — connects all configured channel adapters.
+# PR-1 (Task 1.8) — `oc gateway` is now a Typer subcommand group.
+# The body of the historic ``@app.command def gateway()`` lives in
+# ``opencomputer.cli_gateway._run_foreground``. Bare ``oc gateway`` falls
+# through to it via the group's ``invoke_without_command=True`` callback.
+# ``--install-daemon`` flag preserved (deprecated, hidden in help).
+from opencomputer.cli_gateway import gateway_app, top_pairing_app  # noqa: E402
 
-    Requires provider API key + at least one channel token (TELEGRAM_BOT_TOKEN,
-    DISCORD_BOT_TOKEN, etc.) in the environment. The same agent loop runs,
-    but input comes from channels instead of the terminal.
-    """
-    if install_daemon:
-        from opencomputer.service.factory import get_backend
-        backend = get_backend()
-        result = backend.install(profile=daemon_profile, extra_args="gateway")
-        typer.echo(f"Installed {result.backend} service at {result.config_path}")
-        for note in result.notes:
-            typer.echo(f"note: {note}")
-        raise typer.Exit(0)
-    _configure_logging_once()
-    from opencomputer.gateway.server import Gateway
-    from opencomputer.mcp.client import MCPManager
-
-    cfg = load_config()
-    # Follow-up #25 — one-shot hint if Docker became available after setup.
-    from opencomputer.cli_hints import maybe_print_docker_toggle_hint
-
-    maybe_print_docker_toggle_hint(cfg)
-    _check_provider_key(cfg.model.provider)
-
-    _register_builtin_tools()
-    n_plugins = _discover_plugins()
-    _apply_model_overrides()
-    _discover_and_register_agents()
-    _register_settings_hooks(cfg)
-
-    provider = _resolve_provider(cfg.model.provider)
-    loop = AgentLoop(provider=provider, config=cfg)
-    DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
-
-    # Connect to MCP servers in the background (kimi-cli deferred pattern)
-    mcp_mgr = MCPManager(tool_registry=registry)
-    if cfg.mcp.servers:
-        console.print(f"[dim]mcp: deferring connection to {len(cfg.mcp.servers)} server(s)[/dim]")
-
-    gw = Gateway(loop=loop, config=cfg.gateway)
-    for platform_name, adapter in plugin_registry.channels.items():
-        console.print(f"[dim]registering channel:[/dim] [cyan]{platform_name}[/cyan]")
-        gw.register_adapter(adapter)
-
-    if not gw.adapters:
-        console.print(
-            "[bold yellow]warning:[/bold yellow] no channel adapters registered. "
-            "Set TELEGRAM_BOT_TOKEN (or another channel token) and ensure the "
-            "channel plugin is discovered."
-        )
-        console.print(f"[dim]plugins loaded: {n_plugins}[/dim]")
-        raise typer.Exit(1)
-
-    console.print(
-        f"[bold cyan]OpenComputer gateway[/bold cyan] — "
-        f"{len(gw.adapters)} channel(s), model={cfg.model.model}"
-    )
-    console.print("[dim]ctrl+c to stop[/dim]\n")
-
-    async def _run():
-        if cfg.mcp.servers:
-            asyncio.create_task(
-                mcp_mgr.connect_all(
-                    list(cfg.mcp.servers),
-                    osv_check_enabled=cfg.mcp.osv_check_enabled,
-                    osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
-                )
-            )
-        try:
-            await gw.serve_forever()
-        finally:
-            await mcp_mgr.shutdown()
-
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        console.print("\n[dim]gateway stopped[/dim]")
+app.add_typer(gateway_app, name="gateway")
+app.add_typer(top_pairing_app, name="pairing")  # Hermes-CLI compat
 
 
 @app.command()
@@ -2578,14 +3340,36 @@ def setup(
 
 @app.command()
 def doctor(
-    fix: bool = typer.Option(False, "--fix", help="Invoke plugin-contributed repairs in place."),
+    fix: bool = typer.Option(
+        False, "--fix", help="Invoke plugin-contributed repairs in place."
+    ),
+    auth: bool = typer.Option(
+        False,
+        "--auth",
+        help=(
+            "Print credential-pool health (quarantine state, JWT expiry, "
+            "last rotation) instead of the full doctor report. A3 leftover "
+            "from the 2026-05-06 OpenClaw deep-comparison."
+        ),
+    ),
 ) -> None:
     """Diagnose common config/env issues.
 
     With --fix, every plugin-registered HealthContribution is invoked with
     fix=True and is expected to repair state (e.g. migrate a legacy config
     shape, rewrite broken skill frontmatter) rather than merely report.
+
+    With --auth, surfaces the credential-pool stats for any provider that
+    has a multi-key pool configured. Read-only.
     """
+    if auth:
+        from opencomputer.doctor import run_doctor_auth
+
+        failures = run_doctor_auth()
+        if failures:
+            raise typer.Exit(1)
+        return
+
     from opencomputer.doctor import run_doctor
 
     failures = run_doctor(fix=fix)
@@ -2593,8 +3377,7 @@ def doctor(
         raise typer.Exit(1)
 
 
-@app.command()
-def auth() -> None:
+def run_auth_status() -> None:
     """Show provider credential status — what's configured, what's missing.
 
     Hermes parity (``hermes auth status``). Read-only summary of every
@@ -2603,6 +3386,9 @@ def auth() -> None:
     set value — never the full token. Cleaner focused view than
     ``opencomputer doctor`` when you just want to answer "did I export
     the right key?".
+
+    Public (not name-mangled) so :mod:`opencomputer.cli_auth` can invoke
+    this as the no-subcommand callback for the ``oc auth`` Typer group.
     """
     candidates: list[tuple[str, str]] = []
     seen_env_vars: set[str] = set()
@@ -2919,6 +3705,85 @@ def agents_list() -> None:
         console.print(f"[dim]  source: {tpl.source_path}[/dim]")
 
 
+# Hermes parity (2026-05-08): runtime visibility into in-flight subagents.
+# The existing `agents list` shows TEMPLATES (definition-time); these
+# commands show RUNNING / HISTORY (runtime state) backed by SubagentRegistry.
+@agents_app.command("running", help="Show currently-running subagents (Hermes parity).")
+def agents_running() -> None:
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    from rich.table import Table
+
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    rows = SubagentRegistry.instance().list_running()
+    if not rows:
+        console.print("[dim](no running subagents)[/dim]")
+        return
+    t = Table(title="Running subagents")
+    t.add_column("agent_id", style="cyan", no_wrap=True)
+    t.add_column("parent")
+    t.add_column("goal")
+    t.add_column("elapsed", style="yellow")
+    t.add_column("current tool")
+    now = _dt.now(UTC)
+    for r in rows:
+        elapsed = (now - r.started_at).total_seconds()
+        t.add_row(
+            r.agent_id,
+            r.parent_id or "(root)",
+            r.goal[:60],
+            f"{elapsed:.0f}s ago",
+            r.current_tool or "—",
+        )
+    console.print(t)
+
+
+@agents_app.command("kill", help="Cancel a running subagent (Hermes parity).")
+def agents_kill(
+    agent_id: str = typer.Argument(..., help="Subagent id (from `agents running`)."),
+) -> None:
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    ok = SubagentRegistry.instance().kill(agent_id)
+    if ok:
+        typer.secho(f"killed {agent_id}", fg="green")
+    else:
+        typer.secho(f"no running agent {agent_id!r}", fg="yellow", err=True)
+        raise typer.Exit(1)
+
+
+@agents_app.command("history", help="Show last N completed/failed/killed subagent runs.")
+def agents_history(
+    limit: int = typer.Option(20, "--limit", "-n", help="Max rows (default 20)."),
+) -> None:
+    from rich.table import Table
+
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    rows = SubagentRegistry.instance().history(limit=limit)
+    if not rows:
+        console.print("[dim](no completed subagents)[/dim]")
+        return
+    t = Table(title=f"Subagent history (last {len(rows)})")
+    t.add_column("agent_id", style="cyan", no_wrap=True)
+    t.add_column("state")
+    t.add_column("goal")
+    t.add_column("ended", style="yellow")
+    t.add_column("error")
+    for r in rows:
+        ended = r.ended_at.strftime("%H:%M:%S") if r.ended_at else "—"
+        t.add_row(
+            r.agent_id,
+            r.state,
+            r.goal[:60],
+            ended,
+            (r.error or "")[:40],
+        )
+    console.print(t)
+
+
 config_app = typer.Typer(
     name="config", help="Manage OpenComputer config (~/.opencomputer/config.yaml)"
 )
@@ -2944,6 +3809,16 @@ app.add_typer(browser_app, name="browser")
 from opencomputer.cli_memory import memory_app  # noqa: E402
 
 app.add_typer(memory_app, name="memory")
+
+# T5 — Hermes-doc parity: `oc honcho` subcommand group.
+from opencomputer.cli_honcho import honcho_app  # noqa: E402
+
+app.add_typer(honcho_app, name="honcho")
+
+# T8 — Hermes-doc parity: `oc auth` subcommand group (credential pools).
+from opencomputer.cli_auth import auth_app  # noqa: E402
+
+app.add_typer(auth_app, name="auth")
 
 # 2026-04-28 — `oc help tour` opt-in guided walkthrough
 from opencomputer.cli_help import help_app  # noqa: E402
@@ -2992,15 +3867,37 @@ from opencomputer.cli_adapter import adapter_app  # noqa: E402
 from opencomputer.cli_consent import consent_app  # noqa: E402
 from opencomputer.cli_cost import cost_app  # noqa: E402
 from opencomputer.cli_cron import cron_app  # noqa: E402
+from opencomputer.cli_dashboard import dashboard_app  # noqa: E402
+from opencomputer.cli_heartbeat import heartbeat_app  # noqa: E402
 from opencomputer.cli_langfuse import langfuse_app  # noqa: E402
 from opencomputer.cli_optimize import optimize_app  # noqa: E402
 from opencomputer.cli_pair import pair_app  # noqa: E402
 from opencomputer.cli_session import session_app  # noqa: E402
+from opencomputer.cli_tui import tui_app  # noqa: E402
 from opencomputer.cli_voice import voice_app  # noqa: E402
 from opencomputer.cli_webhook import webhook_app  # noqa: E402
 
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
+# 2026-05-07 PR7+11: dashboard + TUI both mounted at top-level so the
+# user-facing surface matches the docs (`oc dashboard`, `oc tui`).
+app.add_typer(dashboard_app, name="dashboard")
+app.add_typer(tui_app, name="tui")
+
+# 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
+from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
+
+# 2026-05-09 — v1.1 plan-3 M10.4: per-channel routing dry-run CLI.
+from opencomputer.cli_routing import routing_app  # noqa: E402
+
+# 2026-05-09 — v1.1 plan-2 M7: path-glob rules CLI.
+from opencomputer.cli_rules import rules_app  # noqa: E402
+from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
+
+app.add_typer(checkpoints_app, name="checkpoints")
+app.add_typer(worktrees_app, name="worktrees")
+app.add_typer(rules_app, name="rules")
+app.add_typer(routing_app, name="routing")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
@@ -3071,22 +3968,54 @@ def _service_uninstall() -> None:
         typer.echo(f"note: {note}")
 
 
+def _format_service_status_line(s, backend_name: str) -> str:  # noqa: ANN001
+    """Format a backend status object into a one-line user-facing string."""
+    if s.running:
+        pid_str = f" (pid={s.pid})" if s.pid else ""
+        return f"running{pid_str} [{backend_name}]"
+    if s.enabled:
+        return f"enabled but not running [{backend_name}]"
+    if s.file_present:
+        return f"installed but not enabled [{backend_name}]"
+    return f"not installed [{backend_name}]"
+
+
 @service_app.command("status")
-def _service_status() -> None:
-    """Report whether the service is enabled + running (cross-platform)."""
+def _service_status(
+    watch: bool = typer.Option(False, "--watch", "-w", help="Poll status every 2s; exits when status changes (M4)."),
+    interval: float = typer.Option(2.0, "--interval", help="Poll interval in seconds (only meaningful with --watch)."),
+    timeout: float = typer.Option(60.0, "--timeout", help="Max seconds to watch before exiting non-zero. 0 = no timeout."),
+) -> None:
+    """Report whether the service is enabled + running (cross-platform).
+
+    With ``--watch``, the command polls until the status STRING changes
+    (e.g. "running" → "enabled but not running" or vice versa) and then
+    exits 0. Useful after ``oc service start`` to wait for the daemon
+    to actually come online.
+    """
+    import time
+
     from opencomputer.service.factory import get_backend
 
     backend = get_backend()
-    s = backend.status()
-    if s.running:
-        pid_str = f" (pid={s.pid})" if s.pid else ""
-        typer.echo(f"running{pid_str} [{s.backend}]")
-    elif s.enabled:
-        typer.echo(f"enabled but not running [{s.backend}]")
-    elif s.file_present:
-        typer.echo(f"installed but not enabled [{s.backend}]")
-    else:
-        typer.echo(f"not installed [{s.backend}]")
+    initial_status = backend.status()
+    initial_line = _format_service_status_line(initial_status, getattr(backend, "NAME", "?"))
+    typer.echo(initial_line)
+
+    if not watch:
+        return
+
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    while True:
+        time.sleep(interval)
+        status = backend.status()
+        line = _format_service_status_line(status, getattr(backend, "NAME", "?"))
+        if line != initial_line:
+            typer.echo(line)
+            return
+        if deadline is not None and time.monotonic() > deadline:
+            typer.echo(f"(timed out after {timeout}s — status unchanged)", err=True)
+            raise typer.Exit(1)
 
 
 # ─── new: cross-platform start / stop / logs / doctor ────────────────
@@ -3104,12 +4033,34 @@ def _service_start() -> None:
 
 @service_app.command("stop")
 def _service_stop() -> None:
-    """OS-level stop (does not uninstall the service)."""
+    """OS-level stop (does not uninstall the service).
+
+    On macOS, this runs ``launchctl bootout`` to remove the service
+    from launchd's domain — the only way KeepAlive can't trigger
+    a respawn. Use ``oc service start`` to bring it back online.
+    """
     from opencomputer.service.factory import get_backend
     backend = get_backend()
     ok = backend.stop()
     typer.echo("stopped" if ok else "stop failed")
     raise typer.Exit(0 if ok else 1)
+
+
+@service_app.command("restart")
+def _service_restart() -> None:
+    """Stop + start the service, in one command.
+
+    Useful after editing config or reinstalling the package — the
+    long-running daemon picks up the new code.
+    """
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    stopped = backend.stop()
+    if not stopped:
+        typer.echo("stop failed (continuing to start anyway)")
+    started = backend.start()
+    typer.echo("restarted" if started else "restart failed: start step failed")
+    raise typer.Exit(0 if started else 1)
 
 
 @service_app.command("logs")
@@ -3122,6 +4073,85 @@ def _service_logs(
     backend = get_backend()
     for line in backend.follow_logs(lines=n, follow=follow):
         typer.echo(line)
+
+
+@service_app.command("preflight")
+def _service_preflight(
+    force_takeover: bool = typer.Option(
+        False,
+        "--force-takeover",
+        help="Terminate any competing channel-handler processes "
+        "(SIGTERM with 5s grace, then SIGKILL). Writes audit log to "
+        "<profile_home>/audit/competitor-takeover.jsonl.",
+    ),
+) -> None:
+    """Channel ownership preflight check.
+
+    OpenComputer is the SOLE channel handler — no other process should
+    be polling the same Telegram bot, hosting the same Discord adapter,
+    etc. (See ``user_oc_owns_all_channels.md`` directive 2026-05-08.)
+
+    This command scans the process table for known competitor patterns:
+
+    \b
+      - Claude Code's `--channels plugin:telegram` bun bridge
+      - Hermes daemon (`hermes_cli main gateway run`)
+      - Rival `oc gateway` instance
+
+    Default behavior is read-only: lists competitors and exits non-zero.
+    Pass ``--force-takeover`` to terminate them.
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.gateway.preflight import (
+        ChannelOwnershipConflict,
+        default_audit_path,
+        detect_competitors,
+        run_preflight,
+    )
+
+    if not force_takeover:
+        # Read-only path: list and exit.
+        competitors = detect_competitors()
+        if not competitors:
+            typer.echo("✓ no competitors detected — OC is the sole channel handler")
+            raise typer.Exit(0)
+        typer.echo(
+            f"⚠ {len(competitors)} competitor process(es) detected:"
+        )
+        for c in competitors:
+            typer.echo(f"  - {c.display()}")
+        typer.echo("")
+        typer.echo("To terminate them: oc service preflight --force-takeover")
+        typer.echo(
+            "Or set ``gateway.takeover_on_start: true`` in your config.yaml "
+            "for automatic takeover on every gateway start."
+        )
+        raise typer.Exit(1)
+
+    # Takeover path.
+    audit_path = default_audit_path(_home())
+    try:
+        survivors = run_preflight(
+            takeover_on_start=True,
+            grace_seconds=5.0,
+            audit_log=audit_path,
+        )
+    except ChannelOwnershipConflict as e:
+        # Shouldn't happen with takeover_on_start=True, but defensive.
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    if survivors:
+        typer.echo(
+            f"⚠ takeover incomplete — {len(survivors)} competitor(s) refused "
+            f"to die:",
+            err=True,
+        )
+        for c in survivors:
+            typer.echo(f"  - {c.display()}", err=True)
+        typer.echo(f"  Audit log: {audit_path}")
+        raise typer.Exit(1)
+    typer.echo(f"✓ takeover complete — audit at {audit_path}")
 
 
 @service_app.command("doctor")
@@ -3175,10 +4205,21 @@ app.add_typer(cost_app, name="cost")
 app.add_typer(optimize_app, name="optimize")
 app.add_typer(langfuse_app, name="langfuse")
 app.add_typer(cron_app, name="cron")
+app.add_typer(heartbeat_app, name="heartbeat")
 app.add_typer(pair_app, name="pair")
 app.add_typer(session_app, name="session")
+# Hermes-CLI parity C1 — plural alias of `oc session` for users who
+# expect `sessions list/stats/export/rename` (Hermes UX). The same
+# session_app handles both — no fork.
+app.add_typer(session_app, name="sessions")
 app.add_typer(voice_app, name="voice")
 app.add_typer(webhook_app, name="webhook")
+app.add_typer(webhook_app, name="webhooks")  # plural alias — UX parity (M1.B4)
+
+# Dormant-feature activation wizard (M2)
+from opencomputer.cli_activate import activate_app  # noqa: E402
+
+app.add_typer(activate_app, name="activate")
 
 # Hermes channel-port (PR 5.4) — Telegram DM Topics CLI
 from opencomputer.cli_telegram import telegram_app  # noqa: E402
@@ -3727,22 +4768,131 @@ def steer(
     )
 
 
-@app.command(name="acp")
-def acp_serve() -> None:
-    """Start the Agent Client Protocol server over stdio.
+acp_app = typer.Typer(
+    name="acp",
+    help="Agent Client Protocol — serve over stdio or emit agent.json.",
+    no_args_is_help=False,
+)
 
-    OpenComputer becomes the agent backend for ACP-aware IDEs (Zed,
-    VS Code with the ACP extension, Cursor, Claude Desktop).
 
-    PR-D of ~/.claude/plans/replicated-purring-dewdrop.md.
-    See docs/acp.md for IDE setup instructions.
-    """
+def _run_acp_stdio() -> None:
+    """Block on the ACP JSON-RPC server reading stdin/writing stdout."""
     import asyncio as _asyncio
 
     from opencomputer.acp import ACPServer
 
     server = ACPServer()
     _asyncio.run(server.serve_stdio())
+
+
+def _build_agent_manifest() -> dict:
+    """T63 — Hermes-doc agent.json shape for ACP IDE registration.
+
+    IDEs (Zed, VS Code ACP extension, Cursor, Claude Desktop) read
+    this manifest to discover the agent and learn how to spawn it.
+    Capability flags mirror what ``ACPServer._handle_initialize``
+    advertises so static config and runtime advertisement agree.
+    """
+    from opencomputer import __version__ as _oc_version
+    from opencomputer.acp.server import ACP_PROTOCOL_VERSION
+
+    return {
+        "name": "opencomputer",
+        "displayName": "OpenComputer",
+        "version": _oc_version,
+        "protocolVersion": ACP_PROTOCOL_VERSION,
+        "transport": "stdio",
+        "command": "oc",
+        "args": ["acp", "serve"],
+        "capabilities": {
+            "streaming": True,
+            "cancellation": True,
+            "toolset": True,
+        },
+    }
+
+
+def _default_agent_json_path():
+    """Hermes parity G15 (2026-05-09): canonical ACP discovery path.
+
+    Returns ``<profile_home>/acp_registry/agent.json`` — the path
+    JetBrains and other IDEs probe for ACP-compatible agents.
+    """
+    from pathlib import Path as _Path
+
+    from opencomputer.agent.config import _home
+
+    _ = _Path  # keep import local; satisfy linters that want explicit use
+    return _home() / "acp_registry" / "agent.json"
+
+
+def _ensure_agent_json():
+    """Write ``agent.json`` at the canonical path if absent. No-op otherwise.
+
+    The user can hand-edit the file; we never overwrite. Returns the
+    path either way so callers can log it. G15 (Hermes parity, 2026-05-09).
+    """
+    import json as _json
+
+    p = _default_agent_json_path()
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = _build_agent_manifest()
+        p.write_text(_json.dumps(payload, indent=2) + "\n")
+    return p
+
+
+@acp_app.callback(invoke_without_command=True)
+def acp_main(ctx: typer.Context) -> None:
+    """Bare ``oc acp`` (no subcommand) defaults to serve — backwards compat."""
+    if ctx.invoked_subcommand is None:
+        _ensure_agent_json()
+        _run_acp_stdio()
+
+
+@acp_app.command(name="serve")
+def acp_serve() -> None:
+    """Start the Agent Client Protocol server over stdio.
+
+    OpenComputer becomes the agent backend for ACP-aware IDEs (Zed,
+    VS Code with the ACP extension, Cursor, Claude Desktop).
+
+    Hermes parity G15 (2026-05-09): ensures ``agent.json`` exists at
+    ``~/.opencomputer/<profile>/acp_registry/agent.json`` so JetBrains
+    and other IDEs can auto-discover this profile's agent.
+
+    PR-D of ~/.claude/plans/replicated-purring-dewdrop.md.
+    See docs/acp.md for IDE setup instructions.
+    """
+    _ensure_agent_json()
+    _run_acp_stdio()
+
+
+@acp_app.command(name="manifest")
+def acp_manifest(
+    write: str = typer.Option(
+        "",
+        "--write",
+        "-w",
+        help="Write the manifest to this path instead of stdout.",
+    ),
+) -> None:
+    """Emit ``agent.json`` for IDE registration (T63 — Hermes-doc parity)."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    payload = _build_agent_manifest()
+    rendered = _json.dumps(payload, indent=2)
+    if write:
+        target = _Path(write).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered + "\n")
+        typer.echo(f"wrote {target}")
+        return
+    typer.echo(rendered)
+
+
+app.add_typer(acp_app, name="acp")
 
 
 @app.command()
@@ -3807,6 +4957,293 @@ def batch(
         console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
         raise typer.Exit(1) from None
     console.print(f"[green]✓[/green] batch finished ({final_status}) — {n} result(s) → {out_path}")
+
+
+model_app = typer.Typer(
+    help="Manage custom OpenAI/Anthropic-compatible providers (Wave 3 — 2026-05-08).",
+    no_args_is_help=True,
+)
+app.add_typer(model_app, name="model")
+
+
+@model_app.command("add")
+def model_add(
+    name: str = typer.Argument(
+        ..., help="Provider name used in /model custom:<name>:<model_id>"
+    ),
+    base_url: str = typer.Option(..., "--base-url", "-u"),
+    key_env: str | None = typer.Option(
+        None, "--key-env", "-k", help="Env var holding the API key (preferred over inline)."
+    ),
+    api_mode: str = typer.Option(
+        "auto", "--api-mode", "-m", help="auto | openai | anthropic"
+    ),
+    probe: bool = typer.Option(
+        True, "--probe/--no-probe", help="Probe /v1/models for connectivity."
+    ),
+) -> None:
+    """Add a custom_providers entry to the active profile's config.yaml."""
+    import httpx
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    providers = raw.setdefault("custom_providers", [])
+    if any(p.get("name") == name for p in providers):
+        console.print(
+            f"[bold red]✗[/bold red] provider {name!r} already exists; "
+            f"run `oc model remove {name}` first"
+        )
+        raise typer.Exit(1)
+    entry: dict = {"name": name, "base_url": base_url}
+    if key_env:
+        entry["key_env"] = key_env
+    if api_mode != "auto":
+        entry["api_mode"] = api_mode
+    if probe:
+        try:
+            r = httpx.get(f"{base_url.rstrip('/')}/models", timeout=10.0)
+            if r.status_code == 200:
+                console.print("[green]✓[/green] endpoint reachable")
+            else:
+                console.print(
+                    f"[yellow]⚠[/yellow] probe returned {r.status_code}; writing entry anyway"
+                )
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[yellow]⚠[/yellow] probe failed ({e}); writing entry anyway")
+    providers.append(entry)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"[green]✓[/green] wrote {name!r} to {cfg_path}")
+    console.print(f"  use it now: [cyan]/model custom:{name}:<model_id>[/cyan]")
+
+
+@model_app.command("list")
+def model_list() -> None:
+    """List configured custom_providers entries."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    providers = raw.get("custom_providers", [])
+    if not providers:
+        console.print("[dim]no custom_providers configured[/dim]")
+        return
+    for p in providers:
+        name = p.get("name", "?")
+        base_url = p.get("base_url", "?")
+        key_env = p.get("key_env", "")
+        suffix = f" ([dim]key_env={key_env}[/dim])" if key_env else ""
+        console.print(f"  [cyan]{name:20s}[/cyan] {base_url}{suffix}")
+
+
+@model_app.command("remove")
+def model_remove(name: str = typer.Argument(...)) -> None:
+    """Remove a custom_providers entry by name."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    providers = raw.get("custom_providers", [])
+    before = len(providers)
+    providers[:] = [p for p in providers if p.get("name") != name]
+    if len(providers) == before:
+        console.print(f"[bold red]✗[/bold red] no provider named {name!r}")
+        raise typer.Exit(1)
+    raw["custom_providers"] = providers
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"[green]✓[/green] removed {name!r}")
+
+
+fallback_app = typer.Typer(
+    help="Manage cross-provider fallback chain (Wave 3 — 2026-05-08).",
+    no_args_is_help=False,
+    invoke_without_command=True,
+)
+app.add_typer(fallback_app, name="fallback")
+
+
+def _split_provider_model_spec(spec: str) -> tuple[str, str]:
+    """Split 'provider/model' or 'custom:<name>/<model>' into (provider, model).
+
+    The first '/' AFTER the optional 'custom:<name>' prefix separates
+    provider and model. Models containing slashes (Anthropic-on-OR
+    'anthropic/claude-sonnet-4') survive because we partition once.
+    """
+    if spec.startswith("custom:"):
+        # custom:<name>/<model_id>
+        cut = spec.find("/", len("custom:"))
+        if cut == -1:
+            raise typer.BadParameter(
+                f"expected 'custom:<name>/<model>', got {spec!r}"
+            )
+        return spec[:cut], spec[cut + 1:]
+    provider, sep, model = spec.partition("/")
+    if not sep or not provider or not model:
+        raise typer.BadParameter(
+            f"expected '<provider>/<model>' or 'custom:<name>/<model>', got {spec!r}"
+        )
+    return provider, model
+
+
+@fallback_app.callback(invoke_without_command=True)
+def fallback_root(ctx: typer.Context) -> None:
+    """Show the current fallback chain when called with no subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if not chain:
+        console.print("[dim]no fallback_providers configured[/dim]")
+        return
+    for i, fp in enumerate(chain):
+        prov = fp.get("provider", "?")
+        mdl = fp.get("model", "?")
+        console.print(f"  [cyan][{i}][/cyan] {prov}/{mdl}")
+
+
+@fallback_app.command("add")
+def fallback_add(
+    spec: str = typer.Argument(
+        ..., help="provider/model or custom:<name>/<model>",
+    ),
+) -> None:
+    """Append a fallback entry to the chain."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    provider, model = _split_provider_model_spec(spec)
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.setdefault("fallback_providers", [])
+    chain.append({"provider": provider, "model": model})
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"[green]✓[/green] added {provider}/{model} (position {len(chain) - 1})")
+
+
+@fallback_app.command("remove")
+def fallback_remove(
+    index: int = typer.Argument(..., help="0-based index of the entry to remove."),
+) -> None:
+    """Remove a fallback entry by index."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if index < 0 or index >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] index {index} out of range "
+            f"(chain has {len(chain)} entr{'y' if len(chain) == 1 else 'ies'})"
+        )
+        raise typer.Exit(1)
+    removed = chain.pop(index)
+    raw["fallback_providers"] = chain
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]✓[/green] removed {removed.get('provider')}/{removed.get('model')}"
+    )
+
+
+@fallback_app.command("move")
+def fallback_move(
+    from_idx: int = typer.Argument(..., help="0-based source index."),
+    to_idx: int = typer.Argument(..., help="0-based target index."),
+) -> None:
+    """Move a fallback entry from one position to another."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if from_idx < 0 or from_idx >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] from_idx {from_idx} out of range "
+            f"(chain has {len(chain)} entr{'y' if len(chain) == 1 else 'ies'})"
+        )
+        raise typer.Exit(1)
+    if to_idx < 0 or to_idx >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] to_idx {to_idx} out of range"
+        )
+        raise typer.Exit(1)
+    entry = chain.pop(from_idx)
+    chain.insert(to_idx, entry)
+    raw["fallback_providers"] = chain
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]✓[/green] moved {entry.get('provider')}/{entry.get('model')} "
+        f"from [{from_idx}] to [{to_idx}]"
+    )
+
+
+@fallback_app.command("clear")
+def fallback_clear() -> None:
+    """Clear the fallback chain (no entries left)."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print("[dim]no config.yaml to update[/dim]")
+        return
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw["fallback_providers"] = []
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print("[green]✓[/green] cleared fallback chain")
 
 
 def _apply_loose_env_perms_flag() -> None:
@@ -3944,6 +5381,17 @@ def main() -> None:
         load_for_profile(read_active_profile())
     except Exception as e:  # noqa: BLE001 — never crash startup on env load
         _log.debug("per-profile env load failed: %s", e)
+    # v1.1 plan-4 M13 — attach plugin-advertised top-level CLI subcommands
+    # as lazy placeholders. Discovery is cheap (manifest JSON only); the
+    # owning plugin loads only when the user actually invokes `oc <name>`.
+    try:
+        from opencomputer.plugins.cli_registry import (
+            register_plugin_cli_commands,
+        )
+
+        register_plugin_cli_commands(app)
+    except Exception as e:  # noqa: BLE001 — never crash startup on plugin scan
+        _log.debug("M13 plugin CLI registration failed: %s", e)
     app()
 
 

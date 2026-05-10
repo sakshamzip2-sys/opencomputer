@@ -32,9 +32,15 @@ def test_all_events_present_in_all_hook_events_tuple() -> None:
 
     Wave 5 T13/T14 added three more events (PRE_GATEWAY_DISPATCH,
     PRE_APPROVAL_REQUEST, POST_APPROVAL_RESPONSE) for a subtotal of 20.
-    Social-traces plugin (Phase 0) adds BEFORE_TASK for a total of 21.
+    Social-traces plugin (Phase 0) adds BEFORE_TASK for a subtotal of 21.
+    2026-05-06 OpenClaw deep-comparison adds BEFORE_INSTALL for a subtotal of 22.
+    2026-05-06 Phase 3 adds BEFORE_MODEL_RESOLVE / MESSAGE_SENDING /
+    MESSAGE_SENT (S3 leftovers from OpenClaw deep-comparison) bringing
+    the total to 25.
+    2026-05-08 Hermes Doc-2 parity adds SESSION_FINALIZE / SESSION_RESET /
+    TRANSFORM_LLM_OUTPUT — final tally 28.
     """
-    assert len(ALL_HOOK_EVENTS) == 21
+    assert len(ALL_HOOK_EVENTS) == 28
     assert set(ALL_HOOK_EVENTS) == set(HookEvent)
     # No duplicates.
     assert len(set(ALL_HOOK_EVENTS)) == len(ALL_HOOK_EVENTS)

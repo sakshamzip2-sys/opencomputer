@@ -74,6 +74,7 @@ def _ensure_alias() -> None:
 _ensure_alias()
 
 from extensions.social_traces import tag_extractor as st_tag  # noqa: E402
+
 from plugin_sdk.core import Message  # noqa: E402
 from plugin_sdk.provider_contract import (  # noqa: E402
     BaseProvider,

@@ -29,12 +29,13 @@ Write tools + long-poll (3, all Tier-A item 14 follow-up):
   around ``events_poll`` that blocks until a new message arrives or
   timeout (capped at 120s).
 
-Honest deferral — one Hermes tool not yet ported:
+F1 consent write-back (1):
 
-- ``permissions_respond`` — needs F1 pending-consent queue surface
-  exposed; the F1 audit chain is read-only today. Implementing safely
-  means designing a write-back path that doesn't bypass the gateway's
-  consent-grant flow. Deferred to a focused F1 follow-up.
+- ``permissions_respond(capability_id, decision, scope=None,
+  tier=1, expires_in_seconds=None)`` — grant or revoke a capability.
+  ``decision="allow"`` upserts a ConsentGrant; ``decision="deny"`` revokes
+  the matching grant. Honors F1's HMAC-chained audit trail: the next
+  ``consent_history`` call surfaces the new entry.
 
 Pattern: high-level ``mcp.server.fastmcp.FastMCP`` decorators (clean +
 type-checked) over ``mcp.server.stdio.stdio_server()`` transport
@@ -87,6 +88,24 @@ def build_server() -> FastMCP:
         bounded = max(1, min(limit, 200))
         db = SessionDB(_home() / "sessions.db")
         return db.list_sessions(limit=bounded)
+
+    # G12 (Hermes parity, 2026-05-09): spec-named aliases. Same body,
+    # second tool name. FastMCP keys the registry on tool name so
+    # registering ``conversations_list`` next to ``sessions_list`` adds
+    # a second registration that delegates to the same body — no
+    # collision because each is a unique tool name.
+    @server.tool()
+    def conversations_list(limit: int = 20) -> list[dict[str, Any]]:
+        """Hermes-spec alias for ``sessions_list`` (G12 — 2026-05-09)."""
+        bounded = max(1, min(limit, 200))
+        db = SessionDB(_home() / "sessions.db")
+        return db.list_sessions(limit=bounded)
+
+    @server.tool()
+    def conversation_get(session_id: str) -> dict[str, Any] | None:
+        """Hermes-spec alias for ``session_get`` (G12 — 2026-05-09)."""
+        db = SessionDB(_home() / "sessions.db")
+        return db.get_session(session_id)
 
     @server.tool()
     def session_get(session_id: str) -> dict[str, Any] | None:
@@ -256,9 +275,11 @@ def build_server() -> FastMCP:
 
     @server.tool()
     def events_poll(
-        since_message_id: int = 0, limit: int = 50
+        since_message_id: int = 0,
+        after_cursor: int | None = None,
+        limit: int = 50,
     ) -> dict[str, Any]:
-        """Incremental poll for messages that arrived after a cursor.
+        """Incremental poll for messages and approval events.
 
         External MCP clients (Claude Code, Cursor) call this on a timer
         to pick up newly-received Telegram/Discord messages without
@@ -266,32 +287,40 @@ def build_server() -> FastMCP:
         the next cursor; clients should re-poll with ``next_cursor`` to
         continue the stream.
 
+        Hermes parity G14 (2026-05-09):
+
+        * Accepts ``after_cursor`` as a Hermes-spec alias for
+          ``since_message_id`` (when both are supplied, ``after_cursor``
+          wins).
+        * Surfaces F1 ``audit_log`` entries newer than the cursor under
+          a separate ``approvals`` key with ``type``
+          (``approval_requested`` / ``approval_resolved``) so MCP
+          clients can react to consent grants/revocations elsewhere.
+          Empty when the ``audit_log`` table is absent.
+
         Args:
-            since_message_id: Cursor — return only messages whose row id
-                is strictly greater than this. Use ``0`` on first call;
-                use the returned ``next_cursor`` thereafter.
-            limit: Max messages to return per call (default 50, max 500).
+            since_message_id: Cursor (legacy OC). Use ``after_cursor``
+                instead for new code.
+            after_cursor: Hermes-spec cursor name. Wins when both are set.
+            limit: Max messages and approvals returned (default 50, max 500).
 
         Returns:
-            Dict with ``messages`` (list of newest-N rows from the
-            messages table joined with their session's platform / chat
-            id) and ``next_cursor`` (the highest row id returned, or
-            ``since_message_id`` if no new rows). Re-poll with that
-            cursor to get the next slice.
+            Dict with ``messages`` (list of newest-N message rows joined
+            with their session's platform), ``next_cursor`` (the highest
+            message id returned), and ``approvals`` (list of newer-than-
+            cursor audit_log entries with ``type`` set).
         """
+        cursor = after_cursor if after_cursor is not None else since_message_id
         bounded = max(1, min(limit, 500))
         db_path = _home() / "sessions.db"
         if not db_path.exists():
-            return {"messages": [], "next_cursor": since_message_id}
+            return {"messages": [], "next_cursor": cursor, "approvals": []}
 
+        out_messages: list[dict[str, Any]] = []
+        out_approvals: list[dict[str, Any]] = []
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             try:
-                # Join messages → sessions so the caller learns the
-                # platform without a follow-up ``session_get`` per row.
-                # Chat id is encoded into ``session_id`` by the gateway —
-                # callers that need a structured (platform, chat_id)
-                # tuple should call ``session_get`` for resolution.
                 rows = conn.execute(
                     "SELECT m.id, m.session_id, m.role, m.content, "
                     "m.timestamp, s.platform "
@@ -299,15 +328,39 @@ def build_server() -> FastMCP:
                     "JOIN sessions s ON m.session_id = s.id "
                     "WHERE m.id > ? "
                     "ORDER BY m.id ASC LIMIT ?",
-                    (since_message_id, bounded),
+                    (cursor, bounded),
                 ).fetchall()
             except sqlite3.OperationalError:
                 # Pre-migration DB or missing column; return empty.
-                return {"messages": [], "next_cursor": since_message_id}
+                rows = []
+            out_messages = [dict(r) for r in rows]
 
-        messages = [dict(r) for r in rows]
-        next_cursor = messages[-1]["id"] if messages else since_message_id
-        return {"messages": messages, "next_cursor": next_cursor}
+            # G14: surface approval events from audit_log when present.
+            try:
+                a_rows = conn.execute(
+                    "SELECT id, ts, capability_id, action, tier, scope, "
+                    "granted_by FROM audit_log WHERE id > ? "
+                    "ORDER BY id ASC LIMIT ?",
+                    (cursor, bounded),
+                ).fetchall()
+                for r in a_rows:
+                    rd = dict(r)
+                    rd["type"] = (
+                        "approval_resolved"
+                        if rd["action"] in ("granted", "revoked")
+                        else "approval_requested"
+                    )
+                    out_approvals.append(rd)
+            except sqlite3.OperationalError:
+                # Pre-F1 profile or fresh DB — silently skip.
+                pass
+
+        next_cursor = out_messages[-1]["id"] if out_messages else cursor
+        return {
+            "messages": out_messages,
+            "next_cursor": next_cursor,
+            "approvals": out_approvals,
+        }
 
     @server.tool()
     def consent_history(capability: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -344,6 +397,42 @@ def build_server() -> FastMCP:
                 # or a fresh profile. Return empty rather than raise.
                 return []
             return [dict(r) for r in rows]
+
+    @server.tool()
+    def permissions_list_open(limit: int = 50) -> list[dict[str, Any]]:
+        """Hermes parity G13 (2026-05-09): list OPEN consent requests.
+
+        Returns capabilities currently awaiting a user/operator decision.
+        Distinct from ``consent_history`` (which returns the full audit
+        log) — this is the live "approvals queue".
+
+        Falls back to ``[]`` if the F1 ``consent_requests`` table doesn't
+        exist (pre-F1 profile or fresh DB).
+
+        Args:
+            limit: Max entries to return (default 50, max 500).
+
+        Returns:
+            List of dicts: ``capability_id`` (e.g. "fs.write"), ``scope``
+            (path / arg constraints), ``requested_at`` (unix-ts float),
+            ``requested_by`` (caller — usually ``"tool:<name>"``).
+        """
+        bounded = max(1, min(limit, 500))
+        db_path = _home() / "sessions.db"
+        if not db_path.exists():
+            return []
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT capability_id, scope, requested_at, requested_by "
+                    "FROM consent_requests WHERE state = 'pending' "
+                    "ORDER BY requested_at DESC LIMIT ?",
+                    (bounded,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
 
     @server.tool()
     async def messages_send(
@@ -500,6 +589,81 @@ def build_server() -> FastMCP:
             if now >= deadline:
                 return {"messages": [], "next_cursor": cursor}
             await asyncio.sleep(min(bounded_poll, max(0.0, deadline - now)))
+
+    @server.tool()
+    def permissions_respond(
+        capability_id: str,
+        decision: str,
+        scope: str | None = None,
+        tier: int = 1,
+        expires_in_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Grant or revoke an F1 capability consent (10th of 10 Hermes tools).
+
+        Args:
+            capability_id: The capability id (e.g. "fs.read", "shell.exec").
+            decision: ``"allow"`` (upsert grant) or ``"deny"`` (revoke).
+            scope: Optional scope filter (e.g. a path prefix). ``None``
+                means a global grant for the capability.
+            tier: ConsentTier int (0=IMPLICIT, 1=EXPLICIT (default),
+                2=PER_ACTION, 3=DELEGATED).
+            expires_in_seconds: Optional grant lifetime. ``None`` =
+                no expiry (revocable). Otherwise added to ``time.time()``.
+
+        Returns:
+            ``{"ok": True, "action": "granted"|"revoked", "capability_id":
+            ..., "scope": ...}`` on success;
+            ``{"ok": False, "error": "..."}`` on bad input.
+        """
+        import time as _time
+
+        from opencomputer.agent.consent.store import ConsentStore
+        from plugin_sdk.consent import ConsentGrant, ConsentTier
+
+        decision_norm = (decision or "").strip().lower()
+        if decision_norm not in ("allow", "deny"):
+            return {
+                "ok": False,
+                "error": f"decision must be 'allow' or 'deny', got {decision!r}",
+            }
+        try:
+            tier_enum = ConsentTier(int(tier))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"tier must be 0..3, got {tier!r}"}
+
+        db_path = _home() / "sessions.db"
+        if not db_path.exists():
+            return {"ok": False, "error": "sessions.db not found for active profile"}
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                store = ConsentStore(conn)
+                if decision_norm == "deny":
+                    store.revoke(capability_id, scope)
+                    action = "revoked"
+                else:
+                    now = _time.time()
+                    expires_at: float | None = None
+                    if expires_in_seconds is not None and expires_in_seconds > 0:
+                        expires_at = now + float(expires_in_seconds)
+                    grant = ConsentGrant(
+                        capability_id=capability_id,
+                        scope_filter=scope,
+                        tier=tier_enum,
+                        granted_at=now,
+                        expires_at=expires_at,
+                        granted_by="user",
+                    )
+                    store.upsert(grant)
+                    action = "granted"
+            return {
+                "ok": True,
+                "action": action,
+                "capability_id": capability_id,
+                "scope": scope,
+                "tier": int(tier_enum),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     return server
 

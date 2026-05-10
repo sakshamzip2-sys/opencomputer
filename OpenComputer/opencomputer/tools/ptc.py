@@ -86,12 +86,40 @@ logger = logging.getLogger("opencomputer.tools.ptc")
 # bash / delegate require explicit opt-in.
 DEFAULT_ALLOWED_TOOLS: tuple[str, ...] = ("Read", "WebFetch", "Grep", "Glob")
 
+# 2026-05-08 — Hermes Doc-2 ``execute_code`` parity. The Hermes spec
+# allows a broader default that includes write + terminal:
+# ``web_search``, ``web_extract``, ``read_file``, ``write_file``,
+# ``search_files``, ``patch``, ``terminal``. Mapped to OC tool names:
+EXECUTE_CODE_DEFAULT_TOOLS: tuple[str, ...] = (
+    "Read", "Write", "Edit", "Grep", "Glob", "WebFetch", "WebSearch", "Bash",
+)
+
 # Hard caps. Picking conservative numbers — too tight is recoverable
 # (LLM gets a clear error and can split the work into multiple calls);
 # too loose risks a single PTC call dominating the agent's budget.
 _MAX_STDOUT_BYTES = 50 * 1024  # 50 KB
+# 2026-05-08 — Hermes Doc-2 parity: explicit stderr cap (Hermes 10 KB).
+# Pre-existing run_ptc only capped stdout. Stderr without a cap can
+# explode if a script triggers a noisy traceback/Python warning.
+_MAX_STDERR_BYTES = 10 * 1024  # 10 KB
 _MAX_RPC_CALLS = 50
 _DEFAULT_TIMEOUT_S = 300.0
+
+# 2026-05-08 — env-scrub patterns from the Hermes Doc-2 ``execute_code``
+# spec. Variables whose KEY contains any of these substrings (case-
+# insensitive) are stripped before subprocess spawn so credentials in
+# the parent's env don't leak into a script the LLM authored. Skills'
+# ``required_environment_variables`` and an explicit caller-supplied
+# pass-through list bypass this filter.
+_ENV_SCRUB_PATTERNS: tuple[str, ...] = (
+    "KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD", "AUTH",
+)
+
+# 2026-05-08 — recursion guard. The parent sets this env var before
+# spawning the subprocess; the subprocess inherits it. Inside an
+# already-running execute_code, attempts to call execute_code again
+# fail with a clear error rather than fork-bombing.
+_RECURSION_GUARD_ENV: str = "OC_EXECUTE_CODE_DEPTH"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -129,10 +157,19 @@ def _pack_msg(payload: dict[str, Any]) -> bytes:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _build_prologue(allowed: tuple[str, ...]) -> str:
+def _build_prologue(
+    allowed: tuple[str, ...],
+    max_tool_calls: int = _MAX_RPC_CALLS,
+) -> str:
     """Generate the small RPC client + tool-stub functions.
 
     ``allowed`` is the ordered list of tool names to expose.
+
+    ``max_tool_calls`` is the per-script RPC cap (Hermes Doc-2 G5,
+    2026-05-08). Defaults to ``_MAX_RPC_CALLS`` (50) for callers that
+    haven't been threaded through with config. Pass an override to
+    apply a custom cap from ``code_execution.max_tool_calls`` in
+    ``config.yaml``.
 
     Stubs map ``ToolName(**kwargs) -> str`` — the result text. Tool
     errors raise ``RuntimeError`` so a script ``try/except`` block
@@ -156,7 +193,7 @@ def _build_prologue(allowed: tuple[str, ...]) -> str:
         "_ptc_sock = _ptc_socket.socket(_ptc_socket.AF_UNIX)",
         "_ptc_sock.connect(_ptc_os.environ['OC_PTC_SOCKET'])",
         "_ptc_call_count = 0",
-        f"_ptc_max_calls = {_MAX_RPC_CALLS}",
+        f"_ptc_max_calls = {max_tool_calls}",
         "",
         "def _ptc_call(tool, arguments):",
         "    global _ptc_call_count",
@@ -355,12 +392,48 @@ class PTCServer:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _scrub_env(
+    env: dict[str, str], *, passthrough: tuple[str, ...] = (),
+) -> tuple[dict[str, str], list[str]]:
+    """Drop env vars whose name matches a scrub pattern.
+
+    Returns ``(scrubbed_env, removed_var_names)``. The pass-through list
+    is matched case-sensitively and exempts those exact names from the
+    scrub (use case: a skill's ``required_environment_variables`` may
+    legitimately need ``MY_API_KEY`` — the skill author has accepted
+    that risk by listing it).
+
+    Conservative-by-default: any name *containing* a scrub pattern
+    (case-insensitive) is removed unless explicitly whitelisted.
+    """
+    pass_set = set(passthrough)
+    out: dict[str, str] = {}
+    removed: list[str] = []
+    for k, v in env.items():
+        if k in pass_set:
+            out[k] = v
+            continue
+        upper = k.upper()
+        if any(p in upper for p in _ENV_SCRUB_PATTERNS):
+            removed.append(k)
+            continue
+        out[k] = v
+    return out, removed
+
+
 async def run_ptc(
     code: str,
     *,
     registry: Any,
     allowed_tools: tuple[str, ...] | list[str] | None = None,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
+    scrub_env: bool = False,
+    env_passthrough: tuple[str, ...] | list[str] = (),
+    stderr_cap: int | None = None,
+    cwd: str | None = None,
+    python_executable: str | None = None,
+    parent_env: dict[str, str] | None = None,
+    max_tool_calls: int | None = None,
 ) -> PTCResult:
     """Run a PTC script end-to-end.
 
@@ -376,6 +449,30 @@ async def run_ptc(
         allowed_tools: Tool names to expose. ``None`` uses
             :data:`DEFAULT_ALLOWED_TOOLS` (read-only).
         timeout_s: Wallclock cap on the whole invocation.
+        scrub_env: When True (Hermes ``execute_code`` parity, 2026-05-08),
+            strip env vars whose names contain any of
+            ``KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/PASSWD/AUTH`` before
+            subprocess spawn. Default False preserves existing
+            ``PythonExec.mode="ptc"`` callers' behaviour.
+        env_passthrough: When ``scrub_env=True``, exact env-var names
+            in this list bypass the scrub. Use case: a skill's
+            ``required_environment_variables`` legitimately needs
+            ``MY_API_KEY``.
+        stderr_cap: When set, truncate captured stderr to this many
+            bytes (with a marker). Hermes execute_code uses 10 KB.
+            Default ``None`` keeps stderr uncapped (existing behaviour).
+        cwd: Working directory for the subprocess. ``None`` inherits
+            the parent's cwd. ``execute_code`` mode="project" passes
+            the session's working dir; mode="strict" passes a fresh
+            tempdir.
+        python_executable: Python interpreter path. ``None`` uses
+            ``sys.executable``. ``execute_code`` mode="project" passes
+            the active venv python; mode="strict" passes
+            ``sys.executable``.
+        parent_env: Pre-built env dict to use as the base. ``None`` =
+            copy of ``os.environ``. Lets callers override the cwd-
+            sensitive ``VIRTUAL_ENV`` / ``CONDA_PREFIX`` for strict
+            mode without mutating the parent process's env.
 
     Returns:
         :class:`PTCResult` with stdout / stderr / exit_code / metadata.
@@ -404,7 +501,14 @@ async def run_ptc(
     server = PTCServer(registry, config)
     await server.start()
 
-    prologue = _build_prologue(allowed)
+    # 2026-05-08 G5 — let callers override the in-script RPC cap from
+    # ``code_execution.max_tool_calls`` config. None preserves the
+    # historic _MAX_RPC_CALLS=50 default.
+    effective_max_calls = (
+        max_tool_calls if isinstance(max_tool_calls, int) and max_tool_calls > 0
+        else _MAX_RPC_CALLS
+    )
+    prologue = _build_prologue(allowed, max_tool_calls=effective_max_calls)
     full_script = prologue + "\n" + code
 
     with tempfile.NamedTemporaryFile(
@@ -413,23 +517,42 @@ async def run_ptc(
         f.write(full_script)
         script_path = Path(f.name)
 
+    base_env = parent_env if parent_env is not None else os.environ.copy()
     try:
         from opencomputer.profiles import read_active_profile, scope_subprocess_env
 
-        env = scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+        env = scope_subprocess_env(base_env, profile=read_active_profile())
     except Exception:  # noqa: BLE001 — fail-soft on profile lookup
-        env = dict(os.environ)
+        env = dict(base_env)
+
+    # 2026-05-08 — Hermes execute_code env-scrub.
+    if scrub_env:
+        env, _scrubbed = _scrub_env(env, passthrough=tuple(env_passthrough))
+        if _scrubbed:
+            logger.debug(
+                "PTC env scrub removed %d vars: %s",
+                len(_scrubbed), ", ".join(sorted(_scrubbed))[:200],
+            )
     env["OC_PTC_SOCKET"] = server.socket_path
+    # Recursion guard — increment depth so a nested execute_code refuses.
+    try:
+        prev_depth = int(env.get(_RECURSION_GUARD_ENV, "0") or "0")
+    except ValueError:
+        prev_depth = 0
+    env[_RECURSION_GUARD_ENV] = str(prev_depth + 1)
+
+    interpreter = python_executable or sys.executable
 
     start = time.monotonic()
     timed_out = False
     truncated = False
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(script_path),
+            interpreter, str(script_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=cwd,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -447,6 +570,15 @@ async def run_ptc(
             head = stdout_b[:_MAX_STDOUT_BYTES]
             stdout_b = head + (
                 f"\n\n[truncated — {len(stdout_b) - _MAX_STDOUT_BYTES} "
+                f"bytes omitted]"
+            ).encode()
+
+        # 2026-05-08 — optional stderr cap (Hermes execute_code: 10 KB).
+        if stderr_cap is not None and len(stderr_b) > stderr_cap:
+            truncated = True
+            head_err = stderr_b[:stderr_cap]
+            stderr_b = head_err + (
+                f"\n\n[truncated — {len(stderr_b) - stderr_cap} "
                 f"bytes omitted]"
             ).encode()
 

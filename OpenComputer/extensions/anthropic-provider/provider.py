@@ -43,6 +43,8 @@ from opencomputer.tools.schema_sanitizer import (
     normalize_tool_input_schema_for_anthropic,
 )
 from plugin_sdk.core import Message, ToolCall
+from plugin_sdk.embeddings import MAX_BATCH_SIZE as MAX_EMBED_BATCH_SIZE
+from plugin_sdk.embeddings import EmbeddingBatch, EmbeddingsUnsupportedError
 from plugin_sdk.pdf_helpers import (
     PDF_HARD_PAGE_LIMIT,
     PDF_MAX_BYTES,
@@ -736,6 +738,16 @@ class AnthropicProviderConfig(BaseModel):
     auth_mode: Literal["api_key", "x-api-key", "bearer"] = Field(default="api_key")
 
 
+# Pydantic 2.12 + ``from __future__ import annotations`` (PEP 563): all
+# class annotations become strings at definition time, so ``Literal[...]``
+# is an unresolved forward reference until ``model_rebuild()`` runs in a
+# context where ``Literal`` is in scope. Without this, instantiating
+# AnthropicProviderConfig raises ``PydanticUserError: ... is not fully
+# defined`` — observed 2026-05-08 against pydantic 2.12.4. Idempotent and
+# cheap on import.
+AnthropicProviderConfig.model_rebuild()
+
+
 async def _strip_x_api_key(request: httpx.Request) -> None:
     """httpx event hook: remove x-api-key header before sending.
 
@@ -775,6 +787,24 @@ class AnthropicProvider(BaseProvider):
         # Optional credential pool (PR-A): comma-separated env value triggers pool mode.
         # Single key (no comma) → no pool, behavior IDENTICAL to today (regression-tested).
         api_key_raw = api_key or os.environ.get(self._api_key_env, "")
+        # T69 — auth.json + Claude Code credential discovery as a final
+        # fallback. Only fires when explicit api_key + env var are both
+        # empty, so existing single/multi-key flows are unchanged.
+        if not api_key_raw:
+            try:
+                from plugin_sdk.auth_discovery import discover_anthropic_credential
+                discovered = discover_anthropic_credential()
+                if discovered:
+                    api_key_raw = discovered["api_key"]
+                    _log.info(
+                        "anthropic-provider: using API key discovered via %s",
+                        discovered["source"],
+                    )
+            except Exception:  # noqa: BLE001
+                # Discovery is best-effort; fall through to the existing
+                # "no key" RuntimeError below so the user gets the same
+                # clear error message they always got.
+                pass
         if "," in api_key_raw:
             keys = [k.strip() for k in api_key_raw.split(",") if k.strip()]
             self._credential_pool: CredentialPool | None = CredentialPool(keys=keys) if len(keys) > 1 else None
@@ -820,8 +850,14 @@ class AnthropicProvider(BaseProvider):
         from opencomputer.agent.anthropic_client import (
             build_anthropic_async_client,
         )
+        # Wave 3 (2026-05-08) — pass request_timeout_seconds through so
+        # the BaseProvider class attribute (or any subclass override)
+        # actually shapes the underlying httpx client's timeout.
         self.client = build_anthropic_async_client(
-            key, base_url=base, auth_mode=mode,
+            key,
+            base_url=base,
+            auth_mode=mode,
+            timeout=self.request_timeout_seconds,
         )
         # Idle-aware TTL switch — track wall-clock between calls so we can
         # bump cache TTL to 1h when a session has been idle long enough
@@ -1275,8 +1311,14 @@ class AnthropicProvider(BaseProvider):
         from opencomputer.agent.anthropic_client import (
             build_anthropic_async_client,
         )
+        # Wave 3 (2026-05-08) — wire request_timeout_seconds into the
+        # underlying AsyncAnthropic / httpx client so per-provider
+        # timeout overrides actually take effect.
         return build_anthropic_async_client(
-            key, base_url=self._base, auth_mode=self._mode,
+            key,
+            base_url=self._base,
+            auth_mode=self._mode,
+            timeout=self.request_timeout_seconds,
         )
 
     def _build_files_cache_pair(
@@ -1907,6 +1949,135 @@ class AnthropicProvider(BaseProvider):
             max_tokens=max_tokens,
         )
         return resp.message.content if resp and resp.message else ""
+
+    # ─── embeddings (v1.1 plan-3 M6.6) ──────────────────────────────────
+    #
+    # Anthropic's first-party API has no embeddings endpoint.  The
+    # canonical pairing (per Anthropic docs) is Voyage AI.  When
+    # ``VOYAGE_API_KEY`` is in the environment, this provider's
+    # ``embed()`` proxies to the Voyage HTTP API; otherwise it raises
+    # :class:`EmbeddingsUnsupportedError` and the M6.2 vector index falls
+    # back to BM25-only retrieval.
+
+    #: Default Voyage model used by ``embed()`` when ``VOYAGE_API_KEY``
+    #: is set.  1024-d, ~$0.02/1M tokens (2026-05).
+    DEFAULT_VOYAGE_MODEL: str = "voyage-3-lite"
+
+    _VOYAGE_PRICING_USD_PER_M_TOK: dict[str, float] = {
+        "voyage-3-lite": 0.02,
+        "voyage-3": 0.06,
+        "voyage-3-large": 0.18,
+        "voyage-code-3": 0.18,
+    }
+
+    _VOYAGE_DIMENSIONALITY: dict[str, int] = {
+        "voyage-3-lite": 512,
+        "voyage-3": 1024,
+        "voyage-3-large": 1024,
+        "voyage-code-3": 1024,
+    }
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str | None = None,
+    ) -> EmbeddingBatch:
+        """Anthropic-companion embeddings via Voyage AI.
+
+        Uses ``VOYAGE_API_KEY`` from the environment.  Raises
+        :class:`EmbeddingsUnsupportedError` if not set so the M6.2 vector
+        index can fall back to BM25-only retrieval cleanly.
+        """
+        voyage_key = os.environ.get("VOYAGE_API_KEY", "").strip()
+        if not voyage_key:
+            raise EmbeddingsUnsupportedError(
+                "anthropic provider requires VOYAGE_API_KEY for embeddings "
+                "(Anthropic's first-party API has no embeddings endpoint; "
+                "Voyage AI is the canonical pairing). Set VOYAGE_API_KEY or "
+                "use the OpenAI provider for the embed() pathway."
+            )
+
+        chosen = model or self.DEFAULT_VOYAGE_MODEL
+
+        if not texts:
+            dim = self._VOYAGE_DIMENSIONALITY.get(chosen, 1024)
+            return EmbeddingBatch(
+                vectors=[],
+                dimensionality=dim,
+                model_id=chosen,
+                cost_estimate_usd=0.0,
+                prompt_tokens=0,
+            )
+
+        all_vectors: list[list[float]] = []
+        total_prompt_tokens: int = 0
+        seen_dim: int | None = None
+
+        async with httpx.AsyncClient(
+            timeout=self.request_timeout_seconds,
+        ) as http:
+            for i in range(0, len(texts), MAX_EMBED_BATCH_SIZE):
+                chunk = texts[i : i + MAX_EMBED_BATCH_SIZE]
+                response = await http.post(
+                    "https://api.voyageai.com/v1/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {voyage_key}",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": chosen,
+                        "input": chunk,
+                    },
+                )
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"Voyage embeddings request failed: HTTP "
+                        f"{response.status_code} {response.text[:200]}"
+                    )
+                payload = response.json()
+                data = payload.get("data") or []
+                if len(data) != len(chunk):
+                    raise RuntimeError(
+                        f"Voyage embeddings returned {len(data)} vectors "
+                        f"for {len(chunk)} inputs (chunk index {i})"
+                    )
+                for item in data:
+                    vec = list(item.get("embedding") or [])
+                    if not vec:
+                        raise RuntimeError(
+                            "Voyage returned an empty embedding vector"
+                        )
+                    if seen_dim is None:
+                        seen_dim = len(vec)
+                    elif len(vec) != seen_dim:
+                        raise RuntimeError(
+                            f"Voyage returned heterogeneous dimensionality "
+                            f"(saw {seen_dim} then {len(vec)})"
+                        )
+                    all_vectors.append(vec)
+
+                usage = payload.get("usage") or {}
+                total_prompt_tokens += int(usage.get("total_tokens", 0) or 0)
+
+        dim = seen_dim if seen_dim is not None else self._VOYAGE_DIMENSIONALITY.get(chosen, 1024)
+
+        cost = self._voyage_cost_usd(chosen, total_prompt_tokens)
+
+        return EmbeddingBatch(
+            vectors=all_vectors,
+            dimensionality=dim,
+            model_id=chosen,
+            cost_estimate_usd=cost,
+            prompt_tokens=total_prompt_tokens or None,
+        )
+
+    @classmethod
+    def _voyage_cost_usd(cls, model_id: str, prompt_tokens: int) -> float:
+        per_m = cls._VOYAGE_PRICING_USD_PER_M_TOK.get(model_id, 0.0)
+        if per_m == 0.0 or prompt_tokens <= 0:
+            return 0.0
+        return round((prompt_tokens / 1_000_000) * per_m, 8)
 
     async def submit_batch(self, requests):
         """Submit a batch via Anthropic's ``messages.batches.create``.

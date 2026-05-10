@@ -23,7 +23,9 @@ from opencomputer.agent.compaction import (
 
 
 def test_listed_anthropic_4x_models():
-    assert context_window_for("claude-opus-4-7") == 200_000
+    # Wave 3 (2026-05-08) — Opus 4.6/4.7 ship a 1M context window by default.
+    assert context_window_for("claude-opus-4-7") == 1_000_000
+    assert context_window_for("claude-opus-4-6") == 1_000_000
     assert context_window_for("claude-sonnet-4-6") == 200_000
     assert context_window_for("claude-haiku-4-5") == 200_000
 

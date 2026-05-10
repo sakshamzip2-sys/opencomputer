@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +33,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger("opencomputer.gateway.server")
 
 
+def _check_not_root() -> None:
+    """Refuse to start the gateway as root unless explicitly allowed.
+
+    Mirrors Hermes ``HERMES_ALLOW_ROOT_GATEWAY`` semantics. The check
+    is POSIX-only — on Windows ``os.geteuid`` doesn't exist and the
+    call is a no-op.
+
+    Set ``OPENCOMPUTER_ALLOW_ROOT_GATEWAY=1`` in the environment to
+    override (e.g., container entrypoint where running as root is
+    expected and the host has its own isolation).
+
+    Called from :meth:`Gateway.start` BEFORE any network or
+    channel-adapter work — a misconfigured root deployment exits
+    cleanly with stderr explaining the override env var.
+    """
+    if not hasattr(os, "geteuid"):
+        return  # Windows / non-POSIX — no concept of effective uid.
+    if os.geteuid() != 0:
+        return
+    if os.environ.get("OPENCOMPUTER_ALLOW_ROOT_GATEWAY") == "1":
+        return
+    sys.stderr.write(
+        "Refusing to start gateway as root. Run as a non-root user, "
+        "or set OPENCOMPUTER_ALLOW_ROOT_GATEWAY=1 to override.\n"
+    )
+    sys.exit(2)
+
+
 class Gateway:
     """The gateway daemon."""
 
@@ -40,6 +70,9 @@ class Gateway:
         config: GatewayConfig | None = None,
         *,
         router: AgentRouter | None = None,
+        allowlist_gate: Any = None,
+        reset_policy: Any = None,
+        last_seen_path: Any = None,
     ) -> None:
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
@@ -48,6 +81,12 @@ class Gateway:
             raise ValueError("Gateway: pass either loop or router, not both")
         if router is None and loop is None:
             raise ValueError("Gateway: pass either loop or router")
+        # PR-1 (Task 1.6 follow-up): hold the gate / policy / last_seen
+        # path until Dispatch is constructed below; Gateway forwards them
+        # in the Dispatch ctor.
+        self._allowlist_gate = allowlist_gate
+        self._reset_policy = reset_policy
+        self._last_seen_path = last_seen_path
 
         # ``self.loop`` preserves the legacy attribute access path that
         # tests and downstream code may read.
@@ -162,8 +201,17 @@ class Gateway:
         self.dispatch = Dispatch(
             router=router,
             plugin_api=plugin_registry.shared_api,
-            config={"photo_burst_window": self._config.photo_burst_window},
+            config={
+                "photo_burst_window": self._config.photo_burst_window,
+                # 2026-05-08: gate lifecycle reactions so the default-off
+                # invariant is enforced at the dispatcher (see
+                # GatewayConfig.lifecycle_reactions docstring).
+                "lifecycle_reactions": self._config.lifecycle_reactions,
+            },
             resolver=self._resolver,
+            allowlist_gate=self._allowlist_gate,
+            reset_policy=self._reset_policy,
+            last_seen_path=self._last_seen_path,
         )
         # Pass-2 F7: now that Dispatch exists, register the consent
         # prompt handler on the seeded "default" loop's gate. The
@@ -221,8 +269,129 @@ class Gateway:
         # Give Dispatch a handle so it can send typing indicators back out.
         self.dispatch.register_adapter(adapter.platform.value, adapter)
 
+    # ── PR-1 follow-up: late-bind setters for AllowlistGate + ResetPolicy ──
+    # The cli_gateway._run_foreground constructs these AFTER Gateway() was
+    # built (during the daemon-bootstrap dance). Setter methods let the
+    # production path wire the gates without rebuilding Gateway, and tests
+    # can swap fakes in cleanly.
+
+    def set_allowlist_gate(self, gate: Any) -> None:
+        """Bind/replace the AllowlistGate forwarded to Dispatch."""
+        self._allowlist_gate = gate
+        self.dispatch._allowlist_gate = gate
+
+    def set_reset_policy(
+        self,
+        policy: Any,
+        *,
+        last_seen_path: Any = None,
+    ) -> None:
+        """Bind/replace the ResetPolicyChecker (and optional last_seen path)
+        forwarded to Dispatch. If ``last_seen_path`` is provided, replays the
+        on-disk state into the dispatcher's caches.
+        """
+        self._reset_policy = policy
+        self.dispatch._reset_policy = policy
+        if last_seen_path is not None:
+            self._last_seen_path = last_seen_path
+            self.dispatch._last_seen_path = last_seen_path
+            # Re-load — Dispatch's __init__ already loaded what was on disk
+            # at construction time; this picks up any changes since.
+            try:
+                self.dispatch._load_last_seen()
+            except Exception:  # noqa: BLE001 — never block at this seam
+                logger.warning(
+                    "gateway: re-loading last_seen.json from %s failed",
+                    last_seen_path,
+                    exc_info=True,
+                )
+
+    def _run_channel_ownership_preflight(self) -> None:
+        """Refuse to start if a non-OC channel handler is running on this box.
+
+        Per the 2026-05-08 directive (``user_oc_owns_all_channels.md``):
+        OpenComputer is the SOLE channel handler. If a competing process
+        (Claude Code's ``claude --channels plugin:telegram`` bun bridge,
+        Hermes daemon, rival ``oc gateway``, ...) is detected, behavior
+        depends on ``cfg.gateway.takeover_on_start``:
+
+        * ``False`` (default): raise :class:`ChannelOwnershipConflict`
+          with the offending PIDs + cmdlines + remediation steps.
+          Gateway boot aborts; launchd's KeepAlive=dict means the
+          service stays stopped until operator intervention.
+        * ``True``: terminate the competitors (SIGTERM with grace, then
+          SIGKILL), append to audit log, and proceed.
+
+        The audit log lives at
+        ``<profile_home>/audit/competitor-takeover.jsonl`` and is
+        append-only. Tests exercise both modes; see
+        ``tests/test_gateway_preflight.py``.
+        """
+        from opencomputer.agent.config import _home
+        from opencomputer.gateway.preflight import (
+            default_audit_path,
+            run_preflight,
+        )
+
+        cfg_gateway = getattr(self, "_config", None)
+        if cfg_gateway is None:
+            # Defensive: Gateway built without a config (test scaffolding
+            # via ``Gateway.__new__``) skips preflight rather than raising.
+            return
+
+        takeover_enabled = bool(getattr(cfg_gateway, "takeover_on_start", False))
+        grace = float(getattr(cfg_gateway, "takeover_grace_seconds", 5.0))
+        audit_path = default_audit_path(_home())
+
+        run_preflight(
+            takeover_on_start=takeover_enabled,
+            grace_seconds=grace,
+            audit_log=audit_path,
+        )
+
     async def start(self) -> None:
-        """Connect all adapters. Returns once they're all running."""
+        """Connect all adapters. Returns once they're all running.
+
+        Phase 0 (2026-05-08, ``user_oc_owns_all_channels.md`` directive):
+        run channel-ownership preflight before connecting any adapter.
+        OpenComputer is the sole channel handler; if competitors are
+        running and ``cfg.gateway.takeover_on_start`` is False, raise
+        :class:`ChannelOwnershipConflict` so the operator sees a loud
+        refusal rather than a silent reply blackhole.
+
+        After preflight passes, capture the running asyncio loop and
+        wire the /background completion notifier so worker threads can
+        schedule ``adapter.send()`` via ``run_coroutine_threadsafe``.
+        """
+        # Security-first: refuse to start as root unless explicitly
+        # allowed (Hermes parity — HERMES_ALLOW_ROOT_GATEWAY → OC's
+        # OPENCOMPUTER_ALLOW_ROOT_GATEWAY). Fires before any other
+        # work touches the host or network.
+        _check_not_root()
+
+        # Security-first: refuse to boot if another channel handler
+        # owns the same chat surfaces. Must happen before any other
+        # work touches the network.
+        self._run_channel_ownership_preflight()
+
+        # Capture the gateway's main asyncio loop and register the
+        # /background completion notifier on the registry. Done after
+        # preflight (the directive above) but before adapter connect()
+        # so an early background-job completion (e.g. test mode)
+        # routes correctly. Failure-isolated — a missing background
+        # registry must never block gateway boot.
+        try:
+            from opencomputer.agent.background_jobs import (
+                get_default_registry as _bg_get_registry,
+            )
+
+            self.dispatch.bind_main_loop(asyncio.get_running_loop())
+            _bg_get_registry().set_completion_notifier(
+                self.dispatch.background_completion_notifier
+            )
+        except Exception:  # noqa: BLE001 — never block gateway boot on this
+            logger.debug("gateway: /background notifier wire failed", exc_info=True)
+
         logger.info("gateway: starting %d adapters", len(self._adapters))
         results = await asyncio.gather(
             *(a.connect() for a in self._adapters), return_exceptions=True
@@ -232,8 +401,40 @@ class Gateway:
                 logger.error(
                     "gateway: adapter %s failed to connect: %s", adapter.platform, res
                 )
+                # Surface as fatal-retryable so the periodic supervisor
+                # (60s tick) reconnects. Without this, an exception during
+                # boot parks the adapter dead with no recovery — see
+                # 2026-05-08 incident where Telegram polling-slot conflict
+                # silently disabled all replies for hours.
+                try:
+                    adapter._set_fatal_error(
+                        "connect_raised_exception",
+                        f"connect() raised: {res!r}",
+                        retryable=True,
+                    )
+                except Exception:  # noqa: BLE001 — adapter API contract failure
+                    logger.exception(
+                        "gateway: adapter %s does not implement _set_fatal_error",
+                        adapter.platform,
+                    )
             elif res is False:
-                logger.error("gateway: adapter %s returned False from connect()", adapter.platform)
+                logger.error(
+                    "gateway: adapter %s returned False from connect()",
+                    adapter.platform,
+                )
+                # Same recovery path as exception branch — without this,
+                # connect()=False silently parks the adapter forever.
+                try:
+                    adapter._set_fatal_error(
+                        "connect_returned_false",
+                        "connect() returned False at startup — see adapter logs",
+                        retryable=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "gateway: adapter %s does not implement _set_fatal_error",
+                        adapter.platform,
+                    )
 
         # Tier-A item 14 — start the outgoing-message drainer so the
         # MCP write tools (``messages_send``) can route through the
@@ -287,6 +488,32 @@ class Gateway:
             self._check_fatal_errors_periodic(),
             name="gateway-fatal-error-supervisor",
         )
+
+        # 2026-05-08 — Hermes Doc-2 parity: discover ~/.opencomputer/hooks
+        # filesystem hooks + fire ``gateway:startup``. This is the third
+        # hook surface (alongside plugin hooks + shell hooks). Failure
+        # isolated — a broken HOOK.yaml/handler.py never blocks boot.
+        try:
+            from opencomputer.gateway.boot_md import register_boot_md_hook
+            from opencomputer.gateway.event_hooks import (
+                GATEWAY_STARTUP as _GW_STARTUP,
+            )
+            from opencomputer.gateway.event_hooks import (
+                engine as _gw_hooks_engine,
+            )
+
+            _gw_hooks_engine.reload()
+            register_boot_md_hook(_gw_hooks_engine)
+            await _gw_hooks_engine.fire(
+                _GW_STARTUP,
+                {
+                    "platforms": [a.platform.value for a in self._adapters],
+                },
+            )
+        except Exception:  # noqa: BLE001 — boot must not fail on hooks
+            logger.warning(
+                "gateway hooks discovery / fire failed", exc_info=True,
+            )
 
         # Startup ping (the OpenClaw "back online" magic message).
         # Opt-in via gateway.startup_ping_chats. Fires once after every
@@ -543,7 +770,9 @@ class Gateway:
             from opencomputer.plugins.registry import registry as plugin_registry
 
             _ensure_alias()
-            from extensions.social_traces.plugin import wire_subscriber  # type: ignore[import-not-found]
+            from extensions.social_traces.plugin import (
+                wire_subscriber,  # type: ignore[import-not-found]
+            )
             from extensions.social_traces.state import is_enabled  # type: ignore[import-not-found]
 
             if not is_enabled(_home()):
@@ -705,11 +934,79 @@ class Gateway:
         )
 
     async def serve_forever(self) -> None:
-        """Connect adapters and block until interrupted."""
+        """Connect adapters and block until interrupted.
+
+        Beyond the historic "sleep forever" body, this loop now drives:
+
+        1. **Drain-flag polling** — when ``oc gateway restart
+           --drain-timeout=N`` writes ``<profile>/gateway/drain.flag``,
+           we stop accepting new dispatches (set
+           ``self.dispatch._drain_active = True``) and wait for in-flight
+           runs to complete before exiting cleanly.
+        2. **Pairing-code expired-sweep** — every 60 seconds we ask the
+           dispatcher's pairing store (if attached) to drop expired
+           codes. The PairingCodeStore handles its own locking; we just
+           tick.
+        """
         await self.start()
+        # Resolve the drain-flag location the same way the CLI writes it.
+        drain_flag_path: Path | None = None
+        try:
+            from opencomputer.agent.config_store import config_file_path
+
+            drain_flag_path = config_file_path().parent / "gateway" / "drain.flag"
+        except Exception:  # noqa: BLE001 — drain is opt-in
+            drain_flag_path = None
+
+        last_sweep = 0.0
         try:
             while True:
-                await asyncio.sleep(3600)
+                # Drain-flag check (CLI restart writes it; we honor it).
+                if drain_flag_path is not None and drain_flag_path.exists():
+                    logger.info("gateway: drain flag detected at %s", drain_flag_path)
+                    # Tell Dispatch to refuse new arrivals.
+                    self.dispatch._drain_active = True  # noqa: SLF001
+                    # Wait up to the timeout written in the flag (default 30).
+                    timeout_s = 30
+                    try:
+                        timeout_s = max(1, int(drain_flag_path.read_text().strip() or "30"))
+                    except (OSError, ValueError):
+                        pass
+                    deadline = asyncio.get_running_loop().time() + timeout_s
+                    while asyncio.get_running_loop().time() < deadline:
+                        inflight = getattr(self.dispatch, "_inflight_count", 0)
+                        if inflight <= 0:
+                            break
+                        await asyncio.sleep(0.5)
+                    # Clean the flag so the next start is fresh.
+                    try:
+                        drain_flag_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    logger.info("gateway: drain complete; exiting serve_forever")
+                    return
+
+                # Pairing-code expired-sweep (60s tick).
+                now = asyncio.get_running_loop().time()
+                if now - last_sweep >= 60.0:
+                    last_sweep = now
+                    gate = getattr(self, "_allowlist_gate", None)
+                    if gate is not None and hasattr(gate, "pairing_store"):
+                        try:
+                            removed = gate.pairing_store.expired_sweep_all()
+                            if removed:
+                                logger.info(
+                                    "gateway: expired-sweep dropped %d pairing codes",
+                                    removed,
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "gateway: pairing expired-sweep failed",
+                                exc_info=True,
+                            )
+
+                # Sleep — short enough that drain-flag responsiveness is good.
+                await asyncio.sleep(2.0)
         except asyncio.CancelledError:
             pass
         finally:

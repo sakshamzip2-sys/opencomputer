@@ -20,6 +20,8 @@ Write-path invariants for MEMORY.md / USER.md:
 
 from __future__ import annotations
 
+import datetime as _dt
+import logging
 import os
 import re
 import shutil
@@ -28,15 +30,23 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import frontmatter
+
+if TYPE_CHECKING:
+    from opencomputer.agent.memory_index import BM25Index
+    from opencomputer.agent.memory_vec_index import VectorIndex
+
+logger = logging.getLogger("opencomputer.agent.memory")
 
 # ─── exceptions ───────────────────────────────────────────────────────
 
 
 class MemoryTooLargeError(ValueError):
-    """Raised when a write would exceed the configured character limit."""
+    """Raised when a write would exceed the configured character limit
+    AND graceful compaction (v1.1 plan-3 M6.5) cannot fit the new
+    content even after dropping all older entries."""
 
     def __init__(self, kind: str, would_be: int, limit: int) -> None:
         self.kind = kind
@@ -44,8 +54,189 @@ class MemoryTooLargeError(ValueError):
         self.limit = limit
         super().__init__(
             f"{kind} write would make file {would_be} chars (limit {limit}). "
+            f"The new entry alone exceeds the cap; even compaction cannot help. "
             f"Use Memory(action='remove',...) or `opencomputer memory prune` first."
         )
+
+
+# ─── M6.5 compaction helpers (v1.1 plan-3) ─────────────────────────
+
+
+# Matches the heading line only.
+_COMPACTION_HEADING_RE = re.compile(
+    r"^## Older notes \(\d+ entries compacted on \d{4}-\d{2}-\d{2}\)\s*$",
+    re.MULTILINE,
+)
+# Matches the italic explanatory line that follows the heading.
+_COMPACTION_BODY_RE = re.compile(
+    r"^_Older entries were removed automatically to fit the configured cap\."
+    r" See git history of MEMORY\.md for the full record\.\s*$",
+    re.MULTILINE,
+)
+
+
+def _strip_prior_compaction_header(text: str) -> str:
+    """Remove any ``## Older notes`` heading + the legacy italic body line.
+
+    Idempotent.  Strips both pieces independently so a partial header
+    (e.g. body without heading after a manual edit, or a stale body
+    line from a previous header format) is also cleaned.
+    """
+    text = _COMPACTION_HEADING_RE.sub("", text)
+    text = _COMPACTION_BODY_RE.sub("", text)
+    return text
+
+
+def _segment_paragraphs(text: str) -> list[str]:
+    """Split a markdown body on paragraph boundaries (1+ blank lines).
+
+    Used by M6.5 compaction to identify drop-able units.  Mirrors the
+    BM25Index/VectorIndex segmentation rule (1+ blank line OR top-
+    level heading) so user-visible "entries" are consistent across
+    retrieval and compaction.
+    """
+    if not text or not text.strip():
+        return []
+    parts: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        block = "\n".join(current).strip()
+        if block:
+            parts.append(block)
+        current.clear()
+
+    blank_run = 0
+    for line in text.splitlines():
+        if not line.strip():
+            blank_run += 1
+            if blank_run >= 1:
+                flush()
+            continue
+        blank_run = 0
+        current.append(line)
+    flush()
+    return parts
+
+
+def _compaction_header(dropped_count: int) -> str:
+    """One-line note that records the dropped entries.
+
+    Intentionally short (~40 chars) so a small ``memory_char_limit``
+    still leaves room for actual entries.  Users who want full history
+    can consult git log for ``MEMORY.md``.
+    """
+    today = _dt.date.today().isoformat()
+    return f"## Older notes ({dropped_count} entries compacted on {today})"
+
+
+def _extract_prior_compaction_count(text: str) -> int:
+    """Read the count from a prior ``## Older notes (N entries...)``
+    heading.  Returns 0 if no header present.  This is summed into the
+    new compaction count so a re-compaction reports cumulative drops."""
+    m = re.search(
+        r"^## Older notes \((\d+) entries compacted on \d{4}-\d{2}-\d{2}\)",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _compact_under_cap(existing: str, new_block: str, limit: int) -> str | None:
+    """Drop oldest paragraphs from ``existing`` until appending
+    ``new_block`` fits under ``limit``.
+
+    Returns the new full content (with compaction header prepended) if
+    the result fits, or ``None`` if even the new_block alone exceeds
+    the limit (caller should raise MemoryTooLargeError).
+
+    Idempotent across repeated calls: if ``existing`` already contains
+    a compaction header, the new header replaces it (no nested compaction
+    notes accumulate) and the count is accumulated.
+    """
+    new_block = new_block.rstrip() + "\n"
+
+    # Sanity: a single new_block bigger than the cap is impossible.
+    if len(new_block) > limit:
+        return None
+
+    # Detect any prior compaction so the new header can report the
+    # total cumulative count rather than just this round's drops.
+    prior_count = _extract_prior_compaction_count(existing)
+    existing_clean = _strip_prior_compaction_header(existing).strip()
+
+    # Drop the leading paragraph until it fits.  We deliberately drop
+    # from the FRONT (oldest); MEMORY.md convention places fresh
+    # entries at the bottom.
+    paragraphs = _segment_paragraphs(existing_clean)
+    new_drops = 0  # drops in THIS round
+    initial_paragraphs_len = len(paragraphs)
+
+    while True:
+        body = "\n\n".join(paragraphs).strip()
+        # If we're operating on a previously-compacted file (prior_count > 0)
+        # OR we've dropped at least one paragraph in this round, the result
+        # MUST carry a compaction header so the user sees what happened.
+        cumulative_dropped = prior_count + new_drops
+        needs_header = cumulative_dropped > 0
+        if needs_header:
+            header = _compaction_header(cumulative_dropped)
+            sep = "\n\n" if body else ""
+            candidate = header + sep + body + ("\n\n" + new_block if body else "\n\n" + new_block)
+        else:
+            sep = "\n\n" if body else ""
+            candidate = body + sep + new_block
+
+        if len(candidate) <= limit:
+            return candidate
+
+        if not paragraphs:
+            # Nothing left to drop; only the new_block + maybe header remains.
+            # If the new_block alone fits, we'd have returned above; signal
+            # impossible.
+            return None
+        # Drop the oldest paragraph and try again.
+        paragraphs.pop(0)
+        new_drops += 1
+        # Sanity bound — prevents infinite loops on pathological input.
+        if new_drops > initial_paragraphs_len + 1:
+            return None
+
+
+def _compact_replace_under_cap(candidate: str, limit: int) -> str | None:
+    """Compact a post-replace ``candidate`` until it fits ``limit``.
+
+    Different from :func:`_compact_under_cap`: there is no separate
+    new-block to preserve.  We simply drop oldest paragraphs from the
+    full text until it fits, prepending a compaction header.
+    """
+    if len(candidate) <= limit:
+        return candidate
+
+    cleaned = _strip_prior_compaction_header(candidate).strip()
+    paragraphs = _segment_paragraphs(cleaned)
+    dropped = 0
+    while paragraphs:
+        body = "\n\n".join(paragraphs).strip()
+        if dropped > 0:
+            header = _compaction_header(dropped)
+            full = header + ("\n\n" + body if body else "")
+        else:
+            full = body
+        if len(full) <= limit:
+            return full
+        paragraphs.pop(0)
+        dropped += 1
+    # Even an all-empty paragraph list with header alone might not fit
+    # if the limit is pathologically small.  Signal impossible.
+    if dropped > 0 and len(_compaction_header(dropped)) <= limit:
+        return _compaction_header(dropped)
+    return None
 
 
 # ─── dataclasses ──────────────────────────────────────────────────────
@@ -81,6 +272,49 @@ SkillExample = SkillReference
 
 
 @dataclass(frozen=True, slots=True)
+class RequiredEnvVar:
+    """A skill-declared environment-variable dependency (Hermes parity).
+
+    Mirrors the Hermes ``required_environment_variables`` SKILL.md
+    frontmatter shape. When a skill is loaded, each declared var is
+    auto-registered for passthrough into ExecuteCode + sandbox subprocesses
+    and the user is prompted to supply it (via ``oc setup`` /
+    ``oc skills env``) if it isn't already in the environment.
+
+    Attributes:
+        name: env var key (e.g. ``TENOR_API_KEY``).
+        prompt: short label shown in the setup prompt
+            (e.g. ``"Tenor API key"``).
+        help: optional URL or text pointing to where the user can
+            obtain the value.
+    """
+
+    name: str
+    prompt: str = ""
+    help: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredCredentialFile:
+    """A skill-declared credential-file dependency (Hermes parity).
+
+    Mirrors ``required_credential_files`` SKILL.md frontmatter. When the
+    Docker sandbox spawns a process, each declared file is bind-mounted
+    read-only into ``/root/.opencomputer/<path>`` so OAuth tokens and
+    similar long-lived credentials are visible inside the container
+    without having to re-pair every run.
+
+    Attributes:
+        path: relative path under ``~/.opencomputer/`` (e.g.
+            ``google_token.json``).
+        description: human description shown when the file is missing.
+    """
+
+    path: str
+    description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class SkillMeta:
     """Lightweight skill metadata — from frontmatter, without loading the body.
 
@@ -88,6 +322,10 @@ class SkillMeta:
     support Claude Code's directory-hierarchy skill layout. Flat
     single-file SKILL.md skills get empty tuples for both — the behaviour
     is unchanged from their perspective.
+
+    Hermes-parity (P3.4): ``required_env_vars`` + ``required_credential_files``
+    declare passthrough requirements. They land empty for skills that don't
+    set the frontmatter keys — fully backward compatible.
     """
 
     id: str
@@ -101,6 +339,74 @@ class SkillMeta:
     #: Higher = surfaced earlier. None = unweighted (alphabetical fallback).
     #: Future engines may auto-update this based on outcome data.
     priority: float | None = None
+    #: P3.4 Hermes parity: skill-declared environment-var passthrough.
+    required_env_vars: tuple[RequiredEnvVar, ...] = field(default_factory=tuple)
+    #: P3.5 Hermes parity: skill-declared credential-file bind mounts.
+    required_credential_files: tuple[RequiredCredentialFile, ...] = field(default_factory=tuple)
+
+
+# ─── Hermes-parity skill-frontmatter parsers (P3.4 + P3.5) ────────────
+
+
+def _parse_required_env_vars(raw: object) -> tuple[RequiredEnvVar, ...]:
+    """Parse the ``required_environment_variables`` frontmatter key.
+
+    Accepts:
+        - list of dicts ``[{name: X, prompt: Y, help: Z}, ...]``
+        - list of bare strings ``[X, Y, Z]`` — name only
+        - any other shape → empty tuple
+
+    Empty-name entries are dropped silently (a malformed skill must
+    never break the loader for the others).
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[RequiredEnvVar] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                out.append(RequiredEnvVar(name=name))
+        elif isinstance(entry, dict):
+            name = str(entry.get("name", "")).strip()
+            if not name:
+                continue
+            out.append(
+                RequiredEnvVar(
+                    name=name,
+                    prompt=str(entry.get("prompt", "") or ""),
+                    help=str(entry.get("help", "") or ""),
+                )
+            )
+        # Anything else: skip silently.
+    return tuple(out)
+
+
+def _parse_required_credential_files(raw: object) -> tuple[RequiredCredentialFile, ...]:
+    """Parse the ``required_credential_files`` frontmatter key.
+
+    Accepts list of dicts ``[{path: ..., description: ...}, ...]`` or
+    list of bare strings (path only). Non-list / malformed → empty tuple.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[RequiredCredentialFile] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            path = entry.strip()
+            if path:
+                out.append(RequiredCredentialFile(path=path))
+        elif isinstance(entry, dict):
+            path = str(entry.get("path", "")).strip()
+            if not path:
+                continue
+            out.append(
+                RequiredCredentialFile(
+                    path=path,
+                    description=str(entry.get("description", "") or ""),
+                )
+            )
+    return tuple(out)
 
 
 # ─── bus helper (T3.2 PR-8) ───────────────────────────────────────────
@@ -272,6 +578,7 @@ class MemoryManager:
         *,
         user_path: Path | None = None,
         soul_path: Path | None = None,
+        global_soul_path: Path | None = None,
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         bundled_skills_paths: list[Path] | None = None,
@@ -284,6 +591,19 @@ class MemoryManager:
         self.soul_path = (
             soul_path if soul_path is not None else declarative_path.parent / "SOUL.md"
         )
+        # Hermes v2 D4 (2026-05-08) — optional global SOUL.md fallback.
+        # When the per-profile soul_path is missing/empty, ``read_soul``
+        # consults this path instead. Defaults to
+        # ``~/.opencomputer/SOUL.md`` (sibling of all per-profile
+        # directories), respecting the ``OPENCOMPUTER_HOME`` env var so
+        # tests + alt configurations can override.
+        if global_soul_path is None:
+            home_root = os.environ.get(
+                "OPENCOMPUTER_HOME",
+                str(Path.home() / ".opencomputer"),
+            )
+            global_soul_path = Path(home_root) / "SOUL.md"
+        self.global_soul_path = global_soul_path
         self.skills_path = skills_path
         self.skills_path.mkdir(parents=True, exist_ok=True)
         self.memory_char_limit = memory_char_limit
@@ -294,18 +614,55 @@ class MemoryManager:
             bundled_skills_paths = [bundled] if bundled.exists() else []
         self.bundled_skills_paths = bundled_skills_paths
 
+        # v1.1 plan-3 M6.1 — BM25 index over MEMORY.md.  Lazy-built; cache
+        # under <profile_home>/cache/.  Invalidated on every successful
+        # declarative write below.
+        from opencomputer.agent.memory_index import BM25Index
+
+        self._bm25_index = BM25Index(self.declarative_path.parent)
+
+        # v1.1 plan-3 M6.2 — Vector retrieval index over MEMORY.md.
+        # Lazy-built on first query; cache lives under
+        # <profile_home>/cache/.  Invalidated on every successful
+        # declarative write below.  The provider's embed() function is
+        # injected at query() time, not at construction (the active
+        # provider isn't necessarily resolved when MemoryManager is built).
+        from opencomputer.agent.memory_vec_index import VectorIndex
+
+        self._vector_index = VectorIndex(self.declarative_path.parent)
+
+    @property
+    def bm25_index(self) -> BM25Index:
+        """BM25 retrieval index over MEMORY.md (v1.1 plan-3 M6.1)."""
+        return self._bm25_index
+
+    @property
+    def vector_index(self) -> VectorIndex:
+        """Vector retrieval index over MEMORY.md (v1.1 plan-3 M6.2)."""
+        return self._vector_index
+
     def rebind_to_profile(self, profile_home: Path) -> None:
         """Re-resolve declarative_path / user_path / soul_path to point at
         a new profile's home directory. Used by the Ctrl+P profile-swap
         flow to make subsequent read_* calls hit the new profile's
         SOUL.md / MEMORY.md / USER.md without recreating the manager.
 
-        ``skills_path`` and bundled-skills paths are NOT rebound — skill
-        roots are global, not per-profile, in the current model.
+        ``skills_path``, bundled-skills paths, and ``global_soul_path``
+        are NOT rebound — skill roots and the global SOUL fallback are
+        shared across profiles, not per-profile.
+
+        Both per-profile indexes (BM25 and vector) are swapped to point
+        at the new home so retrieval isolates cleanly across profiles.
         """
         self.declarative_path = profile_home / "MEMORY.md"
         self.user_path = profile_home / "USER.md"
         self.soul_path = profile_home / "SOUL.md"
+
+        from opencomputer.agent.memory_index import BM25Index
+        from opencomputer.agent.memory_vec_index import VectorIndex
+
+        self._bm25_index = BM25Index(profile_home)
+        self._vector_index = VectorIndex(profile_home)
 
     # ─── declarative (MEMORY.md) ───────────────────────────────────
 
@@ -321,18 +678,28 @@ class MemoryManager:
             limit=self.memory_char_limit,
             kind="memory",
         )
+        self._bm25_index.invalidate()
+        self._vector_index.invalidate()
 
     def replace_declarative(self, old: str, new: str) -> bool:
-        return self._replace(
+        changed = self._replace(
             self.declarative_path,
             old,
             new,
             limit=self.memory_char_limit,
             kind="memory",
         )
+        if changed:
+            self._bm25_index.invalidate()
+            self._vector_index.invalidate()
+        return changed
 
     def remove_declarative(self, block: str) -> bool:
-        return self._remove(self.declarative_path, block, kind="memory")
+        changed = self._remove(self.declarative_path, block, kind="memory")
+        if changed:
+            self._bm25_index.invalidate()
+            self._vector_index.invalidate()
+        return changed
 
     # ─── user profile (USER.md) ────────────────────────────────────
 
@@ -364,19 +731,40 @@ class MemoryManager:
     # ─── personality (SOUL.md) — Phase 14.F / C3 ──────────────────
 
     def read_soul(self) -> str:
-        """Return the contents of ``SOUL.md`` or '' if absent/unreadable.
+        """Return SOUL.md text — per-profile preferred, global fallback, '' otherwise.
 
-        Read-only by design. The profile's personality file is hand-edited
-        by the user, not mutated by the agent. Returning '' when the file
-        doesn't exist means prompt construction degrades gracefully: no
-        profile → no ``## Profile identity`` section.
+        Resolution order (Hermes v2 D4, 2026-05-08):
+
+        1. Per-profile ``self.soul_path`` (e.g. ``~/.opencomputer/coder/SOUL.md``).
+           Used if it exists and has non-whitespace content.
+        2. Global ``self.global_soul_path`` (e.g. ``~/.opencomputer/SOUL.md``).
+           Used as fallback when per-profile is missing/empty. Mirrors
+           Hermes' ``HERMES_HOME/SOUL.md`` behavior — a single identity
+           shared across profiles unless the profile explicitly overrides.
+        3. ``""`` — falls back to base.j2's built-in identity preamble
+           per Hermes v2: "Empty/whitespace-only file → falls back to
+           built-in default identity".
+
+        Read-only by design. Each candidate is treated as missing if it
+        doesn't exist, fails to read, or contains only whitespace.
         """
-        if not self.soul_path.exists():
+        for candidate in (self.soul_path, self.global_soul_path):
+            content = self._read_soul_candidate(candidate)
+            if content:
+                return content
+        return ""
+
+    def _read_soul_candidate(self, path: Path) -> str:
+        """Read one SOUL.md candidate. Returns '' if missing/unreadable/empty."""
+        if not path.exists():
             return ""
         try:
-            return self.soul_path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8")
         except OSError:
             return ""
+        if not content.strip():
+            return ""
+        return content
 
     # ─── backup / restore ──────────────────────────────────────────
 
@@ -388,6 +776,9 @@ class MemoryManager:
             return False
         with _file_lock(target):
             shutil.copy2(backup, target)
+        if which == "memory":
+            self._bm25_index.invalidate()
+            self._vector_index.invalidate()
         return True
 
     # ─── stats ─────────────────────────────────────────────────────
@@ -410,7 +801,19 @@ class MemoryManager:
             separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
             new_text = existing + separator + text.strip() + "\n"
             if len(new_text) > limit:
-                raise MemoryTooLargeError(kind, len(new_text), limit)
+                # v1.1 plan-3 M6.5 — graceful inline compaction.  Drop
+                # the oldest paragraph-delimited entries (front of the
+                # file) until the new content fits.  The dropped
+                # entries are summarized by a one-line header so the
+                # user sees what happened.  Only the new entry alone
+                # exceeding the cap is genuinely impossible — falls
+                # through to MemoryTooLargeError as before.
+                compacted = _compact_under_cap(
+                    existing, text.strip() + "\n", limit
+                )
+                if compacted is None:
+                    raise MemoryTooLargeError(kind, len(new_text), limit)
+                new_text = compacted
             # Backup current state before mutating.
             if path.exists():
                 shutil.copy2(path, _backup_path(path))
@@ -432,7 +835,13 @@ class MemoryManager:
                 return False
             candidate = existing.replace(old, new)
             if len(candidate) > limit:
-                raise MemoryTooLargeError(kind, len(candidate), limit)
+                # M6.5 — try graceful compaction.  We treat the
+                # post-replace text as the candidate to fit; compaction
+                # drops oldest entries until it fits or proves impossible.
+                compacted = _compact_replace_under_cap(candidate, limit)
+                if compacted is None:
+                    raise MemoryTooLargeError(kind, len(candidate), limit)
+                candidate = compacted
             shutil.copy2(path, _backup_path(path))
             _write_atomic(path, candidate)
             replaced = True
@@ -526,6 +935,19 @@ class MemoryManager:
                     )
                 except (TypeError, ValueError):
                     priority = None
+                # P3.4 + P3.5 Hermes parity: parse required_env_vars +
+                # required_credential_files out of frontmatter. Each is
+                # tolerant of either a list of dicts (preferred shape)
+                # or a list of bare strings (Hermes accepts both for
+                # env vars). Malformed entries are skipped silently to
+                # match existing skill-loader resilience posture (a
+                # broken skill must never starve other skills' load).
+                required_env = _parse_required_env_vars(
+                    meta.get("required_environment_variables")
+                )
+                required_creds = _parse_required_credential_files(
+                    meta.get("required_credential_files")
+                )
                 out.append(
                     SkillMeta(
                         id=skill_dir.name,
@@ -536,8 +958,29 @@ class MemoryManager:
                         references=references,
                         examples=examples,
                         priority=priority,
+                        required_env_vars=required_env,
+                        required_credential_files=required_creds,
                     )
                 )
+                # Hermes parity (P3.4 / P3.5): publish the skill's
+                # declared requirements to the global passthrough
+                # registry. ExecuteCode + sandbox.docker + setup
+                # wizard consult that registry. Failure here must not
+                # break skill enumeration — a registry bug shouldn't
+                # starve the rest of the agent.
+                try:
+                    from opencomputer.security import env_passthrough
+
+                    env_passthrough.register_skill_requirements(
+                        skill_dir.name,
+                        env_vars=required_env,
+                        credential_files=required_creds,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "env_passthrough register failed for skill %s",
+                        skill_dir.name, exc_info=True,
+                    )
         # v0.5+: stable sort by (priority DESC NULLS LAST, name ASC).
         # Skills without priority retain alphabetical ordering — zero
         # behavior change for v0 skills that don't set the field.

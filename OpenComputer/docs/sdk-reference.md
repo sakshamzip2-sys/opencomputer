@@ -318,6 +318,28 @@ Frozen dataclass — one event from `stream_complete()`. Three kinds:
 `"text_delta"` (incremental text), `"tool_call"` (assembled call),
 `"done"` (final; `response` carries the aggregated `ProviderResponse`).
 
+### `StreamStaleError`
+
+Raised by `opencomputer.agent.stream_watchdog.stream_with_watchdog`
+when a streaming response stalls — i.e. the connection is alive but
+no new tokens have arrived for `BaseProvider.stale_timeout_seconds`.
+Distinct from `httpx.TimeoutException` (which fires on full-request
+or dead-connection timeouts); this catches the LLM-side hang case
+common on local model servers under memory pressure. Subclass of
+`TimeoutError` so `except TimeoutError:` catches both.
+
+```python
+from plugin_sdk import StreamStaleError
+
+try:
+    async for event in stream_source:
+        ...
+except StreamStaleError as e:
+    # Stream stalled — e.provider_name + e.stale_seconds for diagnostics
+    log.warning("provider %s stalled after %.1fs", e.provider_name, e.stale_seconds)
+    raise
+```
+
 ### `Usage`
 
 Frozen dataclass — token counts: `input_tokens`, `output_tokens`,
@@ -1446,6 +1468,304 @@ Use a fresh resolver per natural secret-scope boundary (per-session,
 per-call, per-test). Adoption pattern: reach for `SecretRef` in NEW
 wire methods that carry credentials. Migrating existing
 `params: dict[str, Any]` callsites is a separate hardening pass.
+
+---
+
+## Inbound queue modes (S1, 2026-05-06)
+
+Per-session inbound message queue strategies. Plugins reading
+dispatcher state import these from `plugin_sdk` directly.
+
+### `QueueMode`, `ALL_QUEUE_MODES`, `DEFAULT_QUEUE_MODE`
+
+```python
+from plugin_sdk import QueueMode, ALL_QUEUE_MODES, DEFAULT_QUEUE_MODE
+```
+
+StrEnum: `followup` (default — serialize-and-wait), `interrupt`
+(cancel in-flight), `collect` (debounce-and-merge), `steer` (alias of
+`interrupt` today; reserved for replan-with-context). `ALL_QUEUE_MODES`
+is the canonical tuple for UI dropdowns / validation.
+`DEFAULT_QUEUE_MODE = QueueMode.FOLLOWUP`.
+
+### `QueueConfig`, `DEFAULT_COLLECT_DEBOUNCE_S`, `DEFAULT_COLLECT_CAP`
+
+```python
+from plugin_sdk import (
+    QueueConfig,
+    DEFAULT_QUEUE_MODE,
+    DEFAULT_COLLECT_DEBOUNCE_S,
+    DEFAULT_COLLECT_CAP,
+    DEFAULT_DROP_POLICY,
+)
+
+cfg = QueueConfig(
+    mode=DEFAULT_QUEUE_MODE,
+    collect_debounce_s=DEFAULT_COLLECT_DEBOUNCE_S,
+    collect_cap=DEFAULT_COLLECT_CAP,
+    drop_policy=DEFAULT_DROP_POLICY,
+)
+```
+
+Per-session config dataclass. `DEFAULT_*` constants let consumers
+build a default config without hardcoding values.
+
+### `DropPolicy`, `ALL_DROP_POLICIES`, `DEFAULT_DROP_POLICY`
+
+```python
+from plugin_sdk import DropPolicy, ALL_DROP_POLICIES
+```
+
+StrEnum: `drop_old` (discard oldest), `drop_new` (refuse new),
+`summarize` (replace queued with one summary line).
+`ALL_DROP_POLICIES` mirrors `ALL_QUEUE_MODES` for UIs.
+`DEFAULT_DROP_POLICY = DropPolicy.DROP_OLD`.
+
+---
+
+## Trace network (social-traces, 2026-05-05)
+
+Types for the opt-in `social-traces` plugin. Out-of-tree backends
+implement `TraceNetworkClient` to plug into the network.
+
+### `TraceCard`, `TraceMeta`, `TraceStep`, `TraceOutcome`, `TraceStatus`
+
+```python
+from plugin_sdk import (
+    TraceCard, TraceMeta, TraceStep, TraceOutcome, TraceStatus,
+)
+```
+
+Pydantic models for the redacted task trace shape. `TraceMeta` carries
+the redacted intent + tags; `TraceStep` is one tool-call step (name +
+summary + outcome); `TraceCard` bundles them with a `TraceStatus`
+(`pending` / `submitted` / `accepted` / `rejected`) and a
+`TraceOutcome` (`success` / `partial` / `failure`).
+
+### `TraceNetworkClient`, `QueryResult`, `SubmitReceipt`, `TRACE_API_V1`
+
+```python
+from plugin_sdk import (
+    TraceNetworkClient, QueryResult, SubmitReceipt, TRACE_API_V1,
+)
+```
+
+The contract a trace-network backend implements (`query` →
+`QueryResult`; `submit` → `SubmitReceipt`). `TRACE_API_V1` is the
+wire-version sentinel echoed by every server response so clients
+detect schema bumps.
+
+---
+
+## Inbound queue primitives (S1, 2026-05-06) — extended docs
+
+Public types describing per-channel inbound-message queue policy. Used
+by gateway adapters that buffer incoming messages while a session is
+mid-dispatch (steer cancel-pending window, slow agent, plugin
+quarantine). Plugins reference these to declare their preferred queue
+mode in a manifest or at runtime.
+
+### `QueueMode`
+
+Enum literal for top-level queue behaviour. Members:
+
+- `"REJECT"` — refuse new messages while busy; surface a friendly
+  bounce to the channel.
+- `"COLLECT"` — append into a per-session buffer up to `cap`, then
+  apply `DropPolicy`.
+- `"COALESCE"` — keep only the latest message; older buffered
+  messages are silently discarded.
+- `"REPLACE"` — same as `COALESCE` but the new message replaces the
+  in-flight prompt (no buffering).
+
+### `DropPolicy`
+
+What to do when a `COLLECT` queue hits its cap.
+
+- `"DROP_OLDEST"` (default) — evict the head, append at tail.
+- `"DROP_NEWEST"` — refuse the incoming message; head/tail unchanged.
+
+### `QueueConfig`
+
+```python
+@dataclass(frozen=True, slots=True)
+class QueueConfig:
+    mode: QueueMode = "COLLECT"
+    cap: int = DEFAULT_COLLECT_CAP            # 5
+    debounce_s: float = DEFAULT_COLLECT_DEBOUNCE_S  # 0.5
+    drop_policy: DropPolicy = "DROP_OLDEST"
+```
+
+Per-channel queue tuning. `debounce_s` is the minimum quiet interval
+before flushing a `COLLECT` buffer to the agent loop.
+
+### Module-level constants
+
+- `ALL_QUEUE_MODES: tuple[QueueMode, ...]` — every literal value of
+  `QueueMode`. Useful for CLI flag validation.
+- `ALL_DROP_POLICIES: tuple[DropPolicy, ...]` — every literal value of
+  `DropPolicy`.
+- `DEFAULT_QUEUE_MODE: QueueMode` — `"COLLECT"`.
+- `DEFAULT_COLLECT_CAP: int` — `5`.
+- `DEFAULT_COLLECT_DEBOUNCE_S: float` — `0.5`.
+- `DEFAULT_DROP_POLICY: DropPolicy` — `"DROP_OLDEST"`.
+
+---
+
+## Social-traces wire primitives (Phases 1-9)
+
+Wire-format types for the `social-traces` opt-in plugin (community
+trace network). These appear in the SDK so a plugin author building
+their own `TraceNetworkClient` (e.g. against a private OpenHub
+endpoint) gets a typed contract without copying types from the bundled
+plugin.
+
+### `TraceCard`
+
+```python
+@dataclass(frozen=True, slots=True)
+class TraceCard:
+    trace_id: str
+    intent: str           # short imperative; "provision EC2 instance"
+    steps: tuple[TraceStep, ...]
+    insight: str          # one-line takeaway distilled by an LLM
+    tags: tuple[str, ...] # ranked, redacted
+    meta: TraceMeta
+```
+
+Admin-curated, redacted summary of one task. Wire format = JSON
+matching the dataclass shape; field order is **stable** (this is the
+public API the OC client and the OpenHub server share).
+
+### `TraceStep`
+
+```python
+@dataclass(frozen=True, slots=True)
+class TraceStep:
+    role: str          # "user" / "agent" / "tool"
+    summary: str       # one-line LLM-distilled summary; no raw content
+    tool: str | None   # tool name when role=="tool"
+```
+
+One step inside a `TraceCard`. Per-step content is the LLM-distilled
+summary, **not** the raw user prompt or tool output — the privacy
+contract.
+
+### `TraceMeta`
+
+```python
+@dataclass(frozen=True, slots=True)
+class TraceMeta:
+    submitted_at: float       # unix epoch
+    rotated_id: str           # submitter's rotated pseudonym (90-day cycle)
+    redactor_version: str     # which redactor pipeline produced this
+    score: float              # admin-assigned quality score, 0.0-1.0
+```
+
+Metadata block separate from the body so the redactor pipeline can
+re-process body content without losing provenance.
+
+### `TraceOutcome` / `TraceStatus`
+
+- `TraceOutcome` — Literal of submission outcomes:
+  `"submitted"` / `"deduped"` / `"rejected_redaction"` /
+  `"rejected_quality"` / `"rate_limited"`.
+- `TraceStatus` — Literal of trace lifecycle states on the network:
+  `"pending"` / `"published"` / `"rejected"` / `"rotated_out"`.
+
+### `QueryResult` / `SubmitReceipt`
+
+```python
+@dataclass(frozen=True, slots=True)
+class QueryResult:
+    matches: tuple[TraceCard, ...]
+    truncated: bool
+
+@dataclass(frozen=True, slots=True)
+class SubmitReceipt:
+    trace_id: str
+    outcome: TraceOutcome
+    server_msg: str
+```
+
+Returned by `TraceNetworkClient.query` / `.submit` respectively.
+
+### `TraceNetworkClient`
+
+```python
+class TraceNetworkClient(ABC):
+    async def query(*, intent: str, tags: Sequence[str], k: int = 5) -> QueryResult: ...
+    async def submit(card: TraceCard) -> SubmitReceipt: ...
+    async def health() -> bool: ...
+```
+
+Contract for any client backend (HTTP, in-memory, mock) that talks to
+the trace network. The bundled `HttpTraceNetworkClient` implements
+this against an OpenHub endpoint; tests use an in-memory fake.
+
+### `TRACE_API_V1`
+
+```python
+TRACE_API_V1: Final[str] = "trace-network/v1"
+```
+
+Wire-protocol version string. Bumped on any breaking change to the
+JSON shape of `TraceCard` / `QueryResult` / `SubmitReceipt`. Clients
+include this in the `X-Trace-API` header so the server can refuse
+incompatible versions cleanly.
+
+---
+
+## Embeddings (v1.1 plan-3 M6.6)
+
+The active provider may optionally implement `BaseProvider.embed()` to
+return vector embeddings for a list of texts.  The contract is opt-in:
+providers without an embedding endpoint raise
+`EmbeddingsUnsupportedError`, and callers (Active Memory hybrid retrieval,
+Dreaming v2 diversity gate, etc.) gracefully skip the vector path when
+that's surfaced.
+
+### `EmbeddingBatch`
+
+```python
+@dataclass(frozen=True, slots=True)
+class EmbeddingBatch:
+    model_id: str
+    vectors: tuple[tuple[float, ...], ...]
+```
+
+The return shape of `BaseProvider.embed(texts=...)`.
+
+- `model_id` — provider-specific embedding model identifier (e.g.
+  `"text-embedding-3-small"`, `"voyage-3"`).  Recorded by callers so
+  cached vectors can be invalidated on model change.
+- `vectors` — one tuple per input text, in the same order.
+  `len(vectors) == len(texts)` is contract-guaranteed; providers that
+  partially fail must raise rather than return a short batch.
+
+### `EmbeddingsUnsupportedError`
+
+```python
+class EmbeddingsUnsupportedError(NotImplementedError):
+    ...
+```
+
+Raised by `BaseProvider.embed()` when the provider has no embedding
+endpoint.  Callers catch this and fall back to non-vector retrieval
+paths (BM25-only, FTS5-only) without surfacing the error to the user.
+The default `BaseProvider.embed()` raises this so providers that
+inherit don't accidentally appear to support embeddings.
+
+### `MAX_EMBED_BATCH_SIZE`
+
+```python
+MAX_EMBED_BATCH_SIZE: Final[int] = 100
+```
+
+The maximum number of texts per `embed(texts=...)` call.  Callers
+chunk above this cap; provider implementations may refuse larger
+batches with a `ValueError`.  Sized for typical OpenAI / Voyage
+quotas while keeping any single call cheap.
 
 ---
 

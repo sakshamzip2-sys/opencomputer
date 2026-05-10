@@ -56,7 +56,6 @@ from plugin_sdk.core import Message
 from plugin_sdk.traces import TRACE_API_V1, TraceCard, TraceMeta, TraceStep
 
 from . import redactor
-from .tag_extractor import extract_tags_from_message
 
 _log = logging.getLogger("opencomputer.social_traces.distiller")
 
@@ -551,9 +550,9 @@ def _validate(card: TraceCard) -> bool:
             return False
     if not card.steps or len(card.steps) > _MAX_STEPS:
         return False
-    if len(card.meta.submitter_hash) < 32 or len(card.meta.submitter_hash) > 64:
-        return False
-    return True
+    return not (
+        len(card.meta.submitter_hash) < 32 or len(card.meta.submitter_hash) > 64
+    )
 
 
 async def distill_session(

@@ -66,6 +66,162 @@ DESTRUCTIVE_PATTERNS: list[DestructivePattern] = [
         pattern=re.compile(r":\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:"),
         reason="fork bomb pattern — exhausts process table and locks up the system",
     ),
+    # ─── Hermes-parity additions (2026-05-08) ────────────────────────────
+    # Self-termination — kill the agent process itself.
+    DestructivePattern(
+        pattern_id="self_terminate_pkill",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:pkill|killall)\s+(?:-9\s+)?"
+            r"(?:opencomputer|oc|gateway|hermes)\b"
+        ),
+        reason="kills the agent's own process — self-termination",
+    ),
+    # kill -9 -1 — kill all processes the user owns.
+    DestructivePattern(
+        pattern_id="kill_all_signal_9",
+        pattern=re.compile(rf"{_STMT_START}kill\s+-9\s+-1\b"),
+        reason="`kill -9 -1` — terminates every process the user owns",
+    ),
+    # pkill -9 (broad force-kill).
+    DestructivePattern(
+        pattern_id="pkill_force",
+        pattern=re.compile(rf"{_STMT_START}pkill\s+-9\b"),
+        reason="`pkill -9` — force-terminates matching processes without cleanup",
+    ),
+    # systemctl stop/restart/disable/mask — service-level disruption.
+    DestructivePattern(
+        pattern_id="systemctl_disrupt",
+        pattern=re.compile(
+            rf"{_STMT_START}systemctl\s+(?:stop|restart|disable|mask)\b"
+        ),
+        reason="`systemctl stop|restart|disable|mask` — service-level disruption",
+    ),
+    # Recursive chown to root.
+    DestructivePattern(
+        pattern_id="chown_recursive_root",
+        pattern=re.compile(
+            rf"{_STMT_START}chown\s+(?:-R|--recursive)\s+root\b"
+        ),
+        reason="`chown -R root` — transfers ownership of an entire tree to root",
+    ),
+    # Recursive chmod with world-writable bits.
+    DestructivePattern(
+        pattern_id="chmod_recursive_world_writable",
+        pattern=re.compile(
+            rf"{_STMT_START}chmod\s+(?:-R|--recursive)\s+"
+            r"(?:0?(?:666|777)|[ugoa]*[+=][rwx]*w[rwx]*)\b"
+        ),
+        reason="`chmod -R` with world-writable bits — strips permission boundaries",
+    ),
+    # chmod 666 (non-recursive but still world-writable).
+    DestructivePattern(
+        pattern_id="chmod_666",
+        pattern=re.compile(rf"{_STMT_START}chmod\s+0?666\b"),
+        reason="`chmod 666` — file made world-writable",
+    ),
+    # chmod o+w / a+w — world-writable via symbolic mode.
+    DestructivePattern(
+        pattern_id="chmod_world_writable_symbolic",
+        pattern=re.compile(rf"{_STMT_START}chmod\s+[ugoa]*[+=][rwx]*w[rwx]*\s"),
+        reason="`chmod` symbolic mode adds world/other-writable bits",
+    ),
+    # Write to /dev/sd* via redirect (`> /dev/sd*`).
+    DestructivePattern(
+        pattern_id="redirect_to_disk_device",
+        pattern=re.compile(
+            r"(?<!>)>\s*/dev/(?:sd[a-z]|nvme\d+n\d+|hd[a-z]|xvd[a-z]|vd[a-z])"
+        ),
+        reason="redirect to a physical block device — destroys disk contents",
+    ),
+    # Shell exec via -c flag — model could embed an arbitrary script.
+    DestructivePattern(
+        pattern_id="shell_dash_c_exec",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:bash|sh|zsh|ksh|dash)\s+(?:-[a-zA-Z]*c[a-zA-Z]*)\s+"
+        ),
+        reason="shell `-c` exec — runs an arbitrary command string in a fresh shell",
+    ),
+    # Script-language inline exec via -e/-c flags.
+    DestructivePattern(
+        pattern_id="script_inline_exec",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:python|python3|perl|ruby|node)\s+"
+            r"(?:-[a-zA-Z]*[eEcC][a-zA-Z]*)\s+"
+        ),
+        reason="inline interpreter `-e`/`-c` exec — arbitrary script with no file audit",
+    ),
+    # Process substitution piping to shell (`bash <(curl ...)`).
+    DestructivePattern(
+        pattern_id="proc_subst_to_shell",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:bash|sh|zsh)\s+<\(\s*(?:curl|wget)\b"
+        ),
+        reason="`bash <(curl ...)` — runs untrusted remote bytes via process substitution",
+    ),
+    # `xargs rm` — delete via xargs (often hides destructive intent).
+    DestructivePattern(
+        pattern_id="xargs_rm",
+        pattern=re.compile(rf"{_STMT_START}xargs\s+(?:-[a-zA-Z0-9]+\s+)*rm\b"),
+        reason="`xargs rm` — bulk-deletes paths streamed in from another command",
+    ),
+    # `find -exec rm` / `find -delete`.
+    DestructivePattern(
+        pattern_id="find_delete",
+        pattern=re.compile(
+            rf"{_STMT_START}find\s+.*?(?:-exec\s+rm\b|-delete\b)"
+        ),
+        reason="`find -exec rm` / `find -delete` — bulk-deletes traversal results",
+    ),
+    # `cp / mv / install` to /etc/. Allows flags between command and target.
+    DestructivePattern(
+        pattern_id="copy_to_etc",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:cp|mv|install)\s+(?:[^\s]+\s+)+/etc/"
+        ),
+        reason="`cp/mv/install` into `/etc/` — overwrites system config",
+    ),
+    # `sed -i` on /etc/.
+    DestructivePattern(
+        pattern_id="sed_inplace_etc",
+        pattern=re.compile(
+            rf"{_STMT_START}sed\s+(?:-i|--in-place)(?:\s+\S+)*\s+/etc/"
+        ),
+        reason="in-place `sed` edit of `/etc/` — alters system config silently",
+    ),
+    # `tee` to sensitive file — overwrites .env / ssh keys / /etc/.
+    DestructivePattern(
+        pattern_id="tee_to_sensitive_file",
+        pattern=re.compile(
+            rf"{_STMT_START}tee\s+(?:-[a-zA-Z]+\s+)*"
+            r"(?:/etc/|~/\.ssh/|~/\.opencomputer/\.env|~/\.hermes/\.env)"
+        ),
+        reason="`tee` writes to /etc/ / ~/.ssh/ / .env — overwrites sensitive file",
+    ),
+    # Redirect to sensitive file (.env / .ssh / /etc/).
+    DestructivePattern(
+        pattern_id="redirect_to_sensitive_file",
+        pattern=re.compile(
+            r"(?<!>)>>?\s*"
+            r"(?:/etc/|~/\.ssh/|~/\.opencomputer/\.env|~/\.hermes/\.env)"
+        ),
+        reason="redirect into /etc/ / ~/.ssh/ / .env — overwrites sensitive file",
+    ),
+    # Background gateway with detach. Match either:
+    #   * <prefix> gateway <run|start> ... (& | disown | nohup | setsid) suffix
+    #   * (nohup | setsid) ... gateway <run|start>
+    # so a wrapper-prefix or trailing-detach both fire.
+    DestructivePattern(
+        pattern_id="gateway_run_backgrounded",
+        pattern=re.compile(
+            r"(?:"
+            rf"{_STMT_START}(?:nohup|setsid)\s+\S*\s*(?:oc|opencomputer|hermes)\s+gateway\s+(?:run|start)"
+            r"|"
+            rf"{_STMT_START}(?:oc|opencomputer|hermes)\s+gateway\s+"
+            r"(?:run|start)\b.*?(?:&\s*$|\bdisown\b|\bnohup\b|\bsetsid\b)"
+            r")"
+        ),
+        reason="gateway started outside the service manager — bypasses lifecycle controls",
+    ),
     # sudo-escalated destructive commands. Checked before plain `rm`/`dd` so the
     # reason string mentions privilege escalation.
     DestructivePattern(
@@ -185,8 +341,202 @@ def detect_destructive(cmd: str) -> DestructivePattern | None:
     return None
 
 
+def is_command_allowlisted(cmd: str, allowlist: list[str] | tuple[str, ...]) -> bool:
+    """Check if ``cmd`` matches any user-provided permanent allowlist entry.
+
+    Mirrors the Hermes ``command_allowlist`` semantics: each entry is the
+    leading word of a command the user has approved permanently. The match
+    is on the first whitespace-delimited token of ``cmd``.
+
+    Examples:
+        >>> is_command_allowlisted("rm -rf /tmp/foo", ["rm"])
+        True
+        >>> is_command_allowlisted("systemctl stop sshd", ["systemctl"])
+        True
+        >>> is_command_allowlisted("ls -la", ["rm", "systemctl"])
+        False
+
+    Pattern IDs are also accepted as entries, so power users can pin a
+    specific match (``"chmod_666"`` rather than the broader ``"chmod"``).
+    The match against pattern IDs is exact.
+
+    Args:
+        cmd: raw shell command.
+        allowlist: tuple/list of strings — leading-token entries, pattern
+            IDs, or a mix.
+
+    Returns:
+        True iff cmd's leading token OR any matched pattern_id is in the
+        allowlist.
+    """
+    if not cmd or not allowlist:
+        return False
+    cmd_stripped = cmd.lstrip()
+    if not cmd_stripped:
+        return False
+    leading = cmd_stripped.split(None, 1)[0]
+    # Strip trailing /flags so "rm" matches "rm -rf"
+    leading_word = leading.split("/")[-1]  # handle "/usr/bin/rm" → "rm"
+    if leading_word in allowlist or leading in allowlist:
+        return True
+    # Fall through: check if any matching pattern's pattern_id is allowlisted.
+    hit = detect_destructive(cmd)
+    return hit is not None and hit.pattern_id in allowlist
+
+
+def detect_destructive_with_allowlist(
+    cmd: str, allowlist: list[str] | tuple[str, ...] | None = None
+) -> DestructivePattern | None:
+    """Like :func:`detect_destructive` but suppresses matches the user has
+    permanently allowlisted via ``command_allowlist`` config.
+
+    NOTE: this only suppresses *advisory* (bash_safety) detection. The
+    enforcement-tier hardline blocklist
+    (:mod:`opencomputer.security.hardline`) is NOT consulted here and is
+    NEVER bypassable, regardless of allowlist contents.
+
+    Args:
+        cmd: raw shell command.
+        allowlist: user-configured permanent allowlist. ``None`` is
+            treated as empty.
+
+    Returns:
+        Matching pattern, or ``None`` if no match OR the cmd is
+        allowlisted.
+    """
+    if allowlist and is_command_allowlisted(cmd, allowlist):
+        return None
+    return detect_destructive(cmd)
+
+
+#: Sandbox strategy names that provide container-grade isolation strong
+#: enough to make the advisory bash_safety detector redundant. Mirrors
+#: the Hermes "Container bypass" table in the security doc.
+#:
+#: Hardline patterns (:mod:`opencomputer.security.hardline`) STILL apply
+#: regardless — even a Docker container with bind-mounted /workspace can
+#: leak a destructive ``rm -rf /`` back to the host filesystem.
+_CONTAINER_ISOLATED_STRATEGIES: frozenset[str] = frozenset({
+    "docker",
+    "singularity",
+    "modal",
+    "daytona",
+    "vercel_sandbox",
+})
+
+
+def is_sandbox_strategy_container_isolated(strategy: str | None) -> bool:
+    """True iff the named sandbox strategy is in :data:`_CONTAINER_ISOLATED_STRATEGIES`.
+
+    Used by callers that need to decide whether to skip bash_safety
+    advisory checks for commands that will run inside a container.
+    """
+    if not strategy:
+        return False
+    return strategy.lower() in _CONTAINER_ISOLATED_STRATEGIES
+
+
+def load_active_sandbox_strategy() -> str | None:
+    """Read ``sandbox.strategy`` from the active profile's ``config.yaml``.
+
+    Returns ``None`` on any error (missing file, missing section, parse
+    error). Independent of the central config dataclass (consistent
+    with the other ``load_*_from_active_config`` helpers in this PR).
+    """
+    try:
+        import yaml
+
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        prof = read_active_profile()
+        if prof is None:
+            return None
+        config_path = profile_home_dir(prof) / "config.yaml"
+        if not config_path.exists():
+            return None
+        with config_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        sandbox = data.get("sandbox") or {}
+        raw = sandbox.get("strategy")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().lower()
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def detect_destructive_with_context(cmd: str) -> DestructivePattern | None:
+    """Production-ready wrapper that consults both the user's
+    ``security.command_allowlist`` AND the active ``sandbox.strategy``.
+
+    Suppression rules (in order):
+
+    1. If the active sandbox is in
+       :data:`_CONTAINER_ISOLATED_STRATEGIES`, return ``None`` — the
+       container is the boundary. Hardline patterns still apply via
+       :mod:`opencomputer.security.hardline` at tool entry, so this
+       suppression is safe.
+    2. If the cmd matches an entry in
+       ``security.command_allowlist``, return ``None`` (per
+       :func:`detect_destructive_with_allowlist`).
+    3. Otherwise return the result of :func:`detect_destructive`.
+
+    Designed for callers (plan-mode hook, agent loop's pre-tool-use
+    advisory) that need a single function call and don't want to
+    coordinate the multiple config knobs themselves.
+    """
+    if is_sandbox_strategy_container_isolated(load_active_sandbox_strategy()):
+        return None
+    return detect_destructive_with_allowlist(
+        cmd, load_command_allowlist_from_active_config()
+    )
+
+
+def load_command_allowlist_from_active_config() -> tuple[str, ...]:
+    """Read ``security.command_allowlist`` from the active profile's
+    ``config.yaml``.
+
+    Bypasses the central ``SecurityConfig`` dataclass (consistent with
+    :mod:`opencomputer.security.website_blocklist`) so the module stays
+    independent of unrelated schema changes. On any error returns an
+    empty tuple — fail-safe.
+    """
+    try:
+        import yaml
+
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        prof = read_active_profile()
+        if prof is None:
+            return ()
+        config_path = profile_home_dir(prof) / "config.yaml"
+        if not config_path.exists():
+            return ()
+        with config_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        sec = data.get("security") or {}
+        raw = sec.get("command_allowlist") or []
+        if not isinstance(raw, list):
+            return ()
+        return tuple(str(e) for e in raw if isinstance(e, str) and e.strip())
+    except Exception:  # noqa: BLE001
+        return ()
+
+
 __all__ = [
-    "DestructivePattern",
     "DESTRUCTIVE_PATTERNS",
+    "DestructivePattern",
     "detect_destructive",
+    "detect_destructive_with_allowlist",
+    "detect_destructive_with_context",
+    "is_command_allowlisted",
+    "is_sandbox_strategy_container_isolated",
+    "load_active_sandbox_strategy",
+    "load_command_allowlist_from_active_config",
 ]

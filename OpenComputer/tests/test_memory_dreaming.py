@@ -424,9 +424,19 @@ def test_dream_on_rejects_invalid_interval(tmp_path: Path, monkeypatch: pytest.M
     assert "invalid interval" in result.output
 
 
-def test_doctor_reports_dreaming_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``memory doctor`` includes a dreaming row that says 'disabled' by default."""
+def test_doctor_reports_dreaming_disabled_when_config_pins_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``memory doctor`` includes a dreaming row that says 'disabled' when
+    config.yaml pins ``dreaming_enabled: false``.
+
+    2026-05-10 — default flipped to True; this test now writes a config
+    that pins it off, so the disabled-row formatter is still covered.
+    """
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "memory:\n  dreaming_enabled: false\n", encoding="utf-8"
+    )
     from typer.testing import CliRunner
 
     from opencomputer.cli_memory import memory_app

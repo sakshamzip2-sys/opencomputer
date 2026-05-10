@@ -30,7 +30,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -56,6 +56,89 @@ from opencomputer.cli_ui.sources import (
 #: hook bridge in ``cli.py`` reads this on every PRE/POST_TOOL_USE
 #: dispatch to decide whether to forward to a renderer or no-op.
 _CURRENT: StreamingRenderer | None = None
+
+
+def _skin_color(key: str, fallback: str) -> str:
+    """Return a hex color from the active skin's ``colors`` dict.
+
+    Hermes v2 D6 wiring (2026-05-09): renderers call this to consume
+    the 22 Hermes color keys the skin engine ships
+    (``banner_dim``, ``response_border``, ``ui_label``, etc.).
+
+    Args:
+        key: a key from the active skin's ``colors`` dict — e.g.
+            ``"banner_dim"`` / ``"response_border"`` / ``"ui_label"``.
+        fallback: the legacy hard-coded color used before skinning.
+            Returned when no skin is applied or the key is missing.
+
+    Returns:
+        A Rich-compatible color string (hex literal preferred — Rich
+        accepts both ``"#aabbcc"`` and named colors like ``"grey50"``).
+    """
+    try:
+        from opencomputer.cli_ui.skin import current_spec
+    except Exception:  # noqa: BLE001 — never break the render path
+        return fallback
+    try:
+        spec = current_spec()
+    except Exception:  # noqa: BLE001
+        return fallback
+    if spec is None:
+        return fallback
+    val = spec.colors.get(key)
+    if not isinstance(val, str) or not val:
+        return fallback
+    return val
+
+
+def _skin_spinner_text(*, phase: Literal["waiting", "thinking"]) -> str:
+    """Build the spinner text using the active skin's face/verb cycles.
+
+    Hermes v2 D5 wiring (2026-05-09): the YAML data + accessors shipped
+    in PR #515 are now actually consumed by the streaming renderer.
+
+    Args:
+        phase: ``"waiting"`` for the pre-first-byte network wait
+            (uses ``spinner.waiting_faces``); ``"thinking"`` once
+            reasoning content has begun streaming
+            (uses ``spinner.thinking_faces``).
+
+    Returns:
+        ``"<face> <verb>…"`` when the active skin defines faces, or
+        the legacy literal ``"Thinking…"`` as a no-skin fallback.
+
+    Defensive: import-failures and empty cycles fall back to the legacy
+    string so the spinner never breaks even if skin loading goes
+    sideways. Picking the *first* face (rather than rotating) keeps
+    Rich's Live happy — the dots glyph already animates; rotating the
+    face would require a custom Spinner.
+    """
+    try:
+        from opencomputer.cli_ui.skin import (
+            current_spinner_thinking_faces,
+            current_spinner_verbs,
+            current_spinner_waiting_faces,
+        )
+    except Exception:  # noqa: BLE001 — never break the render path
+        return "Thinking…"
+    try:
+        faces = (
+            current_spinner_waiting_faces()
+            if phase == "waiting"
+            else current_spinner_thinking_faces()
+        )
+        verbs = current_spinner_verbs()
+    except Exception:  # noqa: BLE001 — fail to legacy text
+        return "Thinking…"
+    if not faces:
+        # No face cycle configured — fall back to the legacy verb-only
+        # spinner so user-authored skins that omit faces still get the
+        # text they configured.
+        verb = verbs[0] if verbs else "thinking"
+        return f"{verb.capitalize()}…"
+    face = faces[0]
+    verb = verbs[0] if verbs else "thinking"
+    return f"{face} {verb}…"
 
 
 def current_renderer() -> StreamingRenderer | None:
@@ -169,8 +252,18 @@ class StreamingRenderer:
     # ─── pre-stream spinner ────────────────────────────────────────
 
     def start_thinking(self) -> None:
-        """Show the spinner. Call once at the top of the turn."""
-        spinner = Spinner("dots", text=Text("Thinking…", style="dim"))
+        """Show the spinner. Call once at the top of the turn.
+
+        Spinner text is skin-aware: during the pre-first-chunk wait
+        (network round-trip), the active skin's
+        ``spinner.waiting_faces`` cycle is used (Hermes v2 D5 wiring,
+        2026-05-09). Once first reasoning content arrives, ``_render``
+        switches to ``spinner.thinking_faces``.
+        """
+        spinner = Spinner(
+            "dots",
+            text=Text(_skin_spinner_text(phase="waiting"), style="dim"),
+        )
         self._live = Live(
             spinner,
             console=self.console,
@@ -517,6 +610,16 @@ class StreamingRenderer:
             for url in stripped_urls:
                 self._sources.add_url(url)
             content = rewrite_inline_url_refs(content, self._sources)
+            # Hermes-CLI parity A2: strip rendered `**bold**` / `*italic*`
+            # markup so terminals without bold/italic don't print literal
+            # asterisks. Code blocks / lists / tables preserved.
+            # Disable via `OPENCOMPUTER_NO_MD_STRIP=1` for raw markdown.
+            import os as _os
+
+            from opencomputer.cli_ui.markdown_strip import strip_for_terminal
+
+            if not _os.environ.get("OPENCOMPUTER_NO_MD_STRIP"):
+                content = strip_for_terminal(content)
             if self._header_shown:
                 self.console.print("[bold magenta]oc ›[/bold magenta]")
             self.console.print(Markdown(content, code_theme="ansi_dark"))
@@ -644,7 +747,11 @@ class StreamingRenderer:
                         f"💭 Thinking ({_fmt_duration(elapsed)})",
                         style="dim cyan",
                     ),
-                    border_style="grey50",
+                    # Hermes v2 D6 wiring (2026-05-09): use the active
+                    # skin's banner_dim color via Rich Theme. Falls back
+                    # to grey50 when no skin is applied (Theme inherits
+                    # from default), matching pre-skin behavior.
+                    border_style=_skin_color("banner_dim", "grey50"),
                     padding=(0, 1),
                 )
             )
@@ -666,7 +773,15 @@ class StreamingRenderer:
             renderables.append(Markdown(text, code_theme="ansi_dark"))
 
         if show_spinner:
-            spinner_label = "Running tool…" if any_tool_running else "Thinking…"
+            if any_tool_running:
+                spinner_label = "Running tool…"
+            else:
+                # Hermes v2 D5 wiring (2026-05-09): once first reasoning
+                # content has arrived, switch to thinking_faces. Before
+                # the first chunk we'd be in pre-stream waiting (handled
+                # by start_thinking); _render runs after at least one
+                # chunk so we're past that boundary.
+                spinner_label = _skin_spinner_text(phase="thinking")
             renderables.append(
                 Spinner("dots", text=Text(spinner_label, style="dim"))
             )
@@ -686,7 +801,10 @@ class StreamingRenderer:
         return Panel(
             Group(*rows),
             title=Text("tools", style="dim"),
-            border_style="grey39",
+            # Hermes v2 D6 wiring (2026-05-09): tool-panel border uses
+            # the active skin's banner_dim color so different skins
+            # tint the tool panel consistently with the rest of the UI.
+            border_style=_skin_color("banner_dim", "grey39"),
             padding=(0, 1),
         )
 

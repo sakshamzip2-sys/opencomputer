@@ -30,9 +30,62 @@ _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
 
 #: V3.A-T8 — per-file size cap for workspace context loader. Keeps the
 #: prefix prompt bounded if a project ships a 10MB CLAUDE.md. Truncated
-#: files get a marker so the agent knows what happened.
+#: files get a marker so the agent knows what happened and how to recover.
 _WORKSPACE_FILE_CAP_BYTES = 100_000
-_WORKSPACE_TRUNCATION_NOTE = "\n\n[truncated — file exceeded 100KB cap]\n"
+
+#: Hermes v2 head/tail/marker split. Head 70% + tail 20% + marker 10%
+#: gives the agent both the *intro* of the file (typical project / repo
+#: layout / overview) and the *closing sections* (usage examples,
+#: footers, recent additions) — head-only truncation systematically lost
+#: the closing material, which often carries the most-recent
+#: conventions in long-lived workspace docs.
+_TRUNCATION_HEAD_FRAC = 0.70
+_TRUNCATION_TAIL_FRAC = 0.20
+# Marker reserves the remaining 10% so head+tail+marker fits within the
+# cap. The marker text itself is much shorter than 10K bytes; the slack
+# accommodates UTF-8 multi-byte boundary safety + a small comfort margin.
+
+
+def _format_truncation_note(name: str, kept_head: int, kept_tail: int, total: int) -> str:
+    """Marker injected between head and tail of a truncated workspace file.
+
+    Format mirrors the Hermes v2 spec example:
+    ``[...truncated AGENTS.md: kept 14000+4000 of 25000 chars. Use file
+    tools to read the full file.]``
+
+    The ``head+tail`` notation tells the agent both segments are present
+    so it doesn't waste tool calls trying to reconstruct material that's
+    already in context — only the gap between them is missing.
+    """
+    return (
+        f"\n\n[...truncated {name}: kept {kept_head:,}+{kept_tail:,} of "
+        f"{total:,} chars. Use file tools to read the full file.]\n\n"
+    )
+
+
+def _truncate_head_tail(content: str, *, name: str, cap: int) -> str:
+    """Apply Hermes v2 head/tail/marker truncation.
+
+    Returns the original ``content`` unchanged if it fits within ``cap``.
+    Otherwise keeps the first ``cap * 0.70`` chars + the last
+    ``cap * 0.20`` chars with a marker between them showing what was
+    kept and the original total.
+
+    The boundary handling: if the head end or tail start lands inside a
+    multi-byte UTF-8 sequence Python's slice produces a malformed
+    surrogate. We slice on str (chars), not bytes, so this is a non-issue
+    in practice — Python strings are unicode-clean. The 10% marker
+    budget covers any small marker-overshoot.
+    """
+    total = len(content)
+    if total <= cap:
+        return content
+    head_size = int(cap * _TRUNCATION_HEAD_FRAC)
+    tail_size = int(cap * _TRUNCATION_TAIL_FRAC)
+    head = content[:head_size]
+    tail = content[-tail_size:]
+    marker = _format_truncation_note(name, head_size, tail_size, total)
+    return head + marker + tail
 
 
 def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> str:
@@ -66,7 +119,27 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
     # Files to check, in priority order. We collect ALL that exist, not
     # just the highest-priority one — multiple files may coexist (e.g.
     # both CLAUDE.md and AGENTS.md in the same repo).
-    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md")
+    #
+    # Priority rationale:
+    #   1. ``OPENCOMPUTER.md`` / ``.hermes.md`` — agent-specific. Users
+    #      who fork upstream Hermes (`.hermes.md`) get parity without
+    #      renaming. ``OPENCOMPUTER.md`` wins ties because OC is the
+    #      host runtime here.
+    #   2. ``CLAUDE.md`` / ``AGENTS.md`` — common cross-tool conventions
+    #      that almost every multi-agent repo uses.
+    #   3. ``.cursorrules`` — Cursor IDE format; widely seen in
+    #      JS/TS-heavy repos. Subdir hints scan this too.
+    #
+    # Hermes v2 parity D3 (2026-05-08): `.hermes.md` added between
+    # OPENCOMPUTER.md and CLAUDE.md so Hermes-forked workspaces work
+    # without rename.
+    target_names = (
+        "OPENCOMPUTER.md",
+        ".hermes.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".cursorrules",
+    )
 
     found: list[tuple[str, str]] = []
     seen_paths: set[Path] = set()
@@ -92,8 +165,9 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
             except OSError:
                 continue
             seen_paths.add(resolved)
-            if len(content) > _WORKSPACE_FILE_CAP_BYTES:
-                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _WORKSPACE_TRUNCATION_NOTE
+            content = _truncate_head_tail(
+                content, name=name, cap=_WORKSPACE_FILE_CAP_BYTES
+            )
             found.append((name, content))
         if current.parent == current:
             break  # filesystem root reached
@@ -110,8 +184,14 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
 
 
 def _post_process_workspace_context(raw: str) -> str:
-    """Apply runtime redaction + prompt-injection scan to workspace
-    context before it enters the system prompt.
+    """Scrub secrets + quarantine prompt-injection in workspace context.
+
+    Thin shim over
+    :func:`opencomputer.security.context_scan.scan_workspace_context_content`
+    so the two callers (this startup loader and progressive
+    subdirectory-hint discovery in
+    :mod:`opencomputer.agent.subdirectory_hints`) share a single policy
+    and cannot drift.
 
     RR-3 (May-5): secrets in CLAUDE.md / AGENTS.md / OPENCOMPUTER.md
     must not ship to the LLM unredacted.
@@ -119,41 +199,11 @@ def _post_process_workspace_context(raw: str) -> str:
     instructions...") gets wrapped in a quarantine envelope so the
     model recognizes it as untrusted.
     """
-    # Lazy imports — keep prompt_builder lightweight if redaction is
-    # off (snapshot env var) or if the detector loads heavier patterns.
-    import logging
+    # Lazy import — preserves original module-load cost; no top-level
+    # cycle risk because context_scan does not import from prompt_builder.
+    from opencomputer.security.context_scan import scan_workspace_context_content
 
-    from opencomputer.security.instruction_detector import default_detector
-    from opencomputer.security.redact import redact_runtime_text_with_counts
-
-    redacted, counts = redact_runtime_text_with_counts(raw)
-    total = sum(counts.values())
-    if total > 0:
-        logging.getLogger(__name__).info(
-            "workspace_context: redacted %d secret/PII occurrence(s) before LLM",
-            total,
-        )
-
-    verdict = default_detector().detect(redacted)
-    if verdict.quarantine_recommended:
-        logging.getLogger(__name__).warning(
-            "workspace_context: prompt-injection signature detected (rules=%s, conf=%.2f)",
-            verdict.triggered_rules,
-            verdict.confidence,
-        )
-        warning_line = (
-            f"<!-- workspace-context-injection-warning rules="
-            f"{','.join(verdict.triggered_rules)} "
-            f"confidence={verdict.confidence:.2f} -->"
-        )
-        return (
-            f"{warning_line}\n"
-            "<quarantined-untrusted-content>\n"
-            f"{redacted}\n"
-            "</quarantined-untrusted-content>\n"
-        )
-
-    return redacted
+    return scan_workspace_context_content(raw, source="workspace_context")
 
 
 def _truncate_from_top(text: str, limit: int) -> str:
@@ -288,13 +338,41 @@ class PromptBuilder:
         yolo_mode: bool = False,
         permission_mode: str = "default",
         personality: str = "",
+        custom_personalities: dict[str, str] | None = None,
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
         persona_preferred_tone: str = "",
+        pinned_files_block: str = "",
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
+        # Resolve personality NAME → BODY. OC design (preserves prior
+        # contract from PR-5):
+        #   * empty / unset       → no overlay
+        #   * "helpful" baseline  → no overlay (the default register
+        #                           lives in the base prompt itself;
+        #                           naming it doesn't add a directive)
+        #   * unknown name        → no overlay (typos no-op, do not
+        #                           silently fall back to a different
+        #                           register)
+        #   * custom override     → custom body (always wins, including
+        #                           overriding the helpful baseline)
+        #   * non-helpful builtin → built-in body
+        personality_body = ""
+        if personality:
+            requested = personality.strip().lower()
+            custom_dict = custom_personalities or {}
+            custom_body = custom_dict.get(requested)
+            if (
+                isinstance(custom_body, str)
+                and custom_body.strip()
+            ):
+                personality_body = custom_body.strip()
+            elif requested != "helpful":
+                from opencomputer.agent.personality.builtins import BUILTINS
+                if requested in BUILTINS:
+                    personality_body = BUILTINS[requested]
         ctx = PromptContext(
             cwd=os.getcwd(),
             user_home=str(Path.home()),
@@ -331,10 +409,12 @@ class PromptBuilder:
             yolo_mode=ctx.yolo_mode,
             permission_mode=ctx.permission_mode,
             personality=ctx.personality,
+            personality_body=personality_body,
             persona_overlay=ctx.persona_overlay,
             active_persona_id=ctx.active_persona_id,
             user_tone=ctx.user_tone,
             persona_preferred_tone=ctx.persona_preferred_tone,
+            pinned_files_block=pinned_files_block,
         )
 
     def build_user_facts(
@@ -431,10 +511,12 @@ class PromptBuilder:
         yolo_mode: bool = False,
         permission_mode: str = "default",
         personality: str = "",
+        custom_personalities: dict[str, str] | None = None,
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
         persona_preferred_tone: str = "",
+        pinned_files_block: str = "",
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -463,10 +545,12 @@ class PromptBuilder:
             yolo_mode=yolo_mode,
             permission_mode=permission_mode,
             personality=personality,
+            custom_personalities=custom_personalities,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
             user_tone=user_tone,
             persona_preferred_tone=persona_preferred_tone,
+            pinned_files_block=pinned_files_block,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base

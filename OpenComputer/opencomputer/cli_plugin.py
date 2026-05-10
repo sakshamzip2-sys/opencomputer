@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -103,13 +102,156 @@ def _load_source_manifest(src: Path) -> dict:
         raise typer.Exit(code=1) from None
 
 
+def _install_from_git(url: str, **kwargs):
+    """Indirection for install_from_git — patchable in tests."""
+    from opencomputer.plugins.remote_install import install_from_git
+
+    return install_from_git(url, **kwargs)
+
+
+def _install_from_url(url: str, **kwargs):
+    """Indirection for install_from_url — patchable in tests."""
+    from opencomputer.plugins.remote_install import install_from_url
+
+    return install_from_url(url, **kwargs)
+
+
+def _install_from_pypi(spec: str, **kwargs):
+    """Indirection for install_from_pypi — patchable in tests."""
+    from opencomputer.plugins.remote_install import install_from_pypi
+
+    return install_from_pypi(spec, **kwargs)
+
+
+def _enforce_source_policy(source_str: str) -> None:
+    """Run M11.3 source policy on the install argument.
+
+    Loads the active profile's policy from
+    ``~/.opencomputer/<profile>/config.yaml::plugins.sources``.  Raises
+    :class:`typer.Exit(2)` when the source is denied.  Silent on
+    allow.
+    """
+    from opencomputer.plugins.source_policy import (
+        PolicyDeniedError,
+        load_policy_from_active_profile,
+        parse_source,
+    )
+
+    try:
+        src = parse_source(source_str)
+    except ValueError as exc:
+        _console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from None
+
+    try:
+        policy = load_policy_from_active_profile()
+    except Exception as exc:  # noqa: BLE001 — log & fail-open on bad policy
+        _console.print(
+            f"[yellow]warning:[/yellow] could not load source policy ({exc}); "
+            "proceeding with default deny-by-default-on-network policy."
+        )
+        from opencomputer.plugins.source_policy import PluginSourcePolicy
+
+        policy = PluginSourcePolicy()
+
+    try:
+        policy.assert_allowed(src)
+    except PolicyDeniedError as exc:
+        _console.print(
+            f"[red]error:[/red] {exc}\n\n"
+            "This source kind is denied by default for plugin installs. "
+            "To allow it, edit ~/.opencomputer/<profile>/config.yaml and add:\n\n"
+            f"    plugins:\n      sources:\n        {src.kind.value}:\n"
+            f"          allow:\n            - <pattern>\n"
+        )
+        raise typer.Exit(code=2) from None
+
+
+
+def _verify_plugin(*args, **kwargs):
+    """Indirection for verify_plugin — patchable in tests."""
+    from opencomputer.plugins.integrity import verify_plugin
+
+    return verify_plugin(*args, **kwargs)
+
+
+async def _composed_before_install_hook(ctx):
+    """Fan-out to every registered BEFORE_INSTALL hook; first 'block' wins.
+
+    No-op (returns None) when no handlers are registered, which is the
+    typical case for a fresh `oc plugin install` invocation that hasn't
+    loaded any plugins yet.
+    """
+    from opencomputer.hooks.engine import engine as _hook_engine
+
+    return await _hook_engine.fire_blocking(ctx)
+
+
+def _is_git_arg(arg: str) -> bool:
+    return arg.startswith(("git+http", "git+ssh", "git+file", "git+https"))
+
+
+def _is_url_arg(arg: str) -> bool:
+    return arg.startswith(("http://", "https://"))
+
+
+def _is_github_shorthand(arg: str) -> bool:
+    """Detect ``gh:owner/repo`` / ``github:owner/repo`` / GitHub HTTPS URLs.
+
+    Mirrors :func:`opencomputer.plugins.source_policy.parse_source` but
+    is local to the CLI dispatch path so the install command can route
+    a GitHub install through ``install_from_git`` with a normalized URL.
+    """
+    if arg.startswith(("gh:", "github:")):
+        return True
+    return arg.startswith(("https://github.com/", "http://github.com/"))
+
+
+def _normalize_github_arg(arg: str) -> tuple[str, str | None]:
+    """Convert a GitHub shorthand to (git_url, ref).
+
+    Examples::
+
+        gh:owner/repo                              → ("git+https://github.com/owner/repo.git", None)
+        gh:owner/repo@v1.2.3                       → ("git+https://github.com/owner/repo.git", "v1.2.3")
+        github:owner/repo                          → ("git+https://github.com/owner/repo.git", None)
+        https://github.com/owner/repo              → ("git+https://github.com/owner/repo.git", None)
+        https://github.com/owner/repo.git          → ("git+https://github.com/owner/repo.git", None)
+        https://github.com/owner/repo/tree/main    → ("git+https://github.com/owner/repo.git", "main")
+    """
+    ref: str | None = None
+    if arg.startswith(("gh:", "github:")):
+        body = arg.split(":", 1)[1].strip()
+        if "@" in body:
+            body, ref = body.split("@", 1)
+        owner_repo = body.strip("/")
+    else:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(arg)
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) < 2:
+            raise typer.BadParameter(
+                f"GitHub URL {arg!r} must include owner/repo"
+            )
+        owner_repo = "/".join(path_parts[:2])
+        if owner_repo.endswith(".git"):
+            owner_repo = owner_repo[:-4]
+        # /tree/<branch> or /tree/<sha> → ref hint
+        if len(path_parts) >= 4 and path_parts[2] == "tree":
+            ref = path_parts[3]
+    git_url = f"git+https://github.com/{owner_repo}.git"
+    return git_url, ref
+
+
 @plugin_app.command("install")
 def install(
     source: str = typer.Argument(
         ...,
         help=(
             "Path to a local plugin directory, OR a slug to resolve via "
-            "the remote catalog (use with --remote)."
+            "the remote catalog (use with --remote), OR a git+/https:// "
+            "URL for direct install."
         ),
     ),
     profile: str | None = typer.Option(
@@ -142,8 +284,165 @@ def install(
         "--refresh",
         help="Bypass the 24h catalog cache (only with --remote).",
     ),
+    plugin_id_hint: str | None = typer.Option(
+        None,
+        "--id",
+        help=(
+            "Plugin id to install as. Required for git/https URL installs; "
+            "must match the plugin.json id in the source."
+        ),
+    ),
+    sha256: str | None = typer.Option(
+        None,
+        "--sha256",
+        help="Required for https:// tarball installs — pin the source bytes.",
+    ),
+    ref: str | None = typer.Option(
+        None,
+        "--ref",
+        help="Pin a specific git sha/tag/branch (only with git+ source).",
+    ),
 ) -> None:
-    """Install a plugin from a local directory or the remote catalog."""
+    """Install a plugin from a local directory, remote catalog, git, URL, or PyPI."""
+    # v1.1 plan-3 M11.3 — every install path runs through the typed
+    # source-policy gate before any network IO.  Deny-by-default for
+    # network kinds keeps the supply-chain surface narrow.
+    _enforce_source_policy(source)
+
+    # GitHub shorthand handling MUST come BEFORE the generic git/url
+    # checks — gh:owner/repo isn't a git+ URL, and a bare
+    # https://github.com/owner/repo is matched by _is_url_arg too.
+    if _is_github_shorthand(source):
+        if plugin_id_hint is None:
+            _console.print(
+                "[red]error:[/red] GitHub installs require --id <plugin-id> "
+                "(must match the cloned repo's plugin.json id)"
+            )
+            raise typer.Exit(code=2)
+        from opencomputer.plugins.remote_install import CatalogError
+
+        git_url, github_ref = _normalize_github_arg(source)
+        # Per-arg ref overrides per-URL ref so an explicit --ref wins.
+        effective_ref = ref or github_ref
+        dest_root = _resolve_destination_root(profile, is_global)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _install_from_git(
+                git_url,
+                dest_root=dest_root,
+                plugin_id_hint=plugin_id_hint,
+                ref=effective_ref,
+                force=force,
+                before_install_hook=_composed_before_install_hook,
+            )
+        except CatalogError as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        ref_suffix = f" @ {effective_ref}" if effective_ref else ""
+        _console.print(
+            f"[green]installed:[/green] '{result.plugin_id}' "
+            f"v{result.version} (github: {git_url}{ref_suffix}) → {result.install_path}"
+        )
+        return
+
+    # Phase 1 (2026-05-06) — URL-scheme-routed install paths.
+    if source.startswith(("pypi:", "PyPI:", "PYPI:")):
+        if plugin_id_hint is None:
+            _console.print(
+                "[red]error:[/red] pypi installs require --id <plugin-id> "
+                "(must match the sdist's plugin.json id field)"
+            )
+            raise typer.Exit(code=2)
+        from opencomputer.plugins.remote_install import (
+            CatalogError,
+            PypiDownloadError,
+            PypiNotFoundError,
+        )
+
+        package_spec = source.split(":", 1)[1].strip()
+        if not package_spec:
+            _console.print(
+                "[red]error:[/red] empty PyPI package spec (use "
+                "'pypi:<name>' or 'pypi:<name>==<version>')"
+            )
+            raise typer.Exit(code=2)
+        dest_root = _resolve_destination_root(profile, is_global)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _install_from_pypi(
+                package_spec,
+                dest_root=dest_root,
+                plugin_id_hint=plugin_id_hint,
+                force=force,
+                before_install_hook=_composed_before_install_hook,
+            )
+        except (PypiNotFoundError, PypiDownloadError, CatalogError) as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        _console.print(
+            f"[green]installed:[/green] '{result.plugin_id}' "
+            f"v{result.version} (pypi) → {result.install_path}"
+        )
+        return
+
+    if _is_git_arg(source):
+        if plugin_id_hint is None:
+            _console.print(
+                "[red]error:[/red] git installs require --id <plugin-id> "
+                "(must match the cloned repo's plugin.json id)"
+            )
+            raise typer.Exit(code=2)
+        from opencomputer.plugins.remote_install import CatalogError
+
+        dest_root = _resolve_destination_root(profile, is_global)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _install_from_git(
+                source,
+                dest_root=dest_root,
+                plugin_id_hint=plugin_id_hint,
+                ref=ref,
+                force=force,
+                before_install_hook=_composed_before_install_hook,
+            )
+        except CatalogError as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        _console.print(
+            f"[green]installed:[/green] '{result.plugin_id}' "
+            f"v{result.version} (git) → {result.install_path}"
+        )
+        return
+
+    if _is_url_arg(source):
+        if plugin_id_hint is None or sha256 is None:
+            _console.print(
+                "[red]error:[/red] https:// installs require both "
+                "--id <plugin-id> and --sha256 <hex>"
+            )
+            raise typer.Exit(code=2)
+        from opencomputer.plugins.remote_install import CatalogError
+
+        dest_root = _resolve_destination_root(profile, is_global)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _install_from_url(
+                source,
+                dest_root=dest_root,
+                plugin_id_hint=plugin_id_hint,
+                sha256=sha256,
+                force=force,
+                before_install_hook=_composed_before_install_hook,
+            )
+        except CatalogError as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        _console.print(
+            f"[green]installed:[/green] '{result.plugin_id}' "
+            f"v{result.version} (url) → {result.install_path}"
+        )
+        return
+
     if remote:
         _install_from_remote(
             slug=source,
@@ -208,6 +507,7 @@ def _install_from_remote(
             refresh=refresh,
             force=force,
             trusted_keys=_load_trusted_catalog_keys(),
+            before_install_hook=_composed_before_install_hook,
         )
     except CatalogError as e:
         _console.print(f"[red]error:[/red] {e}")
@@ -605,28 +905,23 @@ def _read_and_validate_profile_yaml(
     printing a Rich-formatted message that includes ``action_label``
     so users see which mutator failed.
     """
+    from opencomputer.agent.config_store import ConfigYAMLError, load_yaml_dict
     from opencomputer.agent.profile_config import (
         ProfileConfigError,
         validate_profile_config_dict,
     )
 
-    if not path.exists():
-        return {}
-
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as exc:
+        raw = load_yaml_dict(path)
+    except ConfigYAMLError as exc:
         _console.print(
-            f"[red]error:[/red] {path}: invalid YAML ({exc}). "
+            f"[red]error:[/red] {path}: {exc.cause}. "
             f"Cannot {action_label} plugin until profile.yaml parses."
         )
         raise typer.Exit(code=1) from None
 
-    if not isinstance(raw, dict):
-        _console.print(
-            f"[red]error:[/red] {path} must contain a YAML mapping at the top level."
-        )
-        raise typer.Exit(code=1)
+    if not raw:
+        return raw
 
     try:
         validate_profile_config_dict(raw, path=path)
@@ -1107,6 +1402,68 @@ def _read_trusted_keys(path: Path) -> dict[str, bytes]:
         if isinstance(pem, str) and pem:
             out[fp] = pem.encode("utf-8")
     return out
+
+
+@plugin_app.command("verify")
+def verify(
+    plugin_id: str = typer.Argument(..., help="Plugin id to verify."),
+    profile: str | None = typer.Option(None, "--profile"),
+    is_global: bool = typer.Option(False, "--global"),
+) -> None:
+    """Compare an installed plugin's bytes against its source.
+
+    Re-fetches the original source (catalog tarball or git ref or url
+    tarball) and reports any drift versus the on-disk install. Exits
+    non-zero on drift or unreachable source.
+    """
+    from opencomputer.plugins.installed_index import find_record
+
+    dest_root = _resolve_destination_root(profile, is_global)
+    rec = find_record(dest_root / ".installed_index.json", plugin_id)
+    if rec is None:
+        _console.print(f"[red]error:[/red] '{plugin_id}' is not installed")
+        raise typer.Exit(code=2)
+
+    # Catalog source needs a CLI-driven refetch_fn that goes through the
+    # catalog → tarball URL. Other sources use the integrity module's default.
+    refetch_fn = None
+    if rec.source == "catalog":
+        from opencomputer.plugins.remote_install import (
+            download_and_verify,
+            fetch_catalog,
+            find_entry,
+        )
+
+        def refetch_fn(record):  # noqa: ARG001 — record arg unused (slug from rec)
+            catalog = fetch_catalog(trusted_keys=_load_trusted_catalog_keys())
+            entry = find_entry(catalog, record.plugin_id)
+            return download_and_verify(entry)
+
+    try:
+        if refetch_fn is not None:
+            report = _verify_plugin(
+                plugin_id, dest_root=dest_root, refetch_fn=refetch_fn
+            )
+        else:
+            report = _verify_plugin(plugin_id, dest_root=dest_root)
+    except Exception as e:  # NotInstalledError / SourceUnreachableError
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=2) from None
+
+    if not report.has_drift:
+        _console.print(
+            f"[green]ok:[/green] '{report.plugin_id}' has no drift "
+            f"(source={report.source}, url={report.source_url})"
+        )
+        return
+
+    _console.print(
+        f"[yellow]drift detected:[/yellow] '{report.plugin_id}' "
+        f"(source={report.source})"
+    )
+    for diff in report.differences:
+        _console.print(f"  - {diff.kind}: {diff.path}")
+    raise typer.Exit(code=1)
 
 
 __all__ = ["plugin_app"]

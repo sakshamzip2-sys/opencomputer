@@ -1,0 +1,89 @@
+name: default
+description: Default OpenComputer skin — gold accents, kawaii spinner verbs.
+
+# Hermes v2 D6 (2026-05-08): full 24-key palette covering banner,
+# UI semantics, prompt + input area, response box, session label /
+# border, status bar, voice status badge, selection highlight, and
+# completion-menu panes. OC's legacy color keys (user_text / agent_text
+# / tool_label / etc.) coexist for backward compatibility — renderers
+# can use either naming scheme.
+colors:
+  # Banner
+  banner_border:    "#D4AF37"
+  banner_title:     "#FFD700"
+  banner_accent:    "#B8860B"
+  banner_dim:       "#6E7B8B"
+  banner_text:      "#FFE08A"
+  # UI semantic
+  ui_accent:        "#FFD700"
+  ui_label:         "#88C0D0"
+  ui_ok:            "#A3BE8C"
+  ui_error:         "#BF616A"
+  ui_warn:          "#EBCB8B"
+  # Prompt + input area
+  prompt:           "#A0E0FF"
+  input_rule:       "#D4AF37"
+  # Agent response box
+  response_border:  "#FFD700"
+  # Session badge + border
+  session_label:    "#FFE08A"
+  session_border:   "#6E7B8B"
+  # Status bars
+  status_bar_bg:    "#2E3440"
+  status_bar_fg:    "#ECEFF4"
+  voice_status_bg:  "#1E3A5F"
+  # TUI selection highlight
+  selection_bg:     "#3B4252"
+  # Completion menu panes
+  completion_menu_bg:               "#3B4252"
+  completion_menu_current_bg:       "#5E81AC"
+  completion_menu_meta_bg:          "#434C5E"
+  completion_menu_meta_current_bg:  "#4C566A"
+  # Legacy / extra (kept for OC renderer compatibility)
+  user_text:        "#FFFFFF"
+  agent_text:       "#FFE08A"
+  agent_label:      "#D4AF37"
+  tool_label:       "#88C0D0"
+  tool_output:      "#A3BE8C"
+  error:            "#BF616A"
+  warning:          "#EBCB8B"
+  info:             "#81A1C1"
+  dim:              "#6E7B8B"
+
+spinner:
+  thinking_verbs:
+    - thinking
+    - pondering
+    - musing
+    - cogitating
+  wings:
+    - ["⟨✦", "✦⟩"]
+    - ["⟨✿", "✿⟩"]
+  # Hermes v2 D5 (2026-05-08): two distinct face cycles. waiting_faces
+  # cycles while the API round-trip is in flight (no tokens yet);
+  # thinking_faces cycles once the model starts emitting reasoning.
+  waiting_faces:
+    - "(⊙‿⊙)"
+    - "(◔‿◔)"
+    - "(◕‿◕)"
+  thinking_faces:
+    - "(◉‿◉)"
+    - "(◓‿◒)"
+    - "(◑‿◑)"
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " ✦ OC "
+  prompt_symbol: ">"
+
+banner_logo: ""
+banner_hero: ""
+
+tool_prefix: "┊"
+tool_emojis:
+  Read: "📖"
+  Write: "📝"
+  Edit: "✏"
+  Bash: "⚙"
+  WebFetch: "🌐"
+  WebSearch: "🔎"

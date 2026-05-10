@@ -73,6 +73,198 @@ def _check_python() -> Check:
     return Check("python version", "pass", f"{v.major}.{v.minor}.{v.micro}")
 
 
+def _resolve_source_tree() -> Path | None:
+    """Locate the on-disk source tree this Python process is running from.
+
+    Returns the closest ancestor of the ``opencomputer`` package that
+    contains a ``.git`` directory, or ``None`` when no such ancestor
+    exists (typical for a PyPI install).
+
+    Walks up to 4 levels — enough for ``opencomputer/__init__.py``
+    in a worktree like ``.../OpenComputer/opencomputer/``, but bounded
+    so we don't scan the whole filesystem.
+    """
+    import opencomputer as _oc_pkg
+
+    pkg_path = Path(_oc_pkg.__file__).resolve().parent
+    here: Path | None = pkg_path
+    for _ in range(4):
+        if here is None:
+            break
+        if (here / ".git").exists():
+            return here
+        parent = here.parent
+        if parent == here:  # filesystem root
+            break
+        here = parent
+    return None
+
+
+def _git(args: list[str], cwd: Path) -> tuple[int, str]:
+    """Run a git command in ``cwd``; returns ``(exit_code, stripped_stdout)``.
+
+    No network — caller is expected to use only local-state subcommands
+    (``rev-parse``, ``rev-list``, ``status``). A ``git fetch`` would add
+    seconds to ``oc doctor`` and is intentionally avoided.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+        return result.returncode, result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return -1, ""
+
+
+def _check_source_freshness() -> Check:
+    """Detect "merged but not deployed" — local source tree ≠ origin/main.
+
+    The pip-editable install path binds the ``oc`` binary to a
+    filesystem path, NOT a git branch. When the user merges a PR to
+    GitHub but their local tree is on an old commit (or a feature
+    branch), running ``oc <whatever>`` runs the OLD code. Bugs the user
+    thinks they fixed appear to persist.
+
+    This check compares the source tree's HEAD to the local refs cache
+    for ``origin/main`` and flags drift. Because we don't ``git fetch``,
+    "behind by N" reflects the last fetch — typically minutes-to-hours
+    fresh in active dev. Stale local refs themselves are flagged.
+
+    Status mapping:
+    * ``pass`` — HEAD is at or ahead of origin/main (you have all
+      merged work).
+    * ``warn`` — behind origin/main by ≥1 commit (pull required).
+    * ``warn`` — diverged (custom commits + missing main commits;
+      typical for a feature branch — print fix hint).
+    * ``skip`` — not a git checkout (PyPI install) or git unavailable.
+    """
+    tree = _resolve_source_tree()
+    if tree is None:
+        return Check(
+            "source freshness",
+            "skip",
+            "running from non-git install (PyPI / wheel) — freshness check N/A",
+        )
+
+    rc, _ = _git(["rev-parse", "--git-dir"], tree)
+    if rc != 0:
+        return Check(
+            "source freshness", "skip", f"git unavailable for {tree}"
+        )
+
+    rc_head, head_sha = _git(["rev-parse", "--short=8", "HEAD"], tree)
+    if rc_head != 0 or not head_sha:
+        return Check(
+            "source freshness", "skip", "could not read HEAD"
+        )
+
+    rc_main, main_sha = _git(
+        ["rev-parse", "--short=8", "refs/remotes/origin/main"], tree
+    )
+    if rc_main != 0 or not main_sha:
+        return Check(
+            "source freshness",
+            "warn",
+            f"no origin/main ref found (run `git -C {tree} fetch origin main`); HEAD={head_sha}",
+        )
+
+    if head_sha == main_sha:
+        return Check(
+            "source freshness",
+            "pass",
+            f"HEAD={head_sha} == origin/main (tree={tree})",
+        )
+
+    rc_count, count_out = _git(
+        ["rev-list", "--left-right", "--count", "origin/main...HEAD"], tree
+    )
+    if rc_count != 0:
+        return Check(
+            "source freshness",
+            "warn",
+            f"HEAD={head_sha}, origin/main={main_sha}, drift unknown",
+        )
+
+    parts = count_out.split()
+    if len(parts) != 2:
+        return Check(
+            "source freshness",
+            "warn",
+            f"unexpected rev-list output: {count_out!r}",
+        )
+
+    behind = int(parts[0])
+    ahead = int(parts[1])
+
+    if behind == 0:
+        # Ahead-only: feature branch in progress. Not a drift problem.
+        return Check(
+            "source freshness",
+            "pass",
+            f"HEAD={head_sha} ahead of origin/main by {ahead} commit(s) "
+            f"(feature branch in progress)",
+        )
+
+    # Behind: user has unmerged work in main. This is the case that
+    # bites people. Actionable fix string.
+    fix_hint = (
+        f"`git -C {tree} pull --ff-only origin main` to fast-forward, "
+        "then `pip install -e .` from that tree if your editable install "
+        "lives elsewhere"
+    )
+    return Check(
+        "source freshness",
+        "warn",
+        f"HEAD={head_sha} behind origin/main={main_sha} by {behind} commit(s) "
+        f"(ahead {ahead}). Editable install may run STALE code. Fix: {fix_hint}",
+    )
+
+
+def get_source_version_string() -> str:
+    """Build the long-form version string used by ``oc --version``.
+
+    Format: ``opencomputer X.Y.Z (git: <sha8>[, behind/ahead origin/main: B/A])``
+
+    Falls back to plain ``opencomputer X.Y.Z`` when the install isn't a
+    git checkout, when git isn't on PATH, or when refs aren't readable.
+    Designed to be safe in any install context — never raises.
+    """
+    from opencomputer import __version__
+
+    base = f"opencomputer {__version__}"
+    try:
+        tree = _resolve_source_tree()
+        if tree is None:
+            return base
+
+        rc_head, head_sha = _git(["rev-parse", "--short=8", "HEAD"], tree)
+        if rc_head != 0 or not head_sha:
+            return base
+        suffix = f"git: {head_sha}"
+
+        rc_count, count_out = _git(
+            ["rev-list", "--left-right", "--count", "origin/main...HEAD"],
+            tree,
+        )
+        if rc_count == 0 and count_out:
+            parts = count_out.split()
+            if len(parts) == 2:
+                behind = int(parts[0])
+                ahead = int(parts[1])
+                suffix += f", origin/main behind/ahead: {behind}/{ahead}"
+
+        return f"{base} ({suffix})"
+    except Exception:  # noqa: BLE001 — version string must never raise
+        return base
+
+
 def _check_config() -> tuple[Check, object]:
     from opencomputer.agent.config_store import config_file_path, load_config
 
@@ -157,9 +349,119 @@ def _check_channel_tokens(cfg) -> list[Check]:
         tok = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if tok:
             out.append(Check("telegram token", "pass", "TELEGRAM_BOT_TOKEN set"))
+            out.extend(_check_telegram_polling_conflict())
         else:
             out.append(Check("telegram token", "skip", "TELEGRAM_BOT_TOKEN not set"))
     return out
+
+
+def _check_telegram_polling_conflict() -> list[Check]:
+    """Heuristic check for another process holding the Telegram polling slot.
+
+    Telegram's getUpdates long-poll only delivers each update to ONE
+    polling client per bot token; if a second client connects, both
+    intermittently steal updates from each other. The OC adapter
+    handles this via ``_set_fatal_error(retryable=True)`` after 10
+    consecutive Conflict errors, but the user has no easy way to see
+    "I have two gateways running, that's why my replies aren't going
+    through" except by chasing tracebacks for hours (observed on
+    2026-05-08: 33-hour drainer error loop while Hermes held the slot).
+
+    This check runs ``ps`` and reports any non-self process whose
+    command line matches a known gateway pattern (hermes_cli, opencomputer
+    gateway). It is intentionally a heuristic: env-based bot token
+    sharing can't be detected without elevated permissions, and false
+    positives (different bot tokens, manually launched test daemons)
+    are acceptable since the message is a WARN, not an ERROR.
+    """
+    import re
+    import shutil
+    import subprocess
+
+    if shutil.which("ps") is None:
+        return []
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid,comm,args"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+
+    self_pid = str(os.getpid())
+    suspects: list[tuple[str, str]] = []
+    # Patterns that match KNOWN gateway-style processes that could be
+    # polling the same bot token:
+    #   - hermes_cli / hermes_agent: Hermes daemon
+    #   - opencomputer.*gateway: another OC gateway instance
+    #   - claude-plugins-official/telegram: Claude Code's --channels
+    #     Telegram bridge (a bun process); when started with
+    #     `claude --channels plugin:telegram`, this spawns a server.ts
+    #     that long-polls Telegram with the same TELEGRAM_BOT_TOKEN.
+    #     2026-05-08 incident: ghost bun bridges from prior sessions
+    #     held the slot for hours, OC's adapter spun in conflict-retry
+    #     loops, no Telegram replies. Caught only by lsof; we surface
+    #     here so `oc doctor` is sufficient to find the culprit.
+    pat = re.compile(
+        r"hermes[_-]?cli"
+        r"|hermes[_-]?agent"
+        r"|opencomputer.*gateway"
+        r"|claude-plugins-official/telegram"
+        r"|claude.*channels.*telegram",
+        re.I,
+    )
+    # 2026-05-10 — exclude the canonical launchd-managed gateway from the
+    # "other process" list. The launchd plist always passes ``--headless``
+    # to the gateway entry; a user running ``oc gateway`` interactively
+    # would NOT pass --headless. Treating the launchd gateway as a
+    # "rogue" was the long-running false positive Saksham flagged after
+    # PID 42895 (his old chat session) was killed and the launchd
+    # gateway came online.
+    canonical_gateway_pat = re.compile(
+        r"opencomputer.*--headless.*gateway|--headless.*opencomputer.*gateway",
+        re.I,
+    )
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, _comm, args = parts
+        if pid == self_pid:
+            continue
+        if not pat.search(args):
+            continue
+        if canonical_gateway_pat.search(args):
+            # The launchd-managed gateway is the one that's SUPPOSED to
+            # poll Telegram on this machine — not a competitor.
+            continue
+        suspects.append((pid, args[:100]))
+
+    if not suspects:
+        return [Check(
+            "telegram polling slot",
+            "pass",
+            "no other gateway process detected",
+        )]
+
+    # WARN, not fail: even if another gateway is running, it might
+    # use a DIFFERENT bot token. The user is the only one who knows
+    # for certain. We give them actionable `kill <PID>` lines so a
+    # quick paste into the shell ends the conflict.
+    kill_lines = "\n  ".join(f"kill {pid}  # {args[:60]}" for pid, args in suspects[:5])
+    overflow = ""
+    if len(suspects) > 5:
+        overflow = f"\n  (+{len(suspects) - 5} more — re-run with TELEGRAM_BOT_TOKEN unset to silence)"
+    return [Check(
+        "telegram polling slot",
+        "warn",
+        (
+            f"{len(suspects)} other gateway process(es) running — "
+            f"if any uses the same bot token, only one will receive "
+            f"replies. To stop them:\n  {kill_lines}{overflow}"
+        ),
+    )]
 
 
 def _check_profile_artifacts() -> list[Check]:
@@ -778,6 +1080,110 @@ def _check_voice_mode_capable() -> CheckResult:
     )
 
 
+def _check_wake_word_capable() -> CheckResult:
+    """PR-A Feature 2 — verify openwakeword + onnxruntime install.
+
+    Wake-word is opt-in (default off; ships in the ``[wake]`` extra).
+    The check only verifies that ``openwakeword`` and ``onnxruntime``
+    are importable; it does NOT load all bundled models because that
+    would download weights on first run.
+
+    Returns ``info`` when not installed (opt-in feature; doctor
+    exit-code stays clean), ``ok`` when both are importable, ``warning``
+    when one is half-installed (likely environment corruption).
+    """
+    try:
+        import openwakeword  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=True,
+            level="info",
+            message=(
+                "openwakeword not installed (opt-in via "
+                "`pip install opencomputer[wake]`)"
+            ),
+        )
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "openwakeword installed but onnxruntime missing — "
+                "reinstall with `pip install opencomputer[wake]`"
+            ),
+        )
+    # PR-A Feature 2: actually instantiate the Model. This is the
+    # check that surfaces aarch64 / Apple Silicon ONNX runtime issues
+    # at install time rather than at first wake — the deferred-import
+    # path inside ``opencomputer/voice/wake_word.py::_run_loop`` would
+    # otherwise wait until the user runs ``oc voice wake`` to discover
+    # an environment problem. Failure to init reports as ``warning``
+    # rather than ``error`` because wake-word is opt-in and the user
+    # may never run it.
+    try:
+        from openwakeword.model import Model  # type: ignore[import-untyped]
+        Model()
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                f"openwakeword.Model() init failed on this platform: "
+                f"{type(exc).__name__}: {exc}. "
+                "Wake-word will not work; consider re-installing or "
+                "opening a `oc doctor` issue with the message above."
+            ),
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=(
+            "openwakeword + onnxruntime + Model() init successful"
+        ),
+    )
+
+
+def _check_wake_train_capable() -> CheckResult:
+    """Verify the [wake-train] extra is installable on this platform.
+
+    Imports each training-time dep (torch, openwakeword.train,
+    huggingface_hub, soundfile, piper) and reports info-level if any are
+    missing — training is opt-in like wake-word itself, so a missing
+    dep keeps the doctor exit code clean.
+    """
+    missing: list[str] = []
+    for module_name, hint in (
+        ("torch", "pip install torch>=2.1"),
+        ("openwakeword.train", "pip install 'openwakeword[train]>=0.6'"),
+        ("huggingface_hub", "pip install huggingface_hub>=0.20"),
+        ("soundfile", "pip install soundfile>=0.12"),
+        ("piper", "pip install piper-tts>=1.2"),
+    ):
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(f"{module_name} ({hint})")
+    if missing:
+        return CheckResult(
+            ok=True,
+            level="info",
+            message=(
+                "wake-train deps missing: "
+                + ", ".join(missing)
+                + " — opt in via `pip install opencomputer[wake-train]`"
+            ),
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=(
+            "wake-train deps available — `oc voice train-wake` is ready"
+        ),
+    )
+
+
 def _check_browser_control_capable() -> CheckResult:
     """T1.C (browser-control) — verify Playwright is installed.
 
@@ -1074,9 +1480,17 @@ def _check_service() -> Check:
     if s.running:
         return Check("service", "pass", f"{backend.NAME} running (pid={s.pid})")
     if s.enabled:
-        return Check("service", "warn", f"{backend.NAME} enabled but not running")
+        return Check(
+            "service",
+            "warn",
+            f"{backend.NAME} enabled but not running — run `oc service start` to launch it",
+        )
     if s.file_present:
-        return Check("service", "warn", f"{backend.NAME} file present but not enabled")
+        return Check(
+            "service",
+            "warn",
+            f"{backend.NAME} file present but not enabled — run `oc service install --enable` to activate",
+        )
     return Check("service", "skip", f"{backend.NAME} not installed (run `oc service install`)")
 
 
@@ -1094,6 +1508,11 @@ def run_doctor(fix: bool = False) -> int:
         console.print("[dim]--fix mode: contributions may repair state in place.[/dim]\n")
 
     checks: list[Check] = [_check_python()]
+    # Source freshness — runs early so a stale-tree warning is the FIRST
+    # thing the user sees. Otherwise a user fixes a bug, sees it still
+    # broken, and re-runs doctor expecting an answer; making them scroll
+    # past 30 other checks to find this one defeats the point.
+    checks.append(_check_source_freshness())
     cfg_check, cfg = _check_config()
     checks.append(cfg_check)
 
@@ -1173,6 +1592,18 @@ def run_doctor(fix: bool = False) -> int:
     # stays clean for users who haven't pulled the [browser] extra.
     checks.append(
         _result_to_check("browser-control", _check_browser_control_capable())
+    )
+
+    # PR-A Feature 2 (wake-word) — openwakeword + onnxruntime preflight.
+    # Opt-in via [wake] extra; returns info-level when not installed.
+    checks.append(
+        _result_to_check("wake-word", _check_wake_word_capable())
+    )
+
+    # Custom wake-word training preflight — opt-in via [wake-train] extra.
+    # Returns info-level when the user hasn't installed the heavy deps.
+    checks.append(
+        _result_to_check("wake-train", _check_wake_train_capable())
     )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
@@ -1331,8 +1762,112 @@ def check_macos_screen_recording_permission() -> str:
     )
 
 
+def run_doctor_auth() -> int:
+    """Print credential-pool health for each provider.
+
+    A3 leftover from the 2026-05-06 OpenClaw deep-comparison brief.
+    Without an active gateway/loop the credential pool isn't instantiated,
+    so we surface what we *can* infer from the environment + config:
+
+    * Per-provider env-var key inventory (counts only — never the values).
+    * `config.yaml` ``providers.<name>.keys`` array length when present.
+    * A note that live quarantine state requires a running gateway.
+
+    Returns the number of warning/error rows (0 on a clean check).
+    """
+    import os
+    import re
+
+    from rich.table import Table
+
+    console.print("\n[bold cyan]OpenComputer — Doctor (--auth)[/bold cyan]\n")
+
+    failures = 0
+
+    # Provider env-var families. The patterns below cover the most common
+    # multi-key shapes — single var (FOO_API_KEY), enumerated suffixes
+    # (FOO_API_KEY_1, FOO_API_KEY_2), and pool-style (FOO_KEYS).
+    _env_patterns: list[tuple[str, list[re.Pattern[str]]]] = [
+        (
+            "anthropic",
+            [
+                re.compile(r"^ANTHROPIC_API_KEY$"),
+                re.compile(r"^ANTHROPIC_API_KEY_\d+$"),
+                re.compile(r"^ANTHROPIC_KEYS$"),
+            ],
+        ),
+        (
+            "openai",
+            [
+                re.compile(r"^OPENAI_API_KEY$"),
+                re.compile(r"^OPENAI_API_KEY_\d+$"),
+                re.compile(r"^OPENAI_KEYS$"),
+            ],
+        ),
+        (
+            "openrouter",
+            [
+                re.compile(r"^OPENROUTER_API_KEY$"),
+                re.compile(r"^OPENROUTER_API_KEY_\d+$"),
+                re.compile(r"^OPENROUTER_KEYS$"),
+            ],
+        ),
+    ]
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("provider")
+    table.add_column("keys (env)", justify="right")
+    table.add_column("source")
+    table.add_column("notes")
+
+    for provider, patterns in _env_patterns:
+        matching: list[str] = []
+        for var in os.environ:
+            for pat in patterns:
+                if pat.match(var):
+                    matching.append(var)
+                    break
+        # FOO_KEYS is a comma-separated pool — count its entries.
+        pool_count = 0
+        for var in matching:
+            if var.endswith("_KEYS"):
+                raw = os.environ.get(var, "")
+                pool_count += sum(1 for s in raw.split(",") if s.strip())
+        single_count = sum(1 for v in matching if not v.endswith("_KEYS"))
+        total = pool_count + single_count
+
+        if total == 0:
+            table.add_row(provider, "0", "(none)", "[dim]not configured[/dim]")
+            continue
+
+        notes_parts: list[str] = []
+        if pool_count > 0:
+            notes_parts.append(f"{pool_count} from *_KEYS")
+        if single_count > 0:
+            notes_parts.append(f"{single_count} single var(s)")
+        sources = ", ".join(matching)
+        table.add_row(
+            provider,
+            str(total),
+            sources,
+            "; ".join(notes_parts),
+        )
+
+    console.print(table)
+
+    console.print(
+        "\n[dim]Note:[/dim] live credential-pool quarantine state "
+        "(429/401 cooldowns, JWT expiry, last-rotation timestamps) is only "
+        "available when the gateway is running. Start `oc gateway` and "
+        "use `oc usage` for runtime telemetry.\n"
+    )
+
+    return failures
+
+
 __all__ = [
     "run_doctor",
+    "run_doctor_auth",
     "auth_monitor_once",
     "auth_monitor_loop",
     "check_macos_screen_recording_permission",

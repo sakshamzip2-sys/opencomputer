@@ -123,6 +123,223 @@ class ModelConfig:
 
 _VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
 
+#: Wave 3 — recognized OpenRouter `:nitro` / `:floor` routing suffixes
+#: that translate into ``provider: {sort: ...}`` body overrides. Other
+#: suffixes (e.g. tool-version markers) pass through verbatim.
+_OR_ROUTING_SUFFIXES: frozenset[str] = frozenset({"nitro", "floor"})
+
+#: Wave 3 — recognized HuggingFace Inference Providers routing
+#: suffixes. Per HF's docs, ``:fastest`` / ``:cheapest`` are auto-routed
+#: and a specific provider name (e.g. ``:groq``) pins to that backend.
+#: We don't transform the wire format — HF parses the suffix server-side
+#: when it appears in the ``model`` field. The set is exposed for
+#: client-side validation (warn on typos) and CLI completions.
+_KNOWN_HF_PROVIDERS: frozenset[str] = frozenset(
+    {"groq", "together", "fireworks", "replicate", "sambanova",
+     "hyperbolic", "novita", "cerebras"}
+)
+_HF_ROUTING_SUFFIXES: frozenset[str] = (
+    frozenset({"fastest", "cheapest"}) | _KNOWN_HF_PROVIDERS
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRoutingConfig:
+    """Wave 3 — OpenRouter-style provider routing knobs.
+
+    Configured under ``provider_routing:`` (top-level) in config.yaml.
+    Only meaningful when the active provider is OpenRouter; ignored
+    elsewhere. The :nitro / :floor model-name suffixes override
+    ``sort`` per-call.
+
+    See https://openrouter.ai/docs/provider-routing for upstream
+    semantics. All fields default to OpenRouter's own defaults — no
+    config block at all means no behavior change.
+    """
+
+    sort: str | None = None  # "price" | "throughput" | "latency"
+    only: tuple[str, ...] = ()
+    ignore: tuple[str, ...] = ()
+    order: tuple[str, ...] = ()
+    require_parameters: bool = False
+    data_collection: str | None = None  # "allow" | "deny"
+
+    def to_body_block(self) -> dict | None:
+        """Serialize to the ``provider: {...}`` body block OpenRouter expects.
+
+        Returns None when the config is fully default (so we don't emit
+        an empty ``"provider": {}`` block on every request).
+        """
+        block: dict = {}
+        if self.sort:
+            block["sort"] = self.sort
+        if self.only:
+            block["only"] = list(self.only)
+        if self.ignore:
+            block["ignore"] = list(self.ignore)
+        if self.order:
+            block["order"] = list(self.order)
+        if self.require_parameters:
+            block["require_parameters"] = True
+        if self.data_collection:
+            block["data_collection"] = self.data_collection
+        return block or None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.only, list):
+            object.__setattr__(self, "only", tuple(self.only))
+        if isinstance(self.ignore, list):
+            object.__setattr__(self, "ignore", tuple(self.ignore))
+        if isinstance(self.order, list):
+            object.__setattr__(self, "order", tuple(self.order))
+
+
+def split_or_routing_suffix(model: str) -> tuple[str, str | None]:
+    """Strip a recognized ``:nitro`` / ``:floor`` suffix from ``model``.
+
+    Returns ``(model_without_suffix, suffix_or_none)``. Unknown suffixes
+    (e.g. ``:beta`` on a model name that legitimately uses ``:`` for
+    something else) pass through verbatim — only the recognized set is
+    consumed.
+    """
+    if ":" not in model:
+        return model, None
+    prefix, _, suffix = model.rpartition(":")
+    if suffix in _OR_ROUTING_SUFFIXES:
+        return prefix, suffix
+    return model, None
+
+
+def split_hf_routing_suffix(model: str) -> tuple[str, str | None]:
+    """Strip a recognized HuggingFace routing suffix from ``model``.
+
+    Returns ``(model_without_suffix, suffix_or_none)``. Unknown suffixes
+    pass through verbatim. Caller decides whether to put the suffix
+    back on (HF's API parses it server-side) or use the known suffix
+    set for validation / CLI completion.
+    """
+    if ":" not in model:
+        return model, None
+    prefix, _, suffix = model.rpartition(":")
+    if suffix in _HF_ROUTING_SUFFIXES:
+        return prefix, suffix
+    return model, None
+
+
+@dataclass(frozen=True, slots=True)
+class CustomProviderModelOverride:
+    """Per-model override carried under ``custom_providers[].models[<id>]``.
+
+    Both fields are optional. When set, they take precedence over the
+    enclosing ``CustomProvider`` defaults / global resolution chain.
+
+    * ``context_length`` — manual context-window size in tokens; bypasses
+      the cached + probed lookup chain in ``compaction.resolve_context_length``.
+    * ``timeout_seconds`` — per-model HTTP timeout override; falls back to
+      the enclosing ``CustomProvider.request_timeout_seconds``.
+    """
+
+    context_length: int | None = None
+    timeout_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FallbackProvider:
+    """Wave 3 (2026-05-08) — one entry in a cross-provider fallback chain.
+
+    Configured under top-level ``fallback_providers:`` in config.yaml as
+    a list. ``provider`` is either a bundled provider name
+    (``openrouter`` / ``anthropic`` / ``openai`` / ...) or
+    ``custom:<name>`` referencing an entry under ``custom_providers:``.
+
+    Activates at most once per user turn — the primary is restored on
+    the next user message — so a provider-wide rate limit doesn't
+    persist as a permanent silent re-route.
+    """
+
+    provider: str = ""
+    model: str = ""
+    base_url: str | None = None
+    key_env: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CustomProvider:
+    """A user-defined OpenAI-compatible (or Anthropic-compatible) endpoint.
+
+    Configured under top-level ``custom_providers:`` in ``config.yaml``.
+    Used via ``/model custom:<name>:<model_id>`` mid-session, or by setting
+    the model resolver's provider hint to ``custom:<name>``.
+
+    ``api_mode``:
+    - ``"auto"`` (default) probes the endpoint's ``/v1/models`` once on
+      first use and caches the inferred shape (openai vs anthropic).
+    - ``"openai"`` / ``"anthropic"`` skip the probe.
+
+    ``api_key`` (inline) wins over ``key_env`` (env var name lookup).
+    Missing both = no auth header (acceptable for local servers).
+    """
+
+    name: str = ""
+    base_url: str = ""
+    api_key: str | None = None
+    key_env: str | None = None
+    api_mode: str = "auto"
+    request_timeout_seconds: float = 60.0
+    models: dict[str, CustomProviderModelOverride] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.api_mode not in _VALID_API_MODES:
+            raise ValueError(
+                f"api_mode must be one of {sorted(_VALID_API_MODES)!r}, "
+                f"got {self.api_mode!r}"
+            )
+        if self.request_timeout_seconds <= 0:
+            raise ValueError(
+                "request_timeout_seconds must be > 0, "
+                f"got {self.request_timeout_seconds}"
+            )
+        # YAML auto-parser delivers ``models`` as dict-of-dict; convert
+        # each value to ``CustomProviderModelOverride`` so callers get a
+        # uniform type. Frozen+slots requires ``object.__setattr__``.
+        # We deliberately use duck-typing rather than a strict
+        # ``isinstance(..., CustomProviderModelOverride)`` check: in some
+        # CI ordering this dataclass gets module-reloaded and class
+        # identity drifts (a perfectly valid override object then fails
+        # isinstance against the *current* class). Duck-typing works in
+        # both regimes; bad shapes still fail later when callers access
+        # ``.context_length`` / ``.timeout_seconds``.
+        converted: dict[str, CustomProviderModelOverride] = {}
+        changed = False
+        for key, value in self.models.items():
+            if isinstance(value, dict):
+                converted[key] = CustomProviderModelOverride(**value)
+                changed = True
+            else:
+                converted[key] = value
+        if changed:
+            object.__setattr__(self, "models", converted)
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationConfig:
+    """Hermes-parity (2026-05-08) subagent model/provider override.
+
+    All ``None`` (default) means subagents inherit the parent loop's
+    provider + model + credentials. Set any field to override. Useful
+    when delegating cheap work to a smaller/faster model — e.g.,
+    ``DelegationConfig(model="gemini-2.5-flash", provider="openrouter")``.
+    """
+
+    model: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class LoopConfig:
@@ -162,6 +379,31 @@ class LoopConfig:
     max_delegation_depth: int = 4  # 2026-05-05: doubled 2 → 4
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
     Mirrors Hermes `MAX_DEPTH = 2` from `sources/hermes-agent/tools/delegate_tool.py`."""
+    # Hermes parity (2026-05-08): batch concurrency + idle watchdog.
+    max_concurrent_children: int = 3
+    """Cap on concurrent subagents per ``delegate(tasks=[...])`` batch.
+
+    Override via ``DELEGATION_MAX_CONCURRENT_CHILDREN`` env var. Batches
+    larger than this return a tool error rather than silently truncating.
+    Hermes parity with ``delegation.max_concurrent_children``."""
+    child_timeout_seconds: int = 600
+    """Wall-clock cap on a single subagent's lifetime (seconds).
+
+    Hermes spec describes this as an idle watchdog (resets on each API/tool
+    call). v1 ships it as a wall-clock timeout — simpler, fail-safe.
+    Convert to per-activity reset when the child loop's tool/API hooks are
+    exposed. Diagnostic log written to
+    ``<profile_home>/logs/subagent-timeout-<ts>.log`` on expiry."""
+    # Hermes parity (2026-05-08): nested orchestrator + delegation override.
+    orchestrator_enabled: bool = True
+    """Master switch for ``role="orchestrator"`` delegations. When False,
+    every child is forced to leaf (cannot delegate further) regardless of
+    the caller's role argument. Hermes parity with
+    ``delegation.orchestrator_enabled``."""
+    delegation: DelegationConfig = field(default_factory=lambda: DelegationConfig())
+    """Subagent model/provider override. None values inherit parent.
+
+    Hermes parity with ``delegation.{model,provider,base_url,api_key}``."""
     context_engine: str = "compressor"
     """Tier-A item 10 — which :class:`ContextEngine` strategy the loop uses.
     ``"compressor"`` is the default (existing CompactionEngine, aux-LLM
@@ -229,13 +471,17 @@ class MemoryConfig:
     typical Anthropic prompt cache breakpoints. Provider implementations
     SHOULD respect this; bridge truncates if they don't.
     PR-6 of 2026-04-25 Hermes parity plan."""
-    # Round 2A P-18 — episodic-memory dreaming. EXPERIMENTAL. OFF by default.
+    # Round 2A P-18 — episodic-memory dreaming. ON by default (2026-05-10).
     # When enabled, an isolated lightweight LLM turn periodically clusters
     # recent episodic events and writes a per-cluster consolidation summary
     # back to episodic_events. Manual trigger: `opencomputer memory dream-now`.
-    # Auto trigger: `opencomputer memory dream-on --interval daily|hourly` —
-    # consult docs/memory_dreaming.md before promoting to default.
-    dreaming_enabled: bool = False
+    # Auto trigger: `opencomputer memory dream-on --interval daily|hourly`.
+    # Default-on aligns with the Honcho-as-default memory stance — the
+    # consolidation step is what makes long-running episodic memory useful
+    # rather than just an append-only log. Opt out with
+    # ``opencomputer memory dream-off`` or ``memory.dreaming_enabled: false``
+    # in config.yaml.
+    dreaming_enabled: bool = True
     """When True, ``opencomputer memory dream-now`` (and any future
     scheduler) consolidates recent episodic-memory entries into per-cluster
     summaries. Originals stay readable but get tagged with a
@@ -256,6 +502,44 @@ class MemoryConfig:
     OFF — opt-in via config.yaml::memory.active_memory_enabled = true."""
     active_memory_top_n: int = 3
     """Cap on combined episodic + message hits prepended."""
+
+    # v1.1 plan-3 M6.3 — MEMORY.md hybrid retrieval (BM25 + vector via RRF).
+    # Distinct from active_memory_enabled above which retrieves from
+    # SessionDB FTS5; this one retrieves from MEMORY.md (the declarative
+    # markdown file).  Both can be enabled simultaneously.
+    memory_md_retrieval_enabled: bool = True
+    """When True, the agent loop runs hybrid BM25+vector retrieval over
+    MEMORY.md before each turn and appends a system-prompt block with
+    the top-K most relevant entries.  Composes with Honcho prefetch and
+    the FTS5 active-memory layer.  Default ON: it is graceful (skips
+    silently when MEMORY.md is empty / no embedding provider available)
+    and the upside (the agent recalls user-stated preferences across
+    sessions) is the headline reason MEMORY.md exists."""
+    memory_md_retrieval_top_k: int = 5
+    """Number of fused hits returned per turn from MEMORY.md retrieval."""
+    memory_md_retrieval_per_source_k: int = 20
+    """Per-source recall before RRF fusion.  Higher values give RRF more
+    candidates to combine; production tuning has shown ~20 is the
+    sweet-spot for MEMORY.md sizes seen in practice (≤256 entries)."""
+
+    # v1.1 plan-3 M6.4 — Dreaming v2 three-gate consolidation INTO MEMORY.md.
+    # Distinct from `dreaming_enabled` above (Round 2A P-18 in-DB
+    # episodic clustering).  ON by default (2026-05-10) — same rationale as
+    # v1: consolidation is what makes the episodic store useful long-term.
+    # Opt out with ``opencomputer memory dream-v2-off`` or
+    # ``memory.dreaming_v2_enabled: false`` in config.yaml.
+    dreaming_v2_enabled: bool = True
+    """When True, ``opencomputer.cron.dreaming_v2_tick.run_dreaming_v2_tick``
+    fires inside the system cron tick and ``oc memory dream-v2`` is wired
+    to the same engine.  Promotes high-signal episodic events into
+    MEMORY.md via the score / recall-count / diversity gates."""
+    dreaming_v2_score_threshold: float = 0.65
+    dreaming_v2_min_recall_count: int = 2
+    dreaming_v2_diversity_threshold: float = 0.8
+    dreaming_v2_max_promotions_per_run: int = 20
+    dreaming_v2_dreams_md_max_bytes: int = 16384
+    dreaming_v2_candidate_fetch_limit: int = 50
+    """How many recent un-dreamed episodic events to score per tick."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +569,128 @@ class HookCommandConfig:
     command: str = ""  # shell command to run (env-var substitution allowed)
     matcher: str | None = None  # regex over tool name (PreToolUse / PostToolUse only)
     timeout_seconds: float = 10.0
-    # "type": only "command" is supported (no LLM-prompt hooks yet)
+    # "type": "command" entries land here; "prompt" entries land in HookPromptConfig.
+
+
+@dataclass(frozen=True, slots=True)
+class HookPromptConfig:
+    """One LLM-prompt hook entry declared in config.yaml (v1.1 plan-2 M8.1).
+
+    Settings-declared hook that asks an aux-LLM whether a tool call /
+    user message / etc should be allowed. The user writes a system prompt
+    describing the policy; on each event fire we render the
+    :class:`HookContext` into a user message, call the aux-LLM, parse the
+    response and turn it into a :class:`HookDecision`.
+
+    The settings-format block looks like::
+
+        hooks:
+          PreToolUse:
+            - type: prompt
+              matcher: "Bash"
+              system: |
+                Rate the danger of this Bash command on a 1-10 scale.
+                Reply with one line: "block: <reason>" or "allow".
+              model: auto       # use cheap-route default
+              returns: allow_block
+              timeout_seconds: 5
+              token_budget_input: 500
+              token_budget_output: 100
+
+    Attributes:
+        event: Hook event name (must match ``HookEvent`` enum).
+        system: System prompt sent to the aux-LLM. The user's task /
+            tool call / message is inlined as the user message.
+        model: Aux-LLM model id, or the literal ``"auto"`` to defer to
+            the existing cheap-route picker. Empty string == ``"auto"``.
+        returns: ``"allow_block"`` (default) → response is parsed for
+            an ``allow``/``block`` token. ``"score"`` → response is
+            expected to contain a numeric risk score and the threshold
+            in ``score_threshold`` decides allow vs block.
+        matcher: Optional regex over tool name (Pre/PostToolUse only).
+        timeout_seconds: Wall-clock cap; exceeded → fail-open + warn.
+        token_budget_input: Estimated-input cap; exceeded → refuse to
+            invoke the LLM and fail-open + warn.
+        token_budget_output: Output max_tokens cap on the LLM call.
+        score_threshold: Used only when ``returns="score"``. Score
+            >= threshold → block.
+    """
+
+    event: str = ""
+    system: str = ""
+    model: str = "auto"
+    returns: str = "allow_block"  # "allow_block" | "score"
+    matcher: str | None = None
+    timeout_seconds: float = 5.0
+    token_budget_input: int = 500
+    token_budget_output: int = 100
+    score_threshold: float = 7.0
+
+
+@dataclass(frozen=True, slots=True)
+class HookAgentConfig:
+    """One subagent-spawning hook entry declared in config.yaml (v1.1 plan-2 M8.2).
+
+    Settings-declared hook that delegates the decision to a fresh
+    subagent via :class:`opencomputer.tools.delegate.DelegateTool` with
+    an opt-in filesystem sandbox (``isolation="copy"`` by default — see
+    :class:`HookCommandConfig` for the shell-out alternative).
+
+    Compared to ``type: prompt`` (single aux-LLM call) this is heavier
+    but more capable: the spawned child can run tools (Read / Grep /
+    Bash via its allowlist) before returning a decision, which lets the
+    hook reason over actual file contents instead of only the rendered
+    HookContext.
+
+    Settings-format block::
+
+        hooks:
+          PreToolUse:
+            - type: agent
+              matcher: "Bash"
+              prompt: |
+                Inspect the proposed Bash command. If it would
+                permanently delete data or send credentials over the
+                wire, reply "block: <reason>". Otherwise reply "allow".
+              agent: code-reviewer       # registered AgentTemplate name
+              isolation: copy            # "none" | "worktree" | "copy"
+              max_turns: 5
+              timeout_seconds: 60
+              returns: allow_block       # or "structured"
+
+    Hard caps default to 5 turns, 60-second wall-clock, 5,000 total
+    tokens. Exceeding any cap fails-open with a logged warning, matching
+    the shell-hook + prompt-hook contract: an advisory hook must never
+    wedge the loop.
+
+    Attributes:
+        event: Hook event name (must match ``HookEvent`` enum).
+        prompt: User message handed to the spawned subagent.
+        agent: Optional registered :class:`AgentTemplate` name. Empty
+            string == default delegate behaviour (no template).
+        isolation: ``"none"`` / ``"worktree"`` / ``"copy"``. Default
+            ``"copy"`` so an ill-behaved hook subagent can't trash the
+            parent's tree.
+        returns: ``"allow_block"`` (default) parses for an
+            ``allow``/``block`` token in the subagent's final message.
+            ``"structured"`` returns the subagent's full text as the
+            decision reason — caller treats any non-empty response as
+            advisory pass.
+        matcher: Optional regex over tool name (Pre/PostToolUse only).
+        max_turns: Iteration cap on the spawned child loop.
+        timeout_seconds: Wall-clock cap on the entire hook call.
+        token_budget_total: Estimated combined cap; exceeded → refuse.
+    """
+
+    event: str = ""
+    prompt: str = ""
+    agent: str = ""
+    isolation: str = "copy"  # "none" | "worktree" | "copy"
+    returns: str = "allow_block"  # "allow_block" | "structured"
+    matcher: str | None = None
+    max_turns: int = 5
+    timeout_seconds: float = 60.0
+    token_budget_total: int = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +711,43 @@ class MCPServerConfig:
     env: dict[str, str] = field(default_factory=dict)  # for stdio: env vars
     headers: dict[str, str] = field(default_factory=dict)  # for sse/http: HTTP headers (auth)
     enabled: bool = True
+    #: Wave 3 (2026-05-08) — per-server tool whitelist. ``None`` (the
+    #: default) means no filter — every tool the server publishes is
+    #: registered. An EMPTY tuple means deny-all (the server stays
+    #: connected for resources / prompts but contributes zero tools);
+    #: this is the intuitive reading of "the allow-list is empty".
+    tools_allow: tuple[str, ...] | None = None
+    #: Wave 3 (2026-05-08) — per-server tool blacklist. Applied AFTER
+    #: ``tools_allow``. Default empty tuple = no exclusions.
+    tools_deny: tuple[str, ...] = ()
+    #: Hermes parity G9 (2026-05-09) — suppress per-server MCP prompt
+    #: utility tools (``<server>__list_prompts`` / ``__get_prompt``).
+    #: Default ``True`` keeps every utility tool the server publishes;
+    #: setting ``False`` drops just the prompt utility tools.
+    prompts_enabled: bool = True
+    #: Hermes parity G9 (2026-05-09) — suppress per-server MCP resource
+    #: utility tools (``<server>__list_resources`` / ``__read_resource``).
+    resources_enabled: bool = True
+    #: Hermes parity G10 (2026-05-09) — per-server tool-call timeout (s).
+    #: Wraps ``ClientSession.call_tool`` with ``asyncio.wait_for``. The
+    #: 30 s default matches Hermes spec; lower values catch hung MCP
+    #: tools before they wedge the agent loop.
+    timeout: float = 30.0
+    #: Initial-connect timeout (s). Applies to the ``stdio_client`` /
+    #: ``streamablehttp_client`` / ``sse_client`` connect path. Same
+    #: 30 s default; lower values fail-fast a slow remote MCP host.
+    connect_timeout: float = 30.0
+
+    def __post_init__(self) -> None:
+        # YAML auto-parser delivers list-typed fields as Python ``list``;
+        # we keep them as ``tuple`` for hashability + the frozen-dataclass
+        # contract. The auto-parser already tuplifies fields whose default
+        # is a tuple (``args``, ``tools_deny``), but a default of ``None``
+        # bypasses that path — convert here.
+        if isinstance(self.tools_allow, list):
+            object.__setattr__(self, "tools_allow", tuple(self.tools_allow))
+        if isinstance(self.tools_deny, list):
+            object.__setattr__(self, "tools_deny", tuple(self.tools_deny))
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +783,31 @@ class MCPConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MCPSamplingCaps:
+    """Hermes parity G11 (2026-05-09) — per-server sampling caps.
+
+    Bounds applied when an MCP server uses ``sampling/createMessage`` to
+    reach back into Hermes' LLM. Without caps, a server could trivially
+    exhaust the operator's quota (high ``maxTokens``, runaway multi-turn)
+    or pick a more expensive model than the operator intends.
+
+    * ``max_tokens_cap`` — clip ``params.maxTokens`` to this ceiling.
+    * ``max_rpm`` — soft per-server RPM throttle (token-bucket; warn).
+    * ``max_tool_rounds`` — cap on multi-turn tool-use rounds within
+      one sampling request (reserved; enforcement deferred to the
+      sampling-loop driver when added).
+    * ``allowed_models`` — when non-empty, reject any request whose
+      ``modelPreferences.hints[*].name`` is outside the list. Empty
+      tuple means "no model restriction".
+    """
+
+    max_tokens_cap: int = 4096
+    max_rpm: int = 60
+    max_tool_rounds: int = 5
+    allowed_models: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class WebSearchConfig:
     """Per-tool config for the WebSearch tool (Phase 12d.2).
 
@@ -371,6 +838,32 @@ class ToolsConfig:
     #: also call :meth:`ToolRegistry.is_denied` BEFORE construction to
     #: skip the factory work entirely.
     deny: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CronConfig:
+    """Cron-job behavior config (Hermes parity, 2026-05-08).
+
+    Attributes:
+        wrap_response: When True, wraps the delivered response with the
+            Markdown header (job name, run time, schedule) — matches what
+            ``save_job_output`` already saves to the output file. When False
+            (OC default), delivers the agent's raw response text only.
+
+            Note: this default DIFFERS from Hermes's ``wrap_response: true``
+            default. The OC default preserves existing behavior — cron
+            jobs have always delivered raw text. Users who want the
+            Hermes-style header/footer wrap can opt in via:
+              cron:
+                wrap_response: true
+        script_timeout_seconds: Default timeout for ``--no-agent`` script
+            jobs (seconds). Per-job override via the
+            ``script_timeout_seconds`` kwarg on ``create_job``. Hermes
+            parity with ``cron.script_timeout_seconds``. Default 120.
+    """
+
+    wrap_response: bool = False
+    script_timeout_seconds: int = 120
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,6 +954,68 @@ class GatewayConfig:
     startup_ping_chats: tuple[tuple[str, str], ...] = ()
     startup_ping_message: str = "OpenComputer back online"
 
+    # ─── Channel ownership preflight (2026-05-08) ──────────────────────
+    # OpenComputer is the SOLE channel handler for this user (per the
+    # 2026-05-08 directive — see memory/user_oc_owns_all_channels.md).
+    # When ``takeover_on_start = true``, the gateway terminates any
+    # competing process found at startup (Claude Code Telegram bridge,
+    # Hermes daemon, rival ``oc gateway``, etc.) before connecting any
+    # adapter. When ``false`` (default), competitors cause a loud refusal
+    # — the gateway logs the offending PID + cmdline, declines to start,
+    # and tells the user to either kill the competitor or pass
+    # ``--force-takeover`` once.
+    #
+    #   gateway:
+    #     takeover_on_start: true
+    #
+    # ``takeover_grace_seconds`` is the window we wait for SIGTERM to
+    # land cleanly before escalating to SIGKILL. Default 5s matches
+    # ``oc service stop``'s expectation; raise it for slow-shutdown
+    # processes.
+    takeover_on_start: bool = False
+    takeover_grace_seconds: float = 5.0
+
+    # ─── Lifecycle reactions (2026-05-08) ──────────────────────────────
+    # When True, the dispatcher fires ``adapter.on_processing_start`` →
+    # 👀 reaction on the user's message when the agent picks it up, then
+    # ``adapter.on_processing_complete`` → ✅ on success / ❌ on failure
+    # when the turn ends. Hermes-style "I'm thinking" indicator.
+    #
+    # Default False because:
+    #   1. Per the 2026-05-08 ``user_oc_owns_all_channels.md`` directive,
+    #      Saksham wants plain-text only — no emojis, no decorative
+    #      reactions.
+    #   2. Telegram clients render reactions inline next to the user's
+    #      sent message, which can read like the bot is replying with an
+    #      emoji even when the actual reply text is plain. This was the
+    #      2026-05-08 "bot keeps responding with eye emoji" complaint.
+    #
+    # Users who DO want the lifecycle indicator can opt in via:
+    #
+    #   gateway:
+    #     lifecycle_reactions: true
+    lifecycle_reactions: bool = False
+
+    # ─── Per-platform session reset (PR-1, 2026-05-08) ────────────────
+    # Hermes-spec parity: drop a chat's session_id under inactivity / daily
+    # crossings so a "fresh chat each morning" UX is the default. Per-platform
+    # overrides via ``reset_by_platform`` carry tuned thresholds (e.g., Slack
+    # channels reset more aggressively than 1:1 Telegram chats).
+    #
+    # Configure via ~/.opencomputer/<profile>/config.yaml:
+    #
+    #   gateway:
+    #     reset_mode: both          # off | daily | idle | both
+    #     reset_daily_at_hour: 4    # UTC hour 0–23
+    #     reset_idle_minutes: 1440  # 24h
+    #     reset_by_platform:
+    #       telegram: { mode: idle, idle_minutes: 240 }
+    #       discord:  { mode: idle, idle_minutes: 60 }
+    reset_mode: str = "both"
+    reset_daily_at_hour: int = 4
+    reset_idle_minutes: int = 1440
+    reset_by_platform: dict = field(default_factory=dict)
+
 
 @dataclass(frozen=True, slots=True)
 class DeepeningConfig:
@@ -495,6 +1050,317 @@ class DeepeningConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorktreeConfig:
+    """Config for the ``oc code -w`` worktree machinery + ``.worktreeinclude``.
+
+    ``.worktreeinclude`` (a gitignore-style file at repo root) tells the
+    ``session_worktree`` helper which gitignored files to copy into the
+    fresh worktree so the agent isn't dropped into a worktree that's
+    missing .env / .venv / node_modules.
+    """
+
+    #: Hard cap on total bytes copied across all .worktreeinclude entries.
+    #: Exceeding this aborts the worktree session with a clear error.
+    include_max_total_mb: int = 1000
+
+    #: Per-file warning + skip threshold. Files above this are NOT
+    #: copied; a warning is logged. Other files in the same source set
+    #: are still copied.
+    include_max_per_file_mb: int = 500
+
+    #: If True, after reading <repo_root>/.worktreeinclude also read
+    #: <profile_home>/worktreeinclude (no leading dot, since it lives in
+    #: the OC home itself). Patterns are unioned with project-precedence
+    #: on duplicates.
+    include_global_fallback: bool = True
+
+    #: Default mirrors git's worktree behavior: a symlink in the source
+    #: is copied AS a symlink (not dereferenced).
+    include_follow_symlinks: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointsConfig:
+    """Config for the RewindStore checkpoint hygiene system.
+
+    Backs the ``auto_checkpoint`` PreToolUse hook in the coding-harness
+    extension and the user-facing ``oc checkpoints status/prune/clear``
+    CLI.
+    """
+
+    #: Master switch. If False, auto-prune never fires and the CLI
+    #: prints a banner noting it's disabled in config (commands still
+    #: run).
+    enabled: bool = True
+
+    #: Per-session snapshot count cap. Prune drops oldest above this.
+    max_snapshots: int = 50
+
+    #: Cross-session global size cap in MB. Prune drops oldest until
+    #: aggregate size is under cap.
+    max_total_size_mb: int = 1000
+
+    #: Files exceeding this size are EXCLUDED from new checkpoints
+    #: (recorded in Checkpoint.excluded_files for visibility).
+    max_file_size_mb: int = 50
+
+    #: If True, the auto_checkpoint hook also schedules a background
+    #: prune sweep on first fire per process (subject to
+    #: min_interval_hours).
+    auto_prune: bool = True
+
+    #: Age-based eviction policy: drop checkpoints older than this.
+    retention_days: int = 30
+
+    #: Minimum interval between auto-prune sweeps (per store). Enforced
+    #: via .last_prune mtime.
+    min_interval_hours: int = 24
+
+    #: If True, prune removes checkpoint dirs whose meta.json is missing
+    #: or malformed.
+    delete_orphans: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class GoalsConfig:
+    """Persistent-goal (Ralph loop) tunables.
+
+    Spec: docs/superpowers/specs/2026-05-08-kanban-goals-v2-design.md §3.
+    """
+
+    #: Maximum number of continuation turns the loop may inject before
+    #: auto-pausing. Hit this and the user sees a "⏸ Goal paused" banner.
+    max_turns: int = 20
+
+
+@dataclass(frozen=True, slots=True)
+class GoalJudgeConfig:
+    """Auxiliary judge-model override for the goal Ralph loop.
+
+    When both fields are unset (``None``), :func:`opencomputer.agent.goal.
+    _call_judge_model` falls back to the chat provider via
+    :func:`opencomputer.agent.aux_llm.complete_text`. Setting both routes
+    the judge through the named registered provider, which lets users
+    aim a cheap-but-capable model (e.g. ``google/gemini-3-flash-preview``)
+    at the gate without affecting the main chat model.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolClassifierConfig:
+    """Auxiliary classifier-model override for v1.1 plan-3 M9.2.
+
+    The :class:`opencomputer.agent.tool_call_classifier.ToolCallClassifier`
+    runs in auto mode (``permission_mode=auto``) before the F1 ConsentGate
+    on every tool call. With both fields unset (the default) the
+    classifier falls back to the chat provider via
+    :func:`opencomputer.agent.aux_llm.complete_text` — same plumbing the
+    goal judge uses.
+
+    Setting both routes the classifier through a dedicated provider —
+    typically a cheap-but-capable model (e.g. a small Anthropic Haiku or
+    OpenAI GPT-4o-mini) so the per-tool-call latency cost stays bounded.
+    Spend is tracked separately in :func:`opencomputer.agent.usage_pricing`
+    so ``oc usage`` shows classifier cost as its own line.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+    #: Hard ceiling on classifier wall-clock latency per call. The
+    #: classifier fail-closes (treats the tool call as ``BLOCK``) if this
+    #: timeout fires, so a wedged auxiliary provider can't waste a
+    #: slow-classifier budget OR silently fall through to ALLOW. Default
+    #: 8s — enough for Haiku-scale models on Anthropic, fast enough that
+    #: an interactive user notices instead of waiting forever.
+    timeout_seconds: float = 8.0
+    #: Hard cap on classifier output tokens. The decision is a single
+    #: token plus a short rationale; 256 leaves slack for verbose models
+    #: without burning quota on runaway generations.
+    max_tokens: int = 256
+
+
+@dataclass(frozen=True, slots=True)
+class AuxiliaryConfig:
+    """Bundle of auxiliary-model overrides. Goal judge is the first slot."""
+
+    goal_judge: GoalJudgeConfig = field(default_factory=GoalJudgeConfig)
+    #: v1.1 plan-3 M9.2 — auto-mode tool-call classifier knobs. Defaults
+    #: leave the feature dormant until the user opts into auto mode AND
+    #: the classifier has a registered provider available.
+    tool_classifier: ToolClassifierConfig = field(default_factory=ToolClassifierConfig)
+
+
+@dataclass(frozen=True, slots=True)
+class CodeExecutionConfig:
+    """Settings for the ExecuteCode / PythonExec tool family.
+
+    Hermes Doc-2 parity (2026-05-08). All fields optional; defaults match
+    the Hermes reference doc values:
+
+    * ``timeout_seconds`` — wallclock cap per script (Hermes default 300).
+      Must be > 0; ValueError raised on construction otherwise so a bad
+      config.yaml fails loudly at load time rather than silently bricking
+      ExecuteCode at first use.
+    * ``max_tool_calls`` — RPC call cap per script (Hermes default 50).
+      Must be > 0. Closes the silent footgun where a buggy
+      ``while True: read_file()`` script could consume API quota until the
+      timeout fired (the cap was previously hardcoded — not configurable).
+    * ``terminal`` — pre-existing free-form dict slot. Honours
+      ``terminal.env_passthrough`` (list[str]) — env var names whose
+      values pass through to the subprocess despite the KEY/TOKEN/SECRET/
+      PASSWORD/CREDENTIAL/PASSWD/AUTH scrub.
+    """
+
+    timeout_seconds: float = 300.0
+    max_tool_calls: int = 50
+    terminal: dict[str, object] = field(default_factory=dict, compare=False, hash=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.timeout_seconds, int | float) or self.timeout_seconds <= 0:
+            raise ValueError(
+                f"code_execution.timeout_seconds must be > 0; "
+                f"got {self.timeout_seconds!r}"
+            )
+        if not isinstance(self.max_tool_calls, int) or self.max_tool_calls <= 0:
+            raise ValueError(
+                f"code_execution.max_tool_calls must be a positive int; "
+                f"got {self.max_tool_calls!r}"
+            )
+
+
+# ─── v1.1 plan-3 M10 — per-channel routing ────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingMatch:
+    """Match-criteria for a single :class:`RoutingRule`.
+
+    Each non-empty field tightens the match. The dispatcher resolves the
+    most-specific-wins precedence chain (see
+    :func:`opencomputer.agent.routing.resolve_routing_rule`):
+
+        exact peer → parent peer → guild + roles → guild → team →
+        account → channel → default
+
+    All fields default to empty string so authors only set the dimensions
+    that matter for a given rule. Unset fields are wildcards.
+    """
+
+    platform: str = ""
+    """Match :attr:`MessageEvent.platform.value` (e.g. "slack", "telegram")."""
+
+    chat_id: str = ""
+    """Exact peer / chat / DM identifier (highest precedence)."""
+
+    channel: str = ""
+    """Slack / Discord channel name (e.g. "#security-alerts")."""
+
+    guild: str = ""
+    """Discord guild / server id (or Slack workspace, Matrix server)."""
+
+    team: str = ""
+    """Slack team / Matrix room namespace."""
+
+    account: str = ""
+    """Bot / app account id (when one daemon serves several bots)."""
+
+    role: str = ""
+    """Discord member role (must match a role on the inbound user)."""
+
+    peer: str = ""
+    """Alias for :attr:`chat_id` mirroring OpenClaw's vocabulary.
+
+    Authors typically set one or the other; both are honored at match
+    time so config copy-pasted from OpenClaw works without renaming.
+    """
+
+    def __post_init__(self) -> None:
+        # Normalize to non-leading-hash channel form so "#foo" matches "foo"
+        # and vice versa (Slack vs Discord vs Matrix conventions diverge).
+        if self.channel.startswith("#"):
+            object.__setattr__(self, "channel", self.channel.lstrip("#"))
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingRule:
+    """One routing rule — a match criterion + an agent template binding.
+
+    ``profile`` is optional cross-profile re-bind (M10.3 — not used by
+    M10.1's schema layer; recorded so the rule round-trips through YAML).
+    """
+
+    match: RoutingMatch = field(default_factory=RoutingMatch)
+    agent: str = ""
+    profile: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.agent:
+            raise ValueError("routing rule missing required `agent` field")
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingDefault:
+    """Fallback when no rule matches.
+
+    Same shape as a rule's tail (``agent`` + optional ``profile``) but no
+    ``match`` block — it always fires when the rule list is exhausted.
+    """
+
+    agent: str = "default"
+    profile: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingConfig:
+    """Per-channel routing rules — top-level ``routing:`` config block.
+
+    Rules are evaluated in order; the first match wins. Within a single
+    rule, the :class:`RoutingMatch` block fully constrains the match —
+    every set field must match the inbound :class:`MessageEvent`.
+
+    Most-specific-wins is enforced by sorting rules at parse time using
+    :func:`_specificity` so authors can list rules in any order without
+    a less-specific rule eclipsing a more-specific one.
+    """
+
+    rules: tuple[RoutingRule, ...] = ()
+    default: RoutingDefault = field(default_factory=RoutingDefault)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptConfig:
+    """System-prompt augmentation knobs.
+
+    Today: pinned files only (Optimize Grade E mitigation, 2026-05-10).
+    Future slots — fixed-blocks injection, persona cap overrides, etc.
+    — go here so cross-cutting prompt config doesn't sprawl across the
+    Config root.
+
+    ``pinned_files`` is the active list of paths whose CONTENTS get
+    inlined into the system prompt at session start. Each path is read
+    fresh per session (so edits propagate) but never re-read mid-session
+    via the ``Read`` tool — that's the cost win.
+
+    Default is empty: feature is opt-in via ``oc pin <path>`` or by
+    editing config.yaml directly. Wire-in is non-fatal: a missing /
+    unreadable file is logged at WARNING and skipped.
+
+    ``max_total_bytes`` caps the combined size of all pinned files. The
+    cap exists to prevent runaway prompt growth — Optimize Grade E
+    flagged 5 files of ~250KB each, which would blow context budgets if
+    pinned naively. With the cap, the pinning machinery stops appending
+    once the limit is hit and warns about which files were truncated /
+    dropped, so the operator can prune the list.
+    """
+
+    pinned_files: tuple[str, ...] = ()
+    max_total_bytes: int = 200_000  # ~50k tokens at 4 bytes/token
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -508,15 +1374,91 @@ class Config:
     deepening: DeepeningConfig = field(default_factory=DeepeningConfig)
     #: Gateway daemon tunables — primarily the photo-burst window today.
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    #: 2026-05-08 — `.worktreeinclude` for `oc code -w`.
+    worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
+    #: 2026-05-08 — RewindStore hygiene (auto-prune, size cap, retention).
+    checkpoints: CheckpointsConfig = field(default_factory=CheckpointsConfig)
     #: III.6 — settings-declared shell-command hooks. Parsed from the
     #: top-level ``hooks:`` YAML block by
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
     #: registered into the global :class:`HookEngine` at CLI startup.
     hooks: tuple[HookCommandConfig, ...] = ()
+    #: v1.1 plan-2 M8.1 (2026-05-09) — settings-declared LLM-prompt hooks.
+    #: Parsed from the same top-level ``hooks:`` YAML block; entries with
+    #: ``type: prompt`` land here, entries with ``type: command`` (or no
+    #: ``type``) land in :attr:`hooks` above. Rendered into ``HookSpec``s
+    #: at CLI startup via
+    #: :func:`opencomputer.hooks.prompt_handlers.make_prompt_hook_handler`.
+    prompt_hooks: tuple[HookPromptConfig, ...] = ()
+    #: v1.1 plan-2 M8.2 (2026-05-09) — settings-declared subagent hooks
+    #: (``type: agent``). Same YAML block as ``hooks`` and ``prompt_hooks``;
+    #: the parser sniffs ``type:`` and routes accordingly.
+    agent_hooks: tuple[HookAgentConfig, ...] = ()
     #: 3.F — master enable/disable for autonomous full-system-control mode.
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
+    #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
+    cron: CronConfig = field(default_factory=CronConfig)
+    #: Wave 3 (2026-05-08) — named OpenAI/Anthropic-compatible endpoints.
+    #: Each entry is a :class:`CustomProvider` reachable via
+    #: ``/model custom:<name>:<model_id>`` or by setting the model
+    #: resolver's provider hint to ``custom:<name>``. Empty by default;
+    #: backward compatible — pre-Wave-3 configs parse unchanged.
+    custom_providers: tuple[CustomProvider, ...] = ()
+    #: Wave 3 (2026-05-08) — per-model context-window overrides for
+    #: bundled providers (Anthropic, OpenAI, OpenRouter, etc.). Set
+    #: this when the embedded :data:`compaction.DEFAULT_CONTEXT_WINDOWS`
+    #: table is wrong or stale, e.g. the user's account has a 1M
+    #: context window enabled for a model the table still has at
+    #: 200k. Format: ``{"claude-opus-4-7": 1000000, ...}``. Wins over
+    #: the static table; loses to the per-provider per-model override
+    #: under :attr:`CustomProvider.models`. Empty by default.
+    model_context_overrides: dict[str, int] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+    #: T6 — Hermes-doc credential pool rotation strategy per provider.
+    #: Maps provider name → strategy ("fill_first" / "round_robin" /
+    #: "random" / "least_used"). Unknown values fall back to
+    #: "least_used" with a warning at resolve time.
+    credential_pool_strategies: dict[str, str] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+    #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
+    #: applies when the active provider is OpenRouter; ignored otherwise.
+    provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)
+    #: Wave 3 (2026-05-08) — cross-provider fallback chain. Each entry
+    #: is a (provider_id, model) pair the loop tries after the primary
+    #: provider's ``fallback_models`` are exhausted. Per-turn scoped:
+    #: activates at most once per user turn; primary is restored on
+    #: the next turn.
+    fallback_providers: tuple[FallbackProvider, ...] = ()
+    #: Kanban-Goals v2 (2026-05-08) — Ralph-loop turn budget.
+    goals: GoalsConfig = field(default_factory=GoalsConfig)
+    #: Kanban-Goals v2 (2026-05-08) — auxiliary-model overrides
+    #: (goal judge today; future slots can be added without churn).
+    auxiliary: AuxiliaryConfig = field(default_factory=AuxiliaryConfig)
+    #: Hermes Doc-2 (2026-05-08 G5) — ExecuteCode/PythonExec settings
+    #: (timeout, RPC call cap, env passthrough). Pre-existing
+    #: ``ExecuteCode.execute`` reads ``code_execution.terminal.env_passthrough``;
+    #: G5 adds the ``max_tool_calls`` cap as a configurable slot.
+    code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
+    #: v1.1 plan-3 M10.1 (2026-05-09) — per-channel routing rules. Empty
+    #: tuple of rules + default agent "default" means "no routing" — the
+    #: dispatcher falls through to the active profile's default agent
+    #: template (current behavior, fully backwards-compatible).
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
+    #: 2026-05-10 — Pinned files mechanism (Optimize Grade E mitigation).
+    #: Files listed here get their content injected into the system prompt
+    #: at session start, so the agent doesn't re-read them via the Read
+    #: tool every session. Inspired by ``oc optimize``'s "Pin to system
+    #: prompt" recommendation. Empty by default; manage via
+    #: ``oc pin <path>`` / ``oc unpin <path>`` / ``oc pin --list``.
+    prompt: PromptConfig = field(default_factory=PromptConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -547,7 +1489,21 @@ def load_config_for_profile(profile_home: Path) -> Config:
 
 
 __all__ = [
+    "AuxiliaryConfig",
     "Config",
+    "CronConfig",
+    "CustomProvider",
+    "CustomProviderModelOverride",
+    "FallbackProvider",
+    "ProviderRoutingConfig",
+    "RoutingConfig",
+    "RoutingDefault",
+    "RoutingMatch",
+    "RoutingRule",
+    "split_or_routing_suffix",
+    "split_hf_routing_suffix",
+    "DelegationConfig",
+    "GoalJudgeConfig",
     "ModelConfig",
     "LoopConfig",
     "SessionConfig",
@@ -556,8 +1512,11 @@ __all__ = [
     "GatewayConfig",
     "MCPConfig",
     "MCPServerConfig",
+    "HookAgentConfig",
     "HookCommandConfig",
+    "HookPromptConfig",
     "ToolsConfig",
+    "ToolClassifierConfig",
     "WebSearchConfig",
     "FullSystemControlConfig",
     "default_config",

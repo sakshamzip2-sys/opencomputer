@@ -58,6 +58,11 @@ class OutgoingDrainer:
         self.adapters = adapters_by_platform
         self.poll_interval = poll_interval_seconds
         self._stop = asyncio.Event()
+        # Exponential backoff state — protects errors.log from being filled
+        # with 100k+ identical tracebacks when the drain pass fails on every
+        # tick (observed: 33h-stuck daemon, 2026-05-07). Cap at ~5 min.
+        self._consecutive_errors = 0
+        self._max_backoff_seconds = 300.0
 
     def stop(self) -> None:
         self._stop.set()
@@ -83,11 +88,31 @@ class OutgoingDrainer:
         while not self._stop.is_set():
             try:
                 await self._drain_once()
+                if self._consecutive_errors:
+                    logger.info(
+                        "outgoing drainer: recovered after %d failed pass(es)",
+                        self._consecutive_errors,
+                    )
+                self._consecutive_errors = 0
+                wait_for = self.poll_interval
             except Exception:  # noqa: BLE001 — never break the loop
-                logger.exception("outgoing drainer: drain pass raised; continuing")
+                self._consecutive_errors += 1
+                # Log full traceback only on first, 10th, 100th, 1000th... so
+                # errors.log doesn't fill up at 1Hz on a wedged DB path.
+                n = self._consecutive_errors
+                if n == 1 or (n & (n - 1)) == 0:  # powers of 2 only
+                    logger.exception(
+                        "outgoing drainer: drain pass raised "
+                        "(consecutive_errors=%d); continuing", n,
+                    )
+                # Exponential backoff: 1s, 2s, 4s, ... up to 5min cap.
+                wait_for = min(
+                    self.poll_interval * (2 ** min(n - 1, 9)),
+                    self._max_backoff_seconds,
+                )
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self.poll_interval,
+                    self._stop.wait(), timeout=wait_for,
                 )
             except TimeoutError:
                 continue
@@ -117,6 +142,41 @@ class OutgoingDrainer:
             if cap and len(body) > cap:
                 from opencomputer.gateway._truncate import truncate_smart
                 body = truncate_smart(body, max_len=cap)
+            # Phase 3 (2026-05-06) — MESSAGE_SENDING fire-and-forget hook.
+            # Plugins observe outgoing traffic; "skip" decision drops without
+            # sending; "rewrite" replaces the body via modified_message.
+            try:
+                from opencomputer.hooks.engine import engine as _hook_engine_ms
+                from plugin_sdk.hooks import HookContext as _MsCtx
+                from plugin_sdk.hooks import HookEvent as _MsEvent
+
+                d = await _hook_engine_ms.fire_blocking(
+                    _MsCtx(
+                        event=_MsEvent.MESSAGE_SENDING,
+                        session_id=getattr(msg, "session_id", "") or "",
+                        outgoing_text=body,
+                        channel=msg.platform,
+                        outgoing_chat_id=msg.chat_id,
+                    )
+                )
+                if d is not None:
+                    if getattr(d, "decision", "pass") == "skip":
+                        logger.info(
+                            "outgoing drainer: skipped %s by hook (%s)",
+                            msg.id, getattr(d, "reason", ""),
+                        )
+                        self.queue.mark_sent(msg.id)
+                        continue
+                    if (
+                        getattr(d, "decision", "pass") == "rewrite"
+                        and getattr(d, "modified_message", "")
+                    ):
+                        body = d.modified_message
+            except Exception as _e:  # noqa: BLE001 — hook failure must not wedge send
+                logger.debug(
+                    "MESSAGE_SENDING hook raised, ignoring: %r", _e
+                )
+
             try:
                 result = await adapter.send(msg.chat_id, body)
             except Exception as e:  # noqa: BLE001 — capture for the user
@@ -132,6 +192,26 @@ class OutgoingDrainer:
             else:
                 err = getattr(result, "error", None) or "adapter returned success=False"
                 self.queue.mark_failed(msg.id, str(err))
+
+            # Phase 3 — MESSAGE_SENT fire-and-forget hook (post-send observability).
+            try:
+                from opencomputer.hooks.engine import engine as _hook_engine_ms2
+                from plugin_sdk.hooks import HookContext as _MsCtx2
+                from plugin_sdk.hooks import HookEvent as _MsEvent2
+
+                _hook_engine_ms2.fire_and_forget(
+                    _MsCtx2(
+                        event=_MsEvent2.MESSAGE_SENT,
+                        session_id=getattr(msg, "session_id", "") or "",
+                        outgoing_text=body,
+                        channel=msg.platform,
+                        outgoing_chat_id=msg.chat_id,
+                    )
+                )
+            except Exception as _e:  # noqa: BLE001 — observability must not wedge
+                logger.debug(
+                    "MESSAGE_SENT hook raised, ignoring: %r", _e
+                )
 
 
 __all__ = ["OutgoingDrainer"]

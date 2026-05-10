@@ -47,7 +47,7 @@ from opencomputer.agent.tool_guardrails import (
     ToolLoopGuardrailError,
 )
 from opencomputer.agent.tool_ordering import sort_tools_for_request
-from opencomputer.tools.bash_safety import detect_destructive
+from opencomputer.tools.bash_safety import detect_destructive_with_context
 from opencomputer.tools.memory_tool import MemoryTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.session_search_tool import SessionSearchTool
@@ -60,6 +60,30 @@ from plugin_sdk.tool_matcher import matches as _pattern_matches
 from plugin_sdk.tool_matcher import parse as _parse_pattern
 
 _log = logging.getLogger("opencomputer.agent.loop")
+
+
+def _load_custom_personalities() -> dict[str, str]:
+    """Read ``agent.personalities`` from the active profile config.
+
+    Returns ``{}`` on any error so an unparseable config never breaks
+    the prompt build. Called once per ``build()`` invocation; PyYAML
+    loads from disk are sub-millisecond on the small profile config so
+    no caching is needed.
+    """
+    try:
+        from pathlib import Path
+
+        from opencomputer.agent.profile_yaml import get_custom_personalities
+
+        home = os.environ.get(
+            "OPENCOMPUTER_HOME",
+            str(Path.home() / ".opencomputer"),
+        )
+        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+        return get_custom_personalities(Path(home) / profile / "config.yaml")
+    except Exception as exc:  # noqa: BLE001 — never break prompt build
+        _log.debug("loop: failed to load custom personalities — %s", exc)
+        return {}
 
 
 class LoopTimeout(Exception):  # noqa: N818 — public name is the load-bearing one (no Error suffix per project style)
@@ -218,6 +242,36 @@ def _maybe_split_system_kwargs(
     return out
 
 
+def _make_cancelled_result(call: ToolCall, partial_stdout: str = "") -> Any:
+    """Build a ToolResult marking a tool as cancelled mid-flight by /steer.
+
+    PR-A Feature 1 helper. For Bash with non-empty captured stdout, the
+    partial output is included so the model can use it on replan; for
+    every other tool, a bare cancellation marker is emitted.
+
+    Imported lazily from plugin_sdk inside the body to avoid widening
+    the module-level import set (ToolResult is already imported within
+    ``_dispatch_tool_calls`` for the same reason).
+    """
+    from plugin_sdk.core import ToolResult
+
+    if call.name == "Bash" and partial_stdout:
+        content = (
+            f"<INTERRUPTED-BY-STEER> partial stdout:\n{partial_stdout}\n"
+            "(remaining work cancelled by user steer)"
+        )
+    else:
+        content = (
+            f"<INTERRUPTED-BY-STEER> tool '{call.name}' cancelled by "
+            "user steer; no partial output captured"
+        )
+    return ToolResult(
+        call_id=call.id or "",
+        content=content,
+        is_error=False,
+    )
+
+
 def _wrap_skill_result_as_tool_messages(
     *,
     skill_name: str,
@@ -264,6 +318,52 @@ def _wrap_skill_result_as_tool_messages(
         name=SKILL_TOOL_NAME,
     )
     return [assistant, tool_message]
+
+
+def apply_inject_contexts(
+    messages: list[Message], contexts: list[str]
+) -> list[Message]:
+    """Append ``contexts`` (joined with double newlines) to ``messages``.
+
+    Used by the PRE_LLM_CALL fire-point in :meth:`AgentLoop._call_provider`
+    to inject text returned by shell hooks via ``HookDecision.inject_context``.
+
+    Mutation rules:
+
+    * If ``contexts`` is empty or ``messages`` is empty → return
+      ``messages`` unchanged.
+    * If the last message is a plain user message (``role="user"``,
+      no ``tool_call_id``, no ``tool_calls``) → return a new list with
+      the last entry replaced by a copy whose ``content`` has the
+      injected text appended (separated by a blank line).
+    * Otherwise (last message is assistant / tool / contains tool
+      linkage) → return a new list with one extra trailing ``user``
+      message holding the injected text. Anthropic's API tolerates
+      a trailing user message after a tool result; the next provider
+      call sees a clean turn boundary.
+
+    Pure function. Idempotent — calling with the same ``contexts``
+    twice produces the same final-content (because the second call's
+    content already starts with the injected text, but a real loop
+    invocation only fires this once per turn).
+
+    Why a separate helper rather than inline: testability. The full
+    AgentLoop is heavy; a pure helper lets us unit-test the load-
+    bearing mutation in isolation against the Hermes Doc-2 G4 spec.
+    """
+    if not contexts or not messages:
+        return messages
+    from dataclasses import replace as _dc_replace
+    joined = "\n\n".join(contexts)
+    last = messages[-1]
+    if last.role == "user" and not last.tool_calls and not last.tool_call_id:
+        new_content = (
+            last.content + "\n\n" + joined
+            if last.content
+            else joined
+        )
+        return list(messages[:-1]) + [_dc_replace(last, content=new_content)]
+    return list(messages) + [Message(role="user", content=joined)]
 
 
 def merge_adjacent_user_messages(messages: list[Message]) -> list[Message]:
@@ -585,6 +685,29 @@ class AgentLoop:
         # logs a warning in that case).
         from opencomputer.agent import context_engine_registry as _ctx_registry
 
+        # Hermes B4 follow-up — record compaction LLM calls into ``llm_calls``
+        # so insights reflects the *full* conversation cost, not just the
+        # user-visible reply. Closure reads ``self._current_session_id``
+        # at call-time so it picks up the active session even though
+        # CompactionEngine is constructed once.
+        def _record_compaction_usage(usage: Any) -> None:
+            try:
+                from opencomputer.agent.usage_pricing import record_call_from_usage
+
+                provider_name = getattr(provider, "name", "") or type(
+                    provider
+                ).__name__.lower().replace("provider", "")
+                record_call_from_usage(
+                    db=self.db,
+                    session_id=self._current_session_id or "",
+                    provider=provider_name,
+                    model=config.model.model,
+                    usage=usage,
+                    batch=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # best-effort telemetry
+
         engine_name = getattr(config.loop, "context_engine", "compressor")
         self.compaction = _ctx_registry.build(
             engine_name,
@@ -592,11 +715,14 @@ class AgentLoop:
             model=config.model.model,
             disabled=compaction_disabled,
             memory_bridge=self.memory_bridge,
+            usage_recorder=_record_compaction_usage,
         ) or CompactionEngine(
             provider=provider,
             model=config.model.model,
             disabled=compaction_disabled,
             memory_bridge=self.memory_bridge,
+            usage_recorder=_record_compaction_usage,
+            custom_providers=config.custom_providers,
         )
         # Phase 11d: third-pillar episodic memory. Records one event per
         # completed turn for cross-session "remind me" queries via FTS5.
@@ -749,6 +875,18 @@ class AgentLoop:
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
+        # Hermes-followup 2026-05-07 — publish (session_id, db) on
+        # ContextVars so auxiliary callers (title-gen daemon thread,
+        # judge-reviewer, dreaming, recall-synthesizer, aux_llm)
+        # can record their LLM cost into ``llm_calls`` without
+        # signature changes. Daemon threads spawned via copy_context()
+        # inherit these.
+        try:
+            from opencomputer.agent.usage_pricing import set_active_session
+
+            set_active_session(sid, self.db)
+        except Exception:  # noqa: BLE001
+            pass
         # Item 2 fix (2026-05-02): reset pause_turn counter per conversation.
         # Without this, a long-lived AgentLoop (gateway/daemon mode) handling
         # multiple sequential conversations would leak the counter — session B
@@ -776,7 +914,15 @@ class AgentLoop:
             )
         except Exception as _exc:  # noqa: BLE001 — never crash the loop
             _ups_log = logging.getLogger("opencomputer.agent.loop")
-            _ups_log.debug("USER_PROMPT_SUBMIT fire failed: %s", _exc)
+            # Promoted from DEBUG (2026-05-10): user-defined hooks
+            # subscribed to USER_PROMPT_SUBMIT silently never fire if
+            # this swallows. Keep non-fatal but visible.
+            _ups_log.warning(
+                "USER_PROMPT_SUBMIT fire failed for session %s: %s "
+                "(loop continues; subscribed hooks did NOT fire this turn)",
+                sid,
+                _exc,
+            )
 
         # OpenClaw 1.C — push the (session_id, delegation_depth) frame for
         # the repetition detector. Idempotent: re-entering the same session
@@ -856,13 +1002,30 @@ class AgentLoop:
         # e.g. test fixtures, scripted callers) would silently scribble
         # ``session_id`` / ``session_db`` onto the module-level
         # singleton and pollute every later consumer.
+        # 2026-05-08 — also publish ``model_id`` and ``session_started_at``
+        # so the bottom-bar status line (``cli_ui.status_line``) can read
+        # them O(1) per keystroke without recomputing. ``session_started_at``
+        # only seeds the first time it appears so a multi-turn chat REPL
+        # keeps the original anchor and ``elapsed`` stays monotonic across
+        # turns; ``model_id`` refreshes every turn to track mid-session
+        # ``/model`` swaps.
+        _new_custom = {
+            **self._runtime.custom,
+            "session_id": sid,
+            "session_db": self.db,
+            "model_id": self.config.model.model,
+            # Wave 3 (2026-05-08) — publish per-model context-window
+            # override sources so the status line bar can resolve the
+            # correct max-context for *any* model the user runs,
+            # without a hardcoded 200K assumption.
+            "model_context_overrides": dict(getattr(self.config, "model_context_overrides", {}) or {}),
+            "custom_providers": tuple(getattr(self.config, "custom_providers", ()) or ()),
+        }
+        if "session_started_at" not in _new_custom:
+            _new_custom["session_started_at"] = _session_started_at
         self._runtime = replace(
             self._runtime,
-            custom={
-                **self._runtime.custom,
-                "session_id": sid,
-                "session_db": self.db,
-            },
+            custom=_new_custom,
         )
 
         _slash_result = await _slash_dispatch(
@@ -1075,6 +1238,32 @@ class AgentLoop:
                 # per session — ambient blocks are evaluated once at session
                 # start and cached, matching the prefix-cache invariant.
                 from plugin_sdk import effective_permission_mode as _epm
+
+                # 2026-05-10 — Pinned files (Optimize Grade E mitigation).
+                # Render once per snapshot rebuild (not per turn) so the
+                # prefix cache stays warm; the config tuple is part of the
+                # snapshot key implicitly via the resulting prompt text.
+                _pinned_files_block = ""
+                try:
+                    from opencomputer.agent.pinned_files import (
+                        render_pinned_files_block,
+                    )
+                    _pcfg = getattr(self.config, "prompt", None)
+                    _pinned_paths = getattr(_pcfg, "pinned_files", ()) if _pcfg else ()
+                    _pinned_max = (
+                        getattr(_pcfg, "max_total_bytes", 200_000)
+                        if _pcfg else 200_000
+                    )
+                    if _pinned_paths:
+                        _pinned_files_block = render_pinned_files_block(
+                            _pinned_paths, max_total_bytes=_pinned_max
+                        )
+                except Exception:  # noqa: BLE001 — pinning never breaks the loop
+                    _log.warning(
+                        "pinned_files: render failed (skipping injection)",
+                        exc_info=True,
+                    )
+
                 snapshot = await self.prompt_builder.build_with_memory(
                     skills=skills,
                     declarative_memory=declarative,
@@ -1093,12 +1282,14 @@ class AgentLoop:
                         self._runtime.custom.get("personality", "")
                         if self._runtime else ""
                     ),
+                    custom_personalities=_load_custom_personalities(),
                     persona_overlay=persona_overlay,
                     active_persona_id=self._active_persona_id,
                     user_tone=user_tone,
                     persona_preferred_tone=getattr(
                         self, "_active_persona_preferred_tone", ""
                     ),
+                    pinned_files_block=_pinned_files_block,
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.
@@ -1198,7 +1389,15 @@ class AgentLoop:
                 )
             )
         except Exception:  # noqa: BLE001 — never let BEFORE_TASK break the loop
-            _log.debug("BEFORE_TASK fire failed (suppressed)", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): BEFORE_TASK is the
+            # primary user-extension point for pre-turn behaviors;
+            # silent failure here = subscribers never run.
+            _log.warning(
+                "BEFORE_TASK fire failed for session %s (loop continues; "
+                "subscribed hooks did NOT fire this turn)",
+                sid,
+                exc_info=True,
+            )
             _bt_decision = None
 
         if (
@@ -1251,8 +1450,65 @@ class AgentLoop:
                 injected_volatile + "\n\n" + block if injected_volatile else block
             )
 
+        # v1.1 plan-3 M6.3 — MEMORY.md hybrid retrieval (BM25 + vector via RRF).
+        # Order per the M6.1 brainstorm carry-forward note:
+        #   [base + injected mode] + [Honcho prefetch] (above)
+        #                         + [MEMORY.md retrieval]   ← THIS BLOCK
+        #                         + [SessionDB FTS5 active memory]  (below)
+        # Honcho first because its corpus is most variable; MEMORY.md
+        # second because it changes only on explicit Memory tool writes;
+        # FTS5 active memory third because it's per-session-episodic and
+        # most volatile.  Default ON; gracefully degrades when MEMORY.md
+        # is empty or the active provider lacks embeddings.
+        if getattr(self.config.memory, "memory_md_retrieval_enabled", True):
+            try:
+                from opencomputer.agent.memory_md_retrieval import (
+                    MemoryMdRetriever,
+                )
+
+                # The active provider's embed() is the embed_fn.  When the
+                # provider lacks one (raises EmbeddingsUnsupportedError),
+                # the retriever falls back to BM25-only with a one-time
+                # WARNING log.
+                embed_fn = None
+                provider = getattr(self, "provider", None)
+                if provider is not None and hasattr(provider, "embed"):
+                    embed_fn = provider.embed
+
+                retriever = MemoryMdRetriever(
+                    self.memory,
+                    embed_fn=embed_fn,
+                    per_source_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_per_source_k",
+                            20,
+                        )
+                    ),
+                    top_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_top_k",
+                            5,
+                        )
+                    ),
+                )
+                hits = await retriever.retrieve(user_message)
+                md_block = retriever.inject_block(hits)
+                if md_block:
+                    volatile_memory_blocks.append(md_block)
+                    system = system + "\n\n" + md_block
+                    injected_volatile = (
+                        injected_volatile + "\n\n" + md_block
+                        if injected_volatile
+                        else md_block
+                    )
+            except Exception as exc:  # noqa: BLE001 — never crash the loop on retrieval
+                _log.warning("MEMORY.md retrieval failed: %s", exc)
+
         # OpenClaw 1.B-alt — local-FTS5 proactive recall prepend.
-        # Composes with Honcho prefetch above; gated by config flag (default OFF).
+        # Composes with Honcho prefetch above + MEMORY.md retrieval block;
+        # gated by config flag (default OFF).
         # Both append to the per-turn ``system`` so the prefix cache stays warm.
         if getattr(self.config.memory, "active_memory_enabled", False):
             from opencomputer.agent.active_memory import (
@@ -1346,6 +1602,45 @@ class AgentLoop:
             for _iter in range(self.config.loop.max_iterations):
                 iterations += 1
 
+                # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:step.
+                # Fires once per tool-calling iteration (one per LLM turn
+                # within a multi-step session). Fire-and-forget so a slow
+                # filesystem hook can't stall the loop. Only fires when
+                # the gateway hook engine is available — this keeps the
+                # CLI-only path (no gateway) free of an extra import.
+                try:
+                    from opencomputer.gateway.event_hooks import (
+                        AGENT_STEP as _GW_AGENT_STEP,
+                    )
+                    from opencomputer.gateway.event_hooks import (
+                        engine as _gw_hooks_engine_step,
+                    )
+                    if _gw_hooks_engine_step.hooks():
+                        # Tool names from the most recent assistant
+                        # message — empty until the LLM has called tools.
+                        _last_tools: list[str] = []
+                        for _m in reversed(messages):
+                            if getattr(_m, "role", None) == "assistant":
+                                _last_tools = [
+                                    tc.name for tc in (
+                                        getattr(_m, "tool_calls", None) or []
+                                    )
+                                ]
+                                break
+                        asyncio.create_task(
+                            _gw_hooks_engine_step.fire(
+                                _GW_AGENT_STEP,
+                                {
+                                    "session_id": sid,
+                                    "iteration": iterations,
+                                    "tool_names": _last_tools,
+                                },
+                            ),
+                            name=f"gw-hook-agent-step-{iterations}",
+                        )
+                except Exception:  # noqa: BLE001 — never break the loop
+                    pass
+
                 # Round 2B P-3: enforce both timeouts at the top of each iteration.
                 # Inactivity check first (the more useful signal); absolute cap
                 # second. Both raise out of run_conversation — no synthetic
@@ -1410,17 +1705,46 @@ class AgentLoop:
                 if _iter > 0:
                     try:
                         from opencomputer.agent.steer import (
+                            default_buffer as _steer_buffer,
+                        )
+                        from opencomputer.agent.steer import (
                             default_registry as _steer_registry,
                         )
                         from opencomputer.agent.steer import (
                             format_nudge_message as _format_nudge,
                         )
 
+                        # PR-A Feature 1: peek cancel flag BEFORE consuming
+                        # any state — drives the <USER-INTERRUPT> vs
+                        # <USER-NUDGE> prefix decision.
+                        _cancel_was_set = (
+                            _steer_registry.has_cancel_listener(sid)
+                            and _steer_registry.cancel_event(sid).is_set()
+                        )
                         nudge = _steer_registry.consume(sid)
-                        if nudge:
+                        # Drain any inbound messages buffered during the
+                        # cancel-pending window. Merge with the explicit
+                        # nudge — explicit text wins position, buffered
+                        # follow with '---' separator.
+                        buffered = _steer_buffer.drain(sid)
+                        if nudge and buffered:
+                            merged: str | None = f"{nudge}\n---\n{buffered}"
+                        elif nudge:
+                            merged = nudge
+                        elif buffered:
+                            merged = buffered
+                        else:
+                            merged = None
+
+                        if merged:
+                            if _cancel_was_set:
+                                _steer_registry.reset_cancel(sid)
                             nudge_msg = Message(
                                 role="user",
-                                content=_format_nudge(nudge),
+                                content=_format_nudge(
+                                    merged,
+                                    was_interrupted=_cancel_was_set,
+                                ),
                             )
                             messages.append(nudge_msg)
                             # Persist so a resumed session sees the same
@@ -1429,10 +1753,12 @@ class AgentLoop:
                             # change the next turn's semantics).
                             self._persist_message(sid, nudge_msg)
                             _log.debug(
-                                "steer: applied pending nudge for session %s "
-                                "(len=%d)",
+                                "steer: applied %s nudge for session %s "
+                                "(len=%d, buffered_extras=%s)",
+                                "interrupt" if _cancel_was_set else "pending",
                                 sid,
-                                len(nudge),
+                                len(merged),
+                                "yes" if buffered else "no",
                             )
                     except Exception:  # noqa: BLE001 — never break the loop
                         _log.warning(
@@ -1750,6 +2076,52 @@ class AgentLoop:
                 except Exception:  # noqa: BLE001
                     pass
 
+                # 2026-05-08: token + cost accumulation for the bottom-bar
+                # status line. ``session_tokens_in/out`` and
+                # ``session_cost_usd`` are also consumed by ``/usage``,
+                # which currently shows "(not tracked)" because nothing
+                # writes them. Compaction's pricing helper handles the
+                # provider/model lookup; an unknown model returns ``None``
+                # and we leave ``session_cost_usd`` as-is rather than
+                # zeroing it (sticky display).
+                try:
+                    _cur_in = self._runtime.custom.get("session_tokens_in")
+                    _cur_out = self._runtime.custom.get("session_tokens_out")
+                    self._runtime.custom["session_tokens_in"] = (
+                        int(_cur_in) if isinstance(_cur_in, int) else 0
+                    ) + int(step.input_tokens or 0)
+                    self._runtime.custom["session_tokens_out"] = (
+                        int(_cur_out) if isinstance(_cur_out, int) else 0
+                    ) + int(step.output_tokens or 0)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                try:
+                    from opencomputer.cost_guard.pricing import (
+                        compute_call_cost as _ccc,
+                    )
+
+                    _step_cost = _ccc(
+                        provider=getattr(
+                            self.provider, "name", type(self.provider).__name__,
+                        ),
+                        model=self.config.model.model,
+                        input_tokens=int(step.input_tokens or 0),
+                        output_tokens=int(step.output_tokens or 0),
+                    )
+                    if _step_cost is not None:
+                        _cur_cost = self._runtime.custom.get("session_cost_usd")
+                        _cur_cost_f = (
+                            float(_cur_cost)
+                            if isinstance(_cur_cost, (int, float))
+                            else 0.0
+                        )
+                        self._runtime.custom["session_cost_usd"] = (
+                            _cur_cost_f + float(_step_cost)
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+
                 if not step.should_continue:
                     # No tool calls — safe to persist the assistant message alone. (PR #1)
                     # Passive education hook (2026-04-28): build a tail-clause
@@ -1919,7 +2291,17 @@ class AgentLoop:
                                 content=(step.assistant_message.content or "") + _reveal,
                             )
                     except Exception:  # noqa: BLE001 — never break the turn
-                        _log.debug("learning_moments hook failed", exc_info=True)
+                        # Promoted from DEBUG (2026-05-10): learning
+                        # moments are user-visible suggestions; silent
+                        # failure = user never sees the hint they would
+                        # have benefited from.
+                        _log.warning(
+                            "learning_moments hook failed for session %s "
+                            "(loop continues; user did NOT see the "
+                            "contextual suggestion this turn)",
+                            sid,
+                            exc_info=True,
+                        )
 
                     messages.append(final_assistant_msg)
                     self._emit_before_message_write(
@@ -2014,6 +2396,120 @@ class AgentLoop:
                             system_prompt_override=system_prompt_override,
                         )
                     self.db.end_session(sid)
+                    # M4.4: clear any active skill tool filter on END_TURN so
+                    # subsequent turns aren't constrained.
+                    try:
+                        from opencomputer.agent.skill_tools_filter import (
+                            clear_active_filter,
+                        )
+                        clear_active_filter()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # 2026-05-08 — Hermes Doc-2 parity: TRANSFORM_LLM_OUTPUT
+                    # fires once per turn after the final response is
+                    # assembled, before delivery. Handlers may return
+                    # ``HookDecision(decision="rewrite", rewritten_text=...)``
+                    # to replace the response delivered to the channel /
+                    # console. The persisted DB content is the original
+                    # (rewriting is "for delivery only" — symmetric with
+                    # TRANSFORM_TOOL_RESULT). Fail-open: any exception
+                    # leaves the original content intact.
+                    try:
+                        _final_text = (
+                            final_assistant_msg.content
+                            if isinstance(final_assistant_msg.content, str)
+                            else ""
+                        )
+                        if _final_text:
+                            from opencomputer.hooks.engine import (
+                                engine as _hook_engine_xllm,
+                            )
+                            from plugin_sdk.hooks import (
+                                HookContext as _HookContextXllm,
+                            )
+                            from plugin_sdk.hooks import (
+                                HookEvent as _HookEventXllm,
+                            )
+
+                            _decision = await _hook_engine_xllm.fire_blocking(
+                                _HookContextXllm(
+                                    event=_HookEventXllm.TRANSFORM_LLM_OUTPUT,
+                                    session_id=sid,
+                                    response_text=_final_text,
+                                    model=self.config.model.model,
+                                    runtime=self._runtime,
+                                )
+                            )
+                            if (
+                                _decision is not None
+                                and _decision.decision == "rewrite"
+                                and _decision.rewritten_text
+                            ):
+                                from dataclasses import replace as _replace_
+
+                                final_assistant_msg = _replace_(
+                                    final_assistant_msg,
+                                    content=_decision.rewritten_text,
+                                )
+                    except Exception:  # noqa: BLE001 — never break delivery
+                        _log.debug(
+                            "TRANSFORM_LLM_OUTPUT hook failed", exc_info=True
+                        )
+
+                    # Fire-and-forget auto-titler. Skips internally if the
+                    # session already has a title or this isn't the first
+                    # exchange. Without this wire-in the picker shows
+                    # "(untitled · ID)" forever — see TS-T6 lineage.
+                    #
+                    # ``maybe_auto_title`` counts user-role messages to
+                    # gate "is this the first exchange?". Tool-result
+                    # messages also have role="user" in the canonical
+                    # Anthropic shape (content is a list of tool_result
+                    # blocks), so we filter them out before counting —
+                    # otherwise a first turn with multiple tool calls
+                    # would spuriously trip the >2 cutoff.
+                    try:
+                        from opencomputer.agent.title_generator import (
+                            maybe_auto_title,
+                        )
+
+                        _final_text_for_title = ""
+                        if isinstance(final_assistant_msg.content, str):
+                            _final_text_for_title = final_assistant_msg.content
+                        elif isinstance(final_assistant_msg.content, list):
+                            _parts: list[str] = []
+                            for _part in final_assistant_msg.content:
+                                if isinstance(_part, dict) and _part.get("type") == "text":
+                                    _parts.append(_part.get("text", ""))
+                            _final_text_for_title = "".join(_parts)
+
+                        _real_user_history = [
+                            _m
+                            for _m in messages
+                            if getattr(_m, "role", None) == "user"
+                            and isinstance(getattr(_m, "content", None), str)
+                        ]
+                        maybe_auto_title(
+                            self.db,
+                            sid,
+                            user_message,
+                            _final_text_for_title,
+                            _real_user_history,
+                        )
+                    except Exception:  # noqa: BLE001 — auto-title is best-effort
+                        # Promoted from DEBUG (2026-05-10): the entire
+                        # reason this code path exists is so the
+                        # session gets a non-empty title in the resume
+                        # picker. Silent failure here = user keeps
+                        # seeing "(untitled · ID)" forever.
+                        _log.warning(
+                            "maybe_auto_title spawn failed for session %s "
+                            "(loop continues; this session will remain "
+                            "untitled in `oc resume` picker)",
+                            sid,
+                            exc_info=True,
+                        )
+
                     return ConversationResult(
                         final_message=final_assistant_msg,
                         messages=messages,
@@ -2042,6 +2538,52 @@ class AgentLoop:
                 except Exception:
                     pass  # delegate tool may not be registered yet in some contexts
 
+                # Hermes spec parity (2026-05-08): CronTool reads ``cron_session``
+                # from runtime to block recursive cron management. Mirror the
+                # DelegateTool runtime-propagation pattern.
+                try:
+                    from opencomputer.tools.cron_tool import CronTool
+                    CronTool.set_runtime(self._runtime)
+                except Exception:
+                    pass  # cron tool may not be registered in some contexts
+
+                # v1.1 plan-2 M5.2 (2026-05-09): snapshot the message
+                # history BEFORE dispatching this tool block so a later
+                # `oc session rewind --mode conv_only` can restore state
+                # at this exact point. Best-effort — checkpoint failures
+                # never wedge the loop. Skipped on the first iteration
+                # if the session is fresh (no messages yet — nothing to
+                # restore TO).
+                if step.assistant_message.tool_calls and messages:
+                    try:
+                        from opencomputer.agent.checkpoint_manager import (
+                            CheckpointManager,
+                        )
+
+                        _cp_mgr = CheckpointManager(self.db)
+                        _msg_dicts = [
+                            _msg_to_dict(m) for m in messages
+                        ]
+                        _cp_mgr.create(
+                            session_id=sid,
+                            messages=_msg_dicts,
+                            label=f"before tool_use turn={iterations}",
+                        )
+                    except Exception:  # noqa: BLE001 — never wedge the loop
+                        # Promoted from _log.debug (2026-05-10): silent-debug
+                        # swallowing meant prompt_checkpoints stayed empty in
+                        # the user's DB for weeks with zero diagnostic. WARNING
+                        # is still non-fatal but visible at the default log
+                        # level so the failure mode surfaces in production.
+                        _log.warning(
+                            "M5.2: checkpoint create failed for session %s "
+                            "(suppressed; agent loop continues). "
+                            "`oc session rewind --mode conv_only` will have "
+                            "no rollback point for this turn.",
+                            sid,
+                            exc_info=True,
+                        )
+
                 # Dispatch tools BEFORE persisting the assistant message. If we saved
                 # it first and then got cancelled mid-dispatch, the DB would hold a
                 # tool_use with no matching tool_result — Anthropic 400s on resume.
@@ -2056,6 +2598,20 @@ class AgentLoop:
                 # the loop terminates cleanly via END_TURN.
                 if any(getattr(r, "is_error", False) for r in tool_results):
                     _session_had_errors = True
+
+                # v1.1 plan-2 M5.4 follow-up (2026-05-09): if any of the
+                # just-dispatched tool calls was ExitPlanMode AND it left
+                # a next_mode proposal in the slot, mutate this loop's
+                # RuntimeContext.permission_mode now so subsequent turns
+                # in the same session pick up the new mode without the
+                # user having to run `/exit-plan <mode>` manually.
+                # ``keep`` means stay in plan mode — leave runtime alone.
+                _exit_plan_called = any(
+                    (getattr(_tc, "name", "") == "ExitPlanMode")
+                    for _tc in (step.assistant_message.tool_calls or [])
+                )
+                if _exit_plan_called:
+                    self._maybe_apply_exit_plan_proposal()
                 # Round 2B P-3: tool dispatch finished — count both successful and
                 # error results as activity (the agent did *something*, that's
                 # what the inactivity timer cares about). ``_dispatch_tool_calls``
@@ -2391,7 +2947,15 @@ class AgentLoop:
                     classifier_version="regex_v1",
                 )
         except Exception:  # noqa: BLE001 — degrade silently
-            _log.debug("vibe-classify / per-turn log failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): vibe_log table is the
+            # data source for emotion/topic analytics; silent failure =
+            # 0 rows growing, so analytics dashboards lie.
+            _log.warning(
+                "vibe-classify / per-turn log failed for session %s "
+                "(loop continues; vibe_log row NOT written for this turn)",
+                session_id,
+                exc_info=True,
+            )
 
         if result.persona_id == "companion":
             try:
@@ -2561,7 +3125,15 @@ class AgentLoop:
                     + lm_overlay
                 )
         except Exception:  # noqa: BLE001 — never break loop on overlay miss
-            _log.debug("learning_moments mechanism-B failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): mechanism-B injects
+            # learning-moments overlay into the system prompt; silent
+            # failure means user never sees /skill, /commit etc. nudges.
+            _log.warning(
+                "learning_moments mechanism-B failed for session %s "
+                "(loop continues; overlay NOT injected this turn)",
+                session_id,
+                exc_info=True,
+            )
 
         return overlay
 
@@ -2816,41 +3388,136 @@ class AgentLoop:
     async def _maybe_continue_goal(
         self, sid: str, last_assistant_text: str
     ) -> str | None:
-        """Wave 5 T2 closure — Ralph-loop continuation gate.
+        """Ralph-loop continuation gate (Kanban-Goals v2 wiring).
 
         Reads the active goal (if any), asks the auxiliary judge whether
-        it's satisfied, and returns a continuation user-prompt to feed
-        the next turn — or ``None`` to exit normally. The judge fails
-        OPEN (treated as NOT_SATISFIED) so a flaky aux model never
-        wedges progress; ``goal.budget`` is the real backstop.
+        it's satisfied, persists the structured rationale on the goal
+        row, and returns a continuation user-prompt to feed the next
+        turn — or ``None`` to exit normally.
+
+        The judge fails OPEN (treated as not-done) so a flaky aux model
+        never wedges progress; ``goal.budget`` is the real backstop.
+
+        Banner emission (continue / achieved / pause_budget) is delegated
+        to :attr:`goal_banner_callback` if set by the host (CLI input
+        loop); gateway path leaves it ``None`` until that wiring lands.
 
         Returns:
             Continuation prompt string when the loop should re-enter;
-            None when the goal is unset, paused, satisfied, or
+            ``None`` when the goal is unset, paused, satisfied, or
             budget-exhausted.
         """
+        import dataclasses
+
+        from opencomputer.agent.goal import (
+            JudgeVerdict,
+            build_continuation_prompt,
+            judge_goal,
+        )
+
         goal = self.db.get_session_goal(sid)
-        if goal is None or not goal.should_continue():
+        if goal is None:
+            return None
+        if not goal.active:
+            return None  # paused — neither banner nor continuation
+        if goal.budget_exhausted():
+            # Active goal but already at budget — fire pause banner
+            # (idempotent; user sees it until they /goal resume or
+            # /goal clear) and stop without judging or bumping further.
+            stale = JudgeVerdict(
+                done=False,
+                reason=(
+                    goal.last_judge_reason or "budget reached"
+                ),
+            )
+            self._fire_goal_banner(
+                sid, kind="pause_budget", verdict=stale, goal=goal,
+            )
             return None
         try:
-            from opencomputer.agent.goal import (
-                build_continuation_prompt,
-                judge_satisfied,
-            )
-
-            satisfied = await judge_satisfied(
-                goal_text=goal.text, last_response=last_assistant_text or "",
+            verdict = await judge_goal(
+                goal_text=goal.text,
+                last_response=last_assistant_text or "",
             )
         except Exception:  # noqa: BLE001 — fail-open
-            satisfied = False
-        if satisfied:
-            # Goal complete — clear it so we don't re-judge on the next user
-            # message. Keep the conversation around (don't end_session).
+            verdict = JudgeVerdict(
+                done=False, reason="(judge raised inside loop)"
+            )
+
+        if verdict.done:
+            self._fire_goal_banner(
+                sid, kind="achieved", verdict=verdict, goal=goal,
+            )
             self.db.clear_session_goal(sid)
             return None
-        # Not satisfied; bump turn counter and return a continuation prompt.
-        self.db.update_session_goal(sid, turns_used=goal.turns_used + 1)
+
+        new_turns = goal.turns_used + 1
+        self.db.update_session_goal(
+            sid, turns_used=new_turns, last_judge_reason=verdict.reason,
+        )
+        next_goal = dataclasses.replace(
+            goal, turns_used=new_turns, last_judge_reason=verdict.reason,
+        )
+        self._fire_goal_banner(
+            sid, kind="continue", verdict=verdict, goal=next_goal,
+        )
         return build_continuation_prompt(goal.text)
+
+    def _fire_goal_banner(
+        self,
+        sid: str,
+        *,
+        kind: str,
+        verdict: object,
+        goal: object,
+    ) -> None:
+        """Best-effort goal-banner emission.
+
+        Two registration surfaces:
+
+        - ``self._goal_banner_callbacks: dict[sid → cb]`` (preferred) —
+          per-session callbacks installed by the gateway around each
+          ``run_conversation`` so banners reach the correct chat when
+          one AgentLoop serves multiple sessions concurrently. Managed
+          via :meth:`set_goal_banner_callback` / :meth:`clear_goal_banner_callback`.
+        - ``self.goal_banner_callback`` (legacy / CLI) — single global
+          callback. Set directly by the CLI input loop where one
+          console serves the only session. Falls through when no
+          per-sid entry exists.
+
+        Banner errors are swallowed — UX must never wedge the loop.
+        Callbacks should accept
+        ``cb(*, session_id: str, kind: str, verdict: JudgeVerdict, goal: GoalState)``.
+        """
+        per_session = getattr(self, "_goal_banner_callbacks", None)
+        cb = None
+        if per_session is not None:
+            cb = per_session.get(sid)
+        if cb is None:
+            cb = getattr(self, "goal_banner_callback", None)
+        if cb is None:
+            return
+        try:
+            cb(session_id=sid, kind=kind, verdict=verdict, goal=goal)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def set_goal_banner_callback(self, sid: str, cb) -> None:
+        """Register a per-session goal-banner callback.
+
+        Used by the gateway to route banners to the right chat when one
+        AgentLoop serves multiple sessions concurrently. Pair with
+        :meth:`clear_goal_banner_callback` in a try/finally.
+        """
+        if not hasattr(self, "_goal_banner_callbacks"):
+            self._goal_banner_callbacks = {}
+        self._goal_banner_callbacks[sid] = cb
+
+    def clear_goal_banner_callback(self, sid: str) -> None:
+        """Drop a per-session callback. Idempotent."""
+        bag = getattr(self, "_goal_banner_callbacks", None)
+        if bag is not None:
+            bag.pop(sid, None)
 
     def _ensure_session_persisted(self, sid: str) -> None:
         """Lazy-write the session row on first persistence demand.
@@ -3198,6 +3865,34 @@ class AgentLoop:
         from opencomputer.agent.model_resolver import resolve_model
 
         raw_model = model if model is not None else self.config.model.model
+
+        # Phase 3 (2026-05-06 — S3 leftover from OpenClaw deep-comparison) —
+        # BEFORE_MODEL_RESOLVE fire-and-forget hook. Handlers see the raw
+        # alias text (pre-resolve) and may redirect the resolution by
+        # returning ``HookDecision(decision="rewrite", modified_message="<new-alias>")``.
+        # Distinct from PRE_LLM_CALL which fires post-resolve.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine_bmr
+            from plugin_sdk.hooks import HookContext as _BmrCtx
+            from plugin_sdk.hooks import HookEvent as _BmrEvent
+
+            decision = await _hook_engine_bmr.fire_blocking(
+                _BmrCtx(
+                    event=_BmrEvent.BEFORE_MODEL_RESOLVE,
+                    session_id=self.session_id or "",
+                    pre_resolve_model=raw_model,
+                    model=raw_model,
+                )
+            )
+            if (
+                decision is not None
+                and getattr(decision, "decision", "pass") == "rewrite"
+                and getattr(decision, "modified_message", None)
+            ):
+                raw_model = decision.modified_message
+        except Exception as _e:  # noqa: BLE001 — hook failure must never wedge resolve
+            _log.debug("BEFORE_MODEL_RESOLVE hook raised, ignoring: %r", _e)
+
         model_name = resolve_model(
             raw_model, getattr(self.config.model, "model_aliases", None) or {}
         )
@@ -3216,15 +3911,39 @@ class AgentLoop:
         from plugin_sdk.hooks import HookContext as _HookContext
         from plugin_sdk.hooks import HookEvent as _HookEvent
 
-        _hook_engine.fire_and_forget(
-            _HookContext(
+        _pre_llm_ctx = _HookContext(
+            event=_HookEvent.PRE_LLM_CALL,
+            session_id=session_id,
+            runtime=self._runtime,
+            messages=list(wire_messages),
+            model=model_name,
+        )
+
+        # 2026-05-08 G4 — Hermes Doc-2 shell-hook context injection.
+        # Run blocking-eligible PRE_LLM_CALL handlers (settings/shell hooks
+        # registered with fire_and_forget=False) and collect any
+        # ``inject_context`` strings they returned. Plugin handlers (default
+        # fire_and_forget=True) keep flowing through fire_and_forget below;
+        # their existing semantics are preserved.
+        try:
+            _injected_contexts = await _hook_engine.collect_inject_contexts(
+                _pre_llm_ctx
+            )
+        except Exception:  # noqa: BLE001 — fail-open: never wedge the loop
+            _injected_contexts = []
+        if _injected_contexts:
+            wire_messages = apply_inject_contexts(wire_messages, _injected_contexts)
+            # Update the ctx we'll pass to fire_and_forget so plugin
+            # observers see the post-injection message list.
+            _pre_llm_ctx = _HookContext(
                 event=_HookEvent.PRE_LLM_CALL,
                 session_id=session_id,
                 runtime=self._runtime,
                 messages=list(wire_messages),
                 model=model_name,
             )
-        )
+
+        _hook_engine.fire_and_forget(_pre_llm_ctx)
 
         # Tier 2.A — /reasoning + /fast slash commands wrote flags to
         # runtime.custom; translate to provider kwargs. Only pass
@@ -3296,14 +4015,63 @@ class AgentLoop:
             if _eff != "none" and not _native:
                 from opencomputer.agent.thinking_parser import ThinkingTagsParser
                 stream_source = ThinkingTagsParser().wrap(stream_source)
-            async for event in stream_source:
-                if event.kind == "text_delta":
-                    stream_callback(event.text)
-                elif event.kind == "thinking_delta":
-                    if thinking_callback is not None:
-                        thinking_callback(event.text)
-                elif event.kind == "done":
-                    final_response = event.response
+            # Wave 3 (2026-05-08) — wrap with the streaming-stall watchdog
+            # when the provider opts in via stale_timeout_seconds. Catches
+            # LLM-side hangs on alive HTTP connections (common on local
+            # model servers under memory pressure). The wrap is a no-op
+            # pass-through when stale_timeout_seconds is None.
+            _stale_timeout = getattr(self.provider, "stale_timeout_seconds", None)
+            # Strict numeric check — test stubs that return MagicMock for
+            # arbitrary attribute access would otherwise tank here when
+            # asyncio.wait_for tries to compare MagicMock to int.
+            if isinstance(_stale_timeout, (int, float)) and _stale_timeout > 0:
+                from opencomputer.agent.stream_watchdog import stream_with_watchdog
+                stream_source = stream_with_watchdog(
+                    stream_source,
+                    stale_timeout_seconds=float(_stale_timeout),
+                    provider_name=getattr(self.provider, "name", "?"),
+                )
+            # Phase 5 (2026-05-07) — partial-message recovery wiring (A4).
+            # Accumulate the streamed text as it arrives so we can attempt
+            # recovery if the stream is interrupted (network drop, gateway
+            # restart, upstream timeout) before a 'done' event arrives.
+            _partial_buffer: list[str] = []
+            try:
+                async for event in stream_source:
+                    if event.kind == "text_delta":
+                        _partial_buffer.append(event.text)
+                        stream_callback(event.text)
+                    elif event.kind == "thinking_delta":
+                        if thinking_callback is not None:
+                            thinking_callback(event.text)
+                    elif event.kind == "done":
+                        final_response = event.response
+            except (asyncio.CancelledError, GeneratorExit):
+                # Stream was cancelled — propagate without recovery.
+                raise
+            except Exception as _stream_exc:  # noqa: BLE001 — recovery-only path
+                if final_response is None and _partial_buffer:
+                    from opencomputer.gateway.replay_sanitizer import (
+                        recover_partial_assistant,
+                    )
+
+                    partial = "".join(_partial_buffer)
+                    _result = recover_partial_assistant(partial)
+                    _log.warning(
+                        "stream interrupted (%s); partial-recovery=%s reason=%s",
+                        type(_stream_exc).__name__,
+                        _result.status,
+                        _result.reason,
+                    )
+                    # When recoverable AND nothing has been emitted yet that
+                    # would conflict with re-emitting the trimmed text,
+                    # the loop's caller (e.g. gateway dispatch) gets the
+                    # exception and decides whether to surface the partial.
+                    # We attach the recovery result to the exception for
+                    # callers who care; raise the original exception to
+                    # preserve existing semantics.
+                    _stream_exc.partial_recovery = _result  # type: ignore[attr-defined]
+                raise
             if final_response is None:
                 raise RuntimeError("stream ended without a 'done' event")
             resp = final_response
@@ -3311,7 +4079,16 @@ class AgentLoop:
             # G.31 — wrap the provider call in the fallback router so
             # transient failures (429 / 5xx / connection refused) walk
             # the configured ``fallback_models`` chain before raising.
-            from opencomputer.agent.fallback import call_with_fallback
+            #
+            # Wave 3 (2026-05-08) — extended with cross-provider chain.
+            # When ``Config.fallback_providers`` is populated, after the
+            # primary's ``fallback_models`` exhaust we try each
+            # provider+model pair in turn (per-turn scoped — primary
+            # restored on the next user turn).
+            from opencomputer.agent.fallback import (
+                call_with_fallback,
+                call_with_provider_fallback,
+            )
 
             _split_kwargs = _maybe_split_system_kwargs(
                 self.provider.complete,
@@ -3331,11 +4108,48 @@ class AgentLoop:
                     **_extra_kwargs,
                 )
 
-            resp = await call_with_fallback(
-                _do_call,
-                primary_model=model_name,
-                fallback_models=self.config.model.fallback_models,
-            )
+            cross_chain = getattr(self.config, "fallback_providers", ())
+            if cross_chain:
+                from opencomputer.agent.fallback_provider_resolver import (
+                    build_fallback_provider_chain,
+                )
+
+                provider_chain = build_fallback_provider_chain(
+                    cross_chain,
+                    self.config,
+                )
+
+                async def _cross_call(prov, active_model: str):
+                    sub_split = _maybe_split_system_kwargs(
+                        prov.complete,
+                        base_system=base_system,
+                        injected_system=injected_system,
+                        session_id=session_id,
+                    )
+                    return await prov.complete(
+                        model=active_model,
+                        messages=wire_messages,
+                        system=system,
+                        tools=tool_schemas,
+                        max_tokens=self.config.model.max_tokens,
+                        temperature=self.config.model.temperature,
+                        **sub_split,
+                        **_extra_kwargs,
+                    )
+
+                resp = await call_with_provider_fallback(
+                    _do_call,
+                    _cross_call,
+                    primary_model=model_name,
+                    fallback_models=self.config.model.fallback_models,
+                    provider_chain=provider_chain,
+                )
+            else:
+                resp = await call_with_fallback(
+                    _do_call,
+                    primary_model=model_name,
+                    fallback_models=self.config.model.fallback_models,
+                )
 
         stop_reason_map = {
             "end_turn": StopReason.END_TURN,
@@ -3430,6 +4244,27 @@ class AgentLoop:
             )
         )
 
+        # Hermes B4: per-call cost recording. Best-effort — telemetry must
+        # not wedge the loop, so swallow any exception. Idempotency is
+        # guaranteed by placement: we land here only on successful provider
+        # response; retries raise before this point.
+        try:
+            from opencomputer.agent.usage_pricing import record_call_from_usage
+
+            provider_name = getattr(self.provider, "name", "") or type(
+                self.provider
+            ).__name__.lower().replace("provider", "")
+            record_call_from_usage(
+                db=self.db,
+                session_id=session_id or "",
+                provider=provider_name,
+                model=model_name,
+                usage=resp.usage,
+                batch=False,
+            )
+        except Exception:  # noqa: BLE001
+            _log.debug("usage_pricing.record_call_from_usage swallowed", exc_info=True)
+
         return StepOutcome(
             stop_reason=stop,
             assistant_message=msg,
@@ -3464,15 +4299,249 @@ class AgentLoop:
 
         blocked: dict[str, str] = {}  # call.id → block reason
 
+        # v1.1 plan-2 M4.4 hard enforcement (2026-05-09): when an inline
+        # SkillTool has set an active tool filter, block any call whose
+        # tool name isn't in the skill's allowlist. The Skill itself
+        # is implicitly allowed (so the skill body's request to read
+        # other tools doesn't recursively self-block).
+        try:
+            from opencomputer.agent.skill_tools_filter import (
+                get_active_filter,
+                is_tool_allowed,
+            )
+
+            _skill_filter = get_active_filter()
+        except Exception:  # noqa: BLE001
+            _skill_filter = None
+        if _skill_filter is not None:
+            for c in calls:
+                if c.name == "Skill":
+                    # Always allow re-invoking the Skill tool (lets the
+                    # model swap to a different skill if needed).
+                    continue
+                allowed, reason = is_tool_allowed(c.name)
+                if not allowed and reason is not None:
+                    blocked.setdefault(c.id, reason)
+
+        # v1.1 plan-3 M9.2 (2026-05-09) — auto-mode tool-call classifier.
+        # When the session is in permission_mode=auto, every pending tool
+        # call passes through ToolCallClassifier.classify BEFORE the
+        # F1 consent gate fires. The classifier sees only:
+        #   - the user's verbatim messages
+        #   - the assistant's pre-tool-call free-form text
+        #   - the tool_use requests already made (NOT their results)
+        #   - the pending call's name + summarized args
+        # tool_result content is structurally invisible — see
+        # opencomputer/agent/tool_call_classifier.py for the security
+        # contract (poison-resistance assertion in
+        # _build_classifier_input).
+        #
+        # Composition with consent gate (M9.5):
+        #   - Decision.BLOCK → tool blocked outright (this dispatch loop
+        #     surfaces the block reason; consent gate doesn't run).
+        #   - Decision.ALLOW → continue to consent gate (consent gate
+        #     can still deny — auto mode does not skip the gate).
+        #   - Decision.ASK → continue to consent gate. Per-call Tier-2
+        #     prompts already exist for tools with capability_claims;
+        #     this path treats the classifier's "I'm uncertain" the
+        #     same way as a Tier-2 claim that needs user confirmation.
+        #
+        # Fail-closed: any classifier error returns BLOCK with
+        # failed_closed=True. A wedged auxiliary provider must never
+        # silently fall through to ALLOW.
+        try:
+            from plugin_sdk import effective_permission_mode as _epm_m92
+
+            _mode = _epm_m92(self._runtime)
+            _is_auto = str(_mode).endswith("auto")
+        except Exception:  # noqa: BLE001
+            _is_auto = False
+
+        if _is_auto and calls:
+            try:
+                from opencomputer.agent.tool_call_classifier import (
+                    Decision as _M92Decision,
+                )
+                from opencomputer.agent.tool_call_classifier import (
+                    ToolCallClassifier as _M92Classifier,
+                )
+
+                # Build the prior tool_use list from the persisted history.
+                _prior_calls: list[ToolCall] = []
+                _user_msgs: list[Message] = []
+                try:
+                    _hist = list(self.db.get_messages(session_id)) if session_id else []
+                    for _m in _hist:
+                        if _m.role in ("user", "assistant", "system"):
+                            _user_msgs.append(_m)
+                        if _m.tool_calls:
+                            _prior_calls.extend(_m.tool_calls)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                _classifier = _M92Classifier()
+                # M9.3: per-session block budget — pause auto mode after
+                # 3 consecutive blocks or 20 total. M9.4: every classifier
+                # decision lands in the existing F1 HMAC-chained audit log
+                # via audit_classifier_decision (no-op when no logger
+                # available — defensive).
+                from opencomputer.agent.tool_call_classifier import (
+                    audit_classifier_decision as _m94_audit,
+                )
+                from opencomputer.agent.tool_call_classifier import (
+                    is_paused as _m93_is_paused,
+                )
+                from opencomputer.agent.tool_call_classifier import (
+                    record_classifier_decision as _m93_record,
+                )
+
+                # M9.3: if budget already tripped on a prior turn, every
+                # classifier decision is treated as ASK (forces consent
+                # gate to handle). User must `oc resume` to clear the
+                # budget before auto mode resumes.
+                _budget_paused = _m93_is_paused(session_id) if session_id else False
+
+                for _c in calls:
+                    # Skip if already blocked by skill_filter or future
+                    # checks above (don't waste classifier calls).
+                    if _c.id in blocked:
+                        continue
+                    _decision = await _classifier.classify(
+                        user_messages=_user_msgs,
+                        tool_calls_so_far=_prior_calls,
+                        pending=_c,
+                    )
+                    # M9.4: record EVERY decision (allow + block + ask)
+                    # into the audit chain. Best-effort — auditing
+                    # failure must not break dispatch.
+                    if session_id:
+                        try:
+                            _audit_logger = getattr(
+                                self._consent_gate, "_audit_logger", None
+                            )
+                            _m94_audit(
+                                _audit_logger, session_id, _c, _decision,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    if _decision.decision == _M92Decision.BLOCK:
+                        _block_msg = (
+                            f"Auto-mode classifier blocked this call: "
+                            f"{_decision.rationale}"
+                        )
+                        if _decision.failed_closed:
+                            _block_msg += " (fail-closed)"
+                        blocked.setdefault(_c.id, _block_msg)
+
+                    # M9.3: update per-session budget. Returns True iff
+                    # this decision tripped the budget threshold (3
+                    # consecutive or 20 total blocks).
+                    if session_id:
+                        _budget_tripped = _m93_record(session_id, _decision)
+                        if _budget_tripped:
+                            _log.warning(
+                                "M9.3 block budget tripped for session %s — "
+                                "pausing auto mode (run `oc resume` to "
+                                "clear). Subsequent calls require explicit "
+                                "PER_ACTION approval until then.",
+                                session_id,
+                            )
+                            # Mutate the runtime so the next consent gate
+                            # check sees default mode (PER_ACTION
+                            # prompts). Preserves the user's original
+                            # intent — they DID toggle auto on; we're
+                            # temporarily downgrading until they confirm
+                            # via `oc resume`.
+                            try:
+                                self._runtime.custom["permission_mode"] = "default"
+                                self._runtime.custom.pop("yolo_session", None)
+                                self._runtime.custom["m9_3_paused_session"] = session_id
+                            except Exception:  # noqa: BLE001
+                                pass
+                            _budget_paused = True
+                    # ALLOW + ASK both fall through to the consent gate
+                    # below. ASK semantics map onto consent gate's
+                    # PER_ACTION prompt for any tool with
+                    # capability_claims; tools without claims have no
+                    # interactive surface and effectively allow.
+
+                # M9.3: if the budget was ALREADY paused entering this
+                # dispatch, force every call into the consent gate
+                # PER_ACTION path by treating un-blocked calls as ASK
+                # (which the gate already handles). Implementation:
+                # leave runtime in default mode (already done by the
+                # block-trip path above). If this dispatch never tripped
+                # but the session is already paused from a prior turn,
+                # do the same flip here so the consent gate sees
+                # default mode.
+                if _budget_paused and session_id:
+                    try:
+                        self._runtime.custom["permission_mode"] = "default"
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception as e:  # noqa: BLE001
+                _log.warning(
+                    "M9.2 classifier path raised — falling through to "
+                    "consent gate without classification: %s", e,
+                )
+
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
             from plugin_sdk.consent import ConsentTier
             if not BypassManager.is_active(self._runtime):
+                # Hermes parity: pre-consent Tirith scan. For tools that
+                # ship a "command" or "code" argument, we scan it BEFORE
+                # the consent gate fires so any findings can surface in
+                # the user prompt. block verdicts skip the consent gate
+                # entirely; warn verdicts pass findings through to the
+                # prompt; allow verdicts are no-ops.
+                tirith_per_call: dict[str, tuple[str, str]] = {}
+                # call.id -> (action, findings_text)
+                _TIRITH_TARGETS: dict[str, str] = {
+                    "ExecuteCode": "code",
+                    "Bash": "command",
+                }
+                for c in calls:
+                    arg_key = _TIRITH_TARGETS.get(c.name)
+                    if arg_key is None:
+                        continue
+                    try:
+                        target = (c.arguments or {}).get(arg_key) or ""
+                    except (AttributeError, TypeError):
+                        target = ""
+                    if not isinstance(target, str) or not target.strip():
+                        continue
+                    try:
+                        from opencomputer.security.tirith import (
+                            check_command as _tirith_check,
+                        )
+                        from opencomputer.security.tirith import (
+                            format_findings_for_user as _format_findings,
+                        )
+                        verdict = await asyncio.to_thread(_tirith_check, target)
+                    except Exception:  # noqa: BLE001 — never let scan break dispatch
+                        continue
+                    if verdict.action in ("warn", "block"):
+                        text = _format_findings(verdict) or verdict.summary or ""
+                        if text:
+                            tirith_per_call[c.id] = (verdict.action, text)
+
                 for c in calls:
                     tool = registry.get(c.name)
                     if tool is None:
                         continue
                     claims = getattr(tool, "capability_claims", ())
+                    # Pre-emptive Tirith block — refuse before consent
+                    # gate fires. Mirrors BashTool's in-tool block path
+                    # but at the dispatch layer so even tools without
+                    # claims get the same protection.
+                    if c.id in tirith_per_call and tirith_per_call[c.id][0] == "block":
+                        blocked[c.id] = (
+                            "Tirith pre-exec scan blocked: "
+                            + tirith_per_call[c.id][1]
+                        )
+                        continue
                     for claim in claims:
                         scope = _extract_scope(c)
                         decision = self._consent_gate.check(
@@ -3494,11 +4563,18 @@ class AgentLoop:
                             and self._consent_gate._prompt_handler is not None
                             and session_id is not None
                         ):
+                            # Hermes parity: thread Tirith warn-findings
+                            # into the prompt so the user decides with
+                            # full security context.
+                            findings_text = None
+                            if c.id in tirith_per_call:
+                                findings_text = tirith_per_call[c.id][1]
                             try:
                                 approval = await self._consent_gate.request_approval(
                                     claim=claim,
                                     scope=scope,
                                     session_id=session_id,
+                                    tirith_findings_text=findings_text,
                                 )
                             except Exception as exc:  # noqa: BLE001
                                 _log.warning(
@@ -3520,6 +4596,26 @@ class AgentLoop:
                         if not decision.allowed:
                             blocked[c.id] = f"consent denied: {decision.reason}"
                             break
+
+        # PR-A Feature 3: ACP per-session denylist gate. Fires AFTER
+        # consent-gate (which is non-bypassable security) and BEFORE
+        # PreToolUse hooks (which are application policy). A tool that
+        # is denied by the IDE-side ``setSessionPermissions`` is short-
+        # circuited just like a consent-denied tool — the model sees the
+        # denied marker as a tool result and can replan without invoking
+        # the tool again. Race-safe: this check runs once per dispatch
+        # entry; any update to ``acp_denied_tools`` affects only the
+        # next dispatch.
+        _acp_denied = getattr(self._runtime, "acp_denied_tools", frozenset())
+        if _acp_denied:
+            for c in calls:
+                if c.id in blocked:
+                    continue
+                if c.name in _acp_denied:
+                    blocked[c.id] = (
+                        f"ACP denylist: tool '{c.name}' is denied for "
+                        "this session"
+                    )
 
         # Fire PreToolUse hooks next (blocking). Determine which calls are blocked.
         for c in calls:
@@ -3720,10 +4816,98 @@ class AgentLoop:
                         pass
                 return result
 
+        # PR-A Feature 1: cancel-aware dispatch. The SteerRegistry's
+        # per-session cancel event lets /steer interrupt async-yielding
+        # tools mid-flight; the agent loop emits <INTERRUPTED-BY-STEER>
+        # placeholders in their slots so the model sees the interruption
+        # and the next-iteration consume injects the steer text as a
+        # <USER-INTERRUPT> nudge.
+        from opencomputer.agent.steer import (
+            default_registry as _steer_registry_for_dispatch,
+        )
+
+        _cancel_event = (
+            _steer_registry_for_dispatch.cancel_event(session_id)
+            if session_id
+            else None
+        )
+        # Stale-event clear: if a previous turn ended without consuming,
+        # the event may still be set. Clear before this dispatch so we
+        # only react to mid-dispatch fires.
+        if _cancel_event is not None and _cancel_event.is_set():
+            _cancel_event.clear()
+
         if self.config.loop.parallel_tools and self._all_parallel_safe(calls):
-            results = await asyncio.gather(*(_run_one(c) for c in calls))
+            _tasks = [asyncio.create_task(_run_one(c)) for c in calls]
+            _watchers: list[asyncio.Task] = list(_tasks)
+            _cancel_watcher: asyncio.Task | None = None
+            if _cancel_event is not None:
+                _cancel_watcher = asyncio.create_task(_cancel_event.wait())
+                _watchers.append(_cancel_watcher)
+
+            await asyncio.wait(
+                _watchers,
+                return_when=(
+                    asyncio.ALL_COMPLETED
+                    if _cancel_event is None
+                    else asyncio.FIRST_COMPLETED
+                ),
+            )
+
+            if _cancel_event is not None and _cancel_event.is_set():
+                # Steer fired mid-dispatch — cancel pending tools cooperatively.
+                _pending_count = sum(1 for t in _tasks if not t.done())
+                _log.info(
+                    "steer cancel fired mid-dispatch: cancelling "
+                    "%d pending tool(s)",
+                    _pending_count,
+                )
+                for _t in _tasks:
+                    if not _t.done():
+                        _t.cancel()
+                # Brief wait so cooperative cancel can produce partial
+                # output (Bash captured stdout, etc.).
+                try:
+                    await asyncio.wait(_tasks, timeout=2.0)
+                except Exception:  # noqa: BLE001
+                    pass
+                results = []
+                for _c, _t in zip(calls, _tasks, strict=True):
+                    if _t.done() and not _t.cancelled():
+                        try:
+                            results.append(_t.result())
+                        except Exception:  # noqa: BLE001
+                            # Pull any stashed partial-output off the task
+                            # (Bash sets _pr_a_partial_stdout on its
+                            # CancelledError handler).
+                            partial = getattr(_t, "_pr_a_partial_stdout", "")
+                            results.append(
+                                _make_cancelled_result(_c, partial_stdout=partial)
+                            )
+                    else:
+                        partial = getattr(_t, "_pr_a_partial_stdout", "")
+                        results.append(
+                            _make_cancelled_result(_c, partial_stdout=partial)
+                        )
+                # NOTE: don't reset_cancel here — between-turn consume
+                # peeks the flag to decide <USER-INTERRUPT> vs <USER-NUDGE>.
+            else:
+                # Normal completion — cancel the watcher, await any tasks
+                # still pending (FIRST_COMPLETED may have left some).
+                if _cancel_watcher is not None and not _cancel_watcher.done():
+                    _cancel_watcher.cancel()
+                _still_pending = [t for t in _tasks if not t.done()]
+                if _still_pending:
+                    await asyncio.gather(*_still_pending, return_exceptions=False)
+                results = [t.result() for t in _tasks]
         else:
-            results = [await _run_one(c) for c in calls]
+            # Serial path: check cancel event between calls.
+            results = []
+            for _c in calls:
+                if _cancel_event is not None and _cancel_event.is_set():
+                    results.append(_make_cancelled_result(_c))
+                    continue
+                results.append(await _run_one(_c))
 
         # TS-T5: subdirectory hint discovery. Append project context files
         # (OPENCOMPUTER.md / AGENTS.md / CLAUDE.md) to the matching tool's
@@ -3984,7 +5168,7 @@ class AgentLoop:
         for c in calls:
             if c.name == "Bash":
                 cmd = c.arguments.get("command")
-                if isinstance(cmd, str) and detect_destructive(cmd) is not None:
+                if isinstance(cmd, str) and detect_destructive_with_context(cmd) is not None:
                     return False
 
         return True
@@ -4005,7 +5189,16 @@ class AgentLoop:
 
             return standard_search_paths()
         except Exception:  # noqa: BLE001
-            _log.debug("demand_tracker: search-path resolution failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): plugin-demand tracking
+            # silently degrades to empty when search paths can't resolve;
+            # user's `oc plugin demand` shows 0 rows for plugins they're
+            # actually demanding.
+            _log.warning(
+                "demand_tracker: search-path resolution failed "
+                "(plugin demand tracking degraded; `oc plugin demand` "
+                "may show fewer signals than reality)",
+                exc_info=True,
+            )
             return []
 
     def _active_profile_plugins(self) -> frozenset[str] | None:
@@ -4029,7 +5222,16 @@ class AgentLoop:
             assert isinstance(enabled, frozenset)
             return enabled
         except Exception:  # noqa: BLE001
-            _log.debug("demand_tracker: profile-config read failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): same observability gap
+            # as search-path failure above — silently disables the
+            # active-plugin filter, so demand tracking conflates
+            # already-enabled plugins with truly-missing ones.
+            _log.warning(
+                "demand_tracker: profile-config read failed "
+                "(plugin-demand active-plugin filter disabled; "
+                "`oc plugin demand` may flag plugins that are already enabled)",
+                exc_info=True,
+            )
             return None
 
     def _build_demand_tracker(self, cfg: Any) -> Any:
@@ -4050,6 +5252,96 @@ class AgentLoop:
                 exc_info=True,
             )
             return _NoOpDemandTracker()
+
+    def _maybe_apply_exit_plan_proposal(self) -> None:
+        """v1.1 plan-2 M5.4 follow-up — consume the ExitPlanMode proposal slot.
+
+        Called after every loop iteration that dispatched an
+        ``ExitPlanMode`` tool call. Reads the process-wide proposal slot
+        set by the tool's ``execute()`` (when the agent passed
+        ``next_mode``), and mutates ``self._runtime`` to switch the
+        permission_mode for the rest of this session.
+
+        - ``next_mode == "keep"`` → leave runtime alone (agent stays in
+          plan mode and continues iterating).
+        - ``next_mode in {"auto","acceptEdits","manual"}`` → rebuild
+          runtime with that mode and clear plan_mode.
+        - No proposal → no-op (the agent called ExitPlanMode without
+          a next_mode suggestion).
+
+        Slot reads from :mod:`opencomputer.agent.exit_plan_proposal`
+        (a core module so the tool's writer and this reader share
+        identity even when the tool's file is loaded under a
+        synthetic plugin-loader name).
+        """
+        from opencomputer.agent.exit_plan_proposal import pop_last_proposal
+
+        try:
+            proposal = pop_last_proposal()
+        except Exception:  # noqa: BLE001
+            _log.debug("M5.4: pop_last_proposal failed", exc_info=True)
+            return
+
+        if proposal is None:
+            return
+        if proposal.next_mode == "keep":
+            _log.info(
+                "M5.4: ExitPlanMode proposal next_mode=keep — staying in plan mode"
+            )
+            return
+        if proposal.next_mode not in ("auto", "acceptEdits", "manual"):
+            _log.warning(
+                "M5.4: ExitPlanMode proposal had unknown next_mode=%r; ignoring",
+                proposal.next_mode,
+            )
+            return
+
+        try:
+            self._runtime = replace(
+                self._runtime,
+                plan_mode=False,
+                permission_mode=proposal.next_mode,
+            )
+            _log.info(
+                "M5.4: applied ExitPlanMode proposal — permission_mode now %r",
+                proposal.next_mode,
+            )
+        except Exception:  # noqa: BLE001
+            _log.warning(
+                "M5.4: failed to mutate runtime for next_mode=%r",
+                proposal.next_mode,
+                exc_info=True,
+            )
+
+
+def _msg_to_dict(msg: Any) -> dict[str, Any]:
+    """v1.1 plan-2 M5.2 (2026-05-09) — minimal Message-to-dict for checkpoints.
+
+    Strips fields that aren't JSON-serialisable (large bytes, custom
+    objects). Captures role + content + tool_calls + tool_call_id +
+    name so a restored session can recreate a working message list.
+    """
+    out: dict[str, Any] = {
+        "role": getattr(msg, "role", "user"),
+        "content": getattr(msg, "content", ""),
+    }
+    if getattr(msg, "tool_calls", None):
+        try:
+            out["tool_calls"] = [
+                {
+                    "id": getattr(tc, "id", ""),
+                    "name": getattr(tc, "name", ""),
+                    "arguments": getattr(tc, "arguments", {}) or {},
+                }
+                for tc in msg.tool_calls
+            ]
+        except Exception:  # noqa: BLE001
+            out["tool_calls"] = []
+    if getattr(msg, "tool_call_id", None):
+        out["tool_call_id"] = msg.tool_call_id
+    if getattr(msg, "name", None):
+        out["name"] = msg.name
+    return out
 
 
 async def _maybe_transform_tool_result(

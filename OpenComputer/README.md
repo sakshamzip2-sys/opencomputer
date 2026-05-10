@@ -22,13 +22,15 @@ Pre-alpha (0.1.0). Core architecture stable. 114 tests passing. Adding features 
 
 Requires **Python 3.13+**.
 
-**One-line install** (macOS / Linux / Termux):
+**One-line install** (macOS / Linux / Termux — on Windows, see the note below):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sakshamzip2-sys/opencomputer/main/scripts/install.sh | bash
 ```
 
 The installer auto-detects pipx / pip --user / venv and falls back gracefully on PEP 668 ("externally managed") Python distributions. Pass `--dry-run` to preview, `--dev` to install from a local clone in editable mode, `--use-pipx` to force pipx.
+
+**Windows users:** OpenComputer runs natively on Windows (Python 3.13+) via `pip install opencomputer`. The interactive `oc model`, clipboard, screenshot, and PowerShell-run paths all work on Windows out of the box. If you'd rather use the curl install script, run it inside WSL2 (`wsl --install` from PowerShell, then run the install command above inside the WSL shell). All the same paths apply — keep the install on the Linux side of the WSL filesystem (`~/`) for performance.
 
 **Manual install:**
 
@@ -127,6 +129,17 @@ oc skills tap remove anthropics/skills
 - Every install runs through Skills Guard's threat scanner. Verdicts of `dangerous` block the install; `caution` for community sources requires `--force`. Trusted sources (e.g. bundled `well-known`) install on `safe` or `caution`.
 - `~/.opencomputer/<profile>/skills/.hub/audit.log` is an append-only JSONL of install/uninstall/scan_blocked events.
 - Skills tapped from arbitrary GitHub repos default to `community` trust level.
+
+## Local fine-tuning
+
+OpenComputer ships fine-tuning support via two bundled skills:
+
+- `oc skills run trl-fine-tuning` — SFT / DPO / PPO / GRPO / RLHF using HuggingFace TRL on your local hardware.
+- `oc skills run weights-and-biases` — experiment tracking + hyperparameter sweeps + model registry.
+
+OpenComputer does **not** bundle Atropos / Tinker RL training infrastructure. If you want the GRPO+LoRA-via-Tinker-Atropos path documented in some Hermes references, run it as a separate process and route the resulting model through OC via `oc model → Custom endpoint`. Bundled-Atropos integration is reopen-on-demand — file an issue with your concrete use case.
+
+For local-model **inference** (Ollama / vLLM / SGLang / llama.cpp / LM Studio + WSL2 networking), see [`docs/local-models.md`](docs/local-models.md).
 
 ## Multi-Profile Routing
 
@@ -411,6 +424,42 @@ opencomputer plugin where my-tool                            # print filesystem 
 ```
 
 Discovery order: **profile-local → global → bundled**. Profile-local shadows global shadows bundled on id collision.
+
+#### Install sources (2026-05-06)
+
+Three install sources are supported in addition to the local-directory form:
+
+```bash
+# Catalog (existing) — slug resolved through the configured catalog URL
+opencomputer plugin install example-plugin --remote
+
+# Git — shallow clone of any git url (HTTPS, SSH, file://). Requires --id
+# matching the cloned plugin.json's id. Optional --ref pins a sha/tag.
+opencomputer plugin install git+https://github.com/example/plugin.git --id example-plugin
+opencomputer plugin install git+ssh://git@host/x/y.git --id y --ref abc1234
+
+# URL — raw https tarball. Requires --id and --sha256.
+opencomputer plugin install https://example.com/plugin-0.1.0.tgz \
+  --id plugin --sha256 ${SHA256_HASH}
+```
+
+Every install runs an AST + regex security scan after extract. Patterns
+that match `eval(requests.get(...).text)` and similar remote-code-execution
+shapes block the install. `rm -rf`, `os.system`, raw `socket` usage, and
+similar destructive shell calls emit warnings (logged but not blocked) —
+promote to block in your local policy by registering a `BEFORE_INSTALL`
+hook that returns `HookDecision(decision="block", reason="...")` based on
+the scan report.
+
+#### Verifying installed bytes
+
+```bash
+opencomputer plugin verify <plugin-id>
+```
+
+Re-fetches the original source (catalog tarball, git ref, or url tarball)
+and compares bytes-for-bytes against the on-disk install. Reports any
+drift, exits non-zero on drift, exits zero when clean.
 
 Plugins can declare compatibility in their manifest:
 

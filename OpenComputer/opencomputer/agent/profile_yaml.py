@@ -26,8 +26,13 @@ import yaml
 
 __all__ = [
     "atomic_write_yaml",
+    "get_custom_personalities",
+    "get_default_personality",
+    "get_display_skin",
     "modify_yaml_locked",
     "load_yaml",
+    "set_default_personality",
+    "set_display_skin",
 ]
 
 
@@ -76,3 +81,94 @@ def modify_yaml_locked(path: Path, mutate) -> dict[str, Any]:
         mutate(data)
         atomic_write_yaml(path, data)
     return data
+
+
+def set_default_personality(config_path: Path, name: str) -> None:
+    """Persist ``agent.default_personality: name`` to the profile config.
+
+    Empty ``name`` removes the key (so resolution falls back to the
+    built-in 'helpful'). Uses :func:`modify_yaml_locked` so concurrent
+    writers serialize cleanly.
+    """
+    def _mutate(data: dict[str, Any]) -> None:
+        agent = data.setdefault("agent", {})
+        if not isinstance(agent, dict):
+            agent = {}
+            data["agent"] = agent
+        if name:
+            agent["default_personality"] = name
+        else:
+            agent.pop("default_personality", None)
+
+    modify_yaml_locked(config_path, _mutate)
+
+
+def get_default_personality(config_path: Path) -> str:
+    """Return ``agent.default_personality`` from the profile config, or
+    empty string if missing or malformed. Never raises.
+    """
+    try:
+        data = load_yaml(config_path)
+    except (OSError, ValueError, yaml.YAMLError):
+        return ""
+    agent = data.get("agent")
+    if not isinstance(agent, dict):
+        return ""
+    value = agent.get("default_personality", "")
+    return str(value) if isinstance(value, str) else ""
+
+
+def get_display_skin(config_path: Path) -> str:
+    """Return ``display.skin`` from the profile config, or empty string
+    if missing or malformed. Never raises.
+    """
+    try:
+        data = load_yaml(config_path)
+    except (OSError, ValueError, yaml.YAMLError):
+        return ""
+    display = data.get("display")
+    if not isinstance(display, dict):
+        return ""
+    value = display.get("skin", "")
+    return str(value) if isinstance(value, str) else ""
+
+
+def get_custom_personalities(config_path: Path) -> dict[str, str]:
+    """Return ``agent.personalities`` from the profile config as a
+    {name: body} dict, dropping non-string entries. Never raises.
+    """
+    try:
+        data = load_yaml(config_path)
+    except (OSError, ValueError, yaml.YAMLError):
+        return {}
+    agent = data.get("agent")
+    if not isinstance(agent, dict):
+        return {}
+    raw = agent.get("personalities")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str) and v.strip():
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def set_display_skin(config_path: Path, name: str) -> None:
+    """Persist ``display.skin: name`` to the profile config.
+
+    Empty ``name`` removes the key (so resolution falls back to the
+    built-in 'default' skin). Uses :func:`modify_yaml_locked` so
+    concurrent writers serialize cleanly.
+    """
+    def _mutate(data: dict[str, Any]) -> None:
+        display = data.setdefault("display", {})
+        if not isinstance(display, dict):
+            display = {}
+            data["display"] = display
+        if name:
+            display["skin"] = name
+        else:
+            display.pop("skin", None)
+
+    modify_yaml_locked(config_path, _mutate)

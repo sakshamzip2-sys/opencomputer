@@ -1,4 +1,4 @@
-"""Tirith pre-exec command scanner — Hermes Tier 3 port (MVP).
+"""Tirith pre-exec command scanner — Hermes Tier 3 port (production).
 
 Wraps the external Rust binary at ``sheeki03/tirith`` for shell-command
 security scanning before execution. Catches:
@@ -8,16 +8,21 @@ security scanning before execution. Catches:
 - Suspicious sudo escalations
 - Known-bad binary patterns
 
-This is the **MVP** wrapper. Auto-install + cosign verification (which
-the Hermes upstream ships) are intentionally NOT in this PR — users
-install ``tirith`` themselves (``brew install tirith`` / ``cargo install
-tirith``) and we just call it. Lazy-install is a clean follow-up.
+Auto-install + cosign verification: when
+``security.tirith.auto_install: true`` is set in config (default
+False), :func:`check_command` lazy-installs the binary into
+``~/.opencomputer/<profile>/bin/tirith`` on first use via
+:mod:`opencomputer.security.tirith_install`. SHA-256 checksums from the
+release's ``checksums.txt`` are mandatory; cosign provenance is checked
+when the cosign binary is on PATH (silently skipped otherwise — log the
+fact, don't block).
 
 Config (``~/.opencomputer/<profile>/config.yaml``)::
 
     security:
       tirith:
         enabled: true              # default false; opt-in
+        auto_install: false        # default false; lazy-fetch+verify on miss
         path: tirith               # bin name on PATH (or absolute)
         timeout_seconds: 5         # subprocess timeout
         fail_open: true            # on spawn error / timeout: allow
@@ -37,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -80,6 +86,200 @@ def is_available(*, path: str = "tirith") -> bool:
     return _resolve_binary(path) is not None
 
 
+def _maybe_auto_install():
+    """Lazily install tirith into the active profile's bin dir.
+
+    Returns the installed binary path on success, or None when:
+        * ``security.tirith.auto_install`` is not enabled in config.
+        * The active profile cannot be resolved.
+        * The platform is unsupported.
+        * Network / verification failure.
+
+    Always best-effort — never raises to the caller. The
+    ``check_command`` caller treats None as "binary still missing,
+    apply fail_open semantics".
+    """
+    # Lazy imports keep the test path clean — opting out of network
+    # is the default so this code only runs when explicitly enabled.
+    try:
+        import yaml
+
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        prof = read_active_profile()
+        if prof is None:
+            return None
+        home = profile_home_dir(prof)
+        cfg_path = home / "config.yaml"
+        if not cfg_path.exists():
+            return None
+        with cfg_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        cfg = (data.get("security") or {}).get("tirith") or {}
+        if not bool(cfg.get("auto_install", False)):
+            return None
+        from opencomputer.security.tirith_install import (
+            cleanup_stale_tmp_files,
+            install_if_missing,
+        )
+
+        target_dir = home / "bin"
+        # Drop any leftovers from a previous interrupted install.
+        try:
+            cleanup_stale_tmp_files(target_dir)
+        except OSError:
+            pass
+        return install_if_missing(target_dir=target_dir)
+    except Exception:  # noqa: BLE001 — never let auto-install crash the agent
+        logger.warning("tirith auto-install attempt failed", exc_info=True)
+        return None
+
+
+# ─── local pre-flight ──────────────────────────────────────────────────
+#
+# Hermes-followup 2026-05-07. Two cheap pattern classes that fire BEFORE
+# the external binary spawn so we don't pay subprocess latency on
+# obvious cases AND we still catch them when ``tirith`` is uninstalled
+# or unreachable. Each returns a list of finding dicts (same shape as
+# ``check_command`` returns) — empty list = pass.
+
+
+#: Sudo / privilege escalation patterns. Catches ``sudo``, ``doas``,
+#: ``su -``, and the common ``su root`` form. Conservative — does NOT
+#: flag ``sudo -V`` (version) or ``sudo -h`` (help) on the assumption
+#: that an attacker who needs to escalate isn't asking for help text.
+_SUDO_RE = re.compile(
+    r"(?<![A-Za-z_])(?:sudo(?:\s|$)|doas(?:\s|$)|su\s+(?:-\s|root))",
+    re.IGNORECASE,
+)
+
+#: Known-bad standalone binaries — running these from a chat-driven
+#: command is almost always a mistake or an attack. ``mkfs.*`` formats
+#: filesystems, ``dd`` is the classic disk-wiper, ``shred`` zeros
+#: free space, ``fdisk``/``parted`` repartitions. The list is small +
+#: high-confidence; bigger lists go in the external Tirith binary
+#: where catalogued patterns live.
+_BAD_BINARY_RE = re.compile(
+    r"(?<![A-Za-z_])(mkfs(?:\.[a-z0-9]+)?|dd\s+if=|shred\s+|fdisk\s+|parted\s+)",
+    re.IGNORECASE,
+)
+
+#: Network-exfiltration patterns. Catches ``curl --upload-file``,
+#: ``curl -F`` (multipart with filename source), ``curl … --data-binary
+#: @file``, and ``wget --post-file`` — all of which read a local file
+#: and POST it to a remote endpoint. A chat-driven shell command that
+#: uploads disk content to a URL is almost never legitimate; if it is,
+#: the user can confirm via the tool-result-middleware route.
+_EXFIL_RE = re.compile(
+    r"(?:"
+    r"\bcurl\b[^;|]*?(?:--upload-file|-F\s+\w+=@|--data-binary\s*@)"
+    r"|\bwget\b[^;|]*?--post-file"
+    r"|\bnc\b[^;|]*?<\s*/(?:etc|home|var)/"
+    r")",
+    re.IGNORECASE,
+)
+
+#: Crypto-mining indicators. The keys are well-known mining-binary
+#: names + canonical pool URLs. A user who actually wants xmrig can
+#: run it outside the agent; the agent should never spawn it.
+_CRYPTO_MINER_RE = re.compile(
+    r"(?<![A-Za-z_])(?:xmrig|minerd|cgminer|sgminer|t-rex|ethminer|nbminer)\b"
+    r"|stratum\+(?:tcp|ssl)://"
+    r"|(?:pool\.minexmr\.com|nanopool\.org|ethermine\.org|f2pool\.com)",
+    re.IGNORECASE,
+)
+
+#: Shell-history clearing — common cover-tracks pattern. ``history -c``,
+#: ``rm`` against ``~/.bash_history`` / ``~/.zsh_history``, ``unset
+#: HISTFILE`` to disable the next session's logging.
+_HIST_TAMPER_RE = re.compile(
+    r"(?:"
+    r"\bhistory\s+-c\b"
+    r"|\brm\b[^;|]*?\.(?:bash|zsh|fish)_history"
+    r"|\bunset\s+HISTFILE\b"
+    r"|>\s*~/\.(?:bash|zsh|fish)_history\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def local_preflight(command: str) -> list[dict[str, Any]]:
+    """Cheap local scan run before the external binary spawn.
+
+    Two pattern classes:
+    - ``preflight.sudo_escalation`` — sudo/doas/su patterns.
+    - ``preflight.dangerous_binary`` — mkfs/dd/shred/fdisk/parted.
+
+    Returns a list of finding dicts with ``rule`` + ``severity`` +
+    ``message`` keys (same shape ``check_command`` produces). Empty
+    list = pass. The caller decides verdict; this function is pure.
+    """
+    findings: list[dict[str, Any]] = []
+    if _SUDO_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.sudo_escalation",
+                "severity": "block",
+                "message": (
+                    "command requests privilege escalation (sudo/doas/su) — "
+                    "agent commands should run with the user's normal "
+                    "privileges, never elevated"
+                ),
+            }
+        )
+    if _BAD_BINARY_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.dangerous_binary",
+                "severity": "block",
+                "message": (
+                    "command invokes a destructive disk-management binary "
+                    "(mkfs / dd / shred / fdisk / parted) — refused at "
+                    "pre-flight"
+                ),
+            }
+        )
+    if _EXFIL_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.network_exfiltration",
+                "severity": "block",
+                "message": (
+                    "command uploads local file content to a remote endpoint "
+                    "(curl/wget/nc with file source) — refused at pre-flight; "
+                    "if intentional, run outside the agent"
+                ),
+            }
+        )
+    if _CRYPTO_MINER_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.crypto_miner",
+                "severity": "block",
+                "message": (
+                    "command invokes a crypto-mining binary or pool URL — "
+                    "refused at pre-flight"
+                ),
+            }
+        )
+    if _HIST_TAMPER_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.history_tamper",
+                "severity": "block",
+                "message": (
+                    "command tampers with shell history (clear / unset "
+                    "HISTFILE / overwrite history file) — refused at "
+                    "pre-flight as a cover-tracks signal"
+                ),
+            }
+        )
+    return findings
+
+
 def check_command(
     command: str,
     *,
@@ -98,13 +298,37 @@ def check_command(
     Tirith never bricks the agent loop. Set ``fail_open=False`` only when
     you want strict-deny on uncertainty (e.g., regulated environments).
     """
+    # Hermes-followup 2026-05-07 — local pre-flight runs before the
+    # binary spawn. If we catch something here, we BLOCK regardless of
+    # tirith availability. Defence-in-depth: even when the upstream
+    # binary is uninstalled, sudo escalation + disk-wipers don't slip
+    # through.
+    pre = local_preflight(command)
+    if pre:
+        return TirithResult(
+            action="block",
+            findings=pre,
+            summary=f"blocked by local pre-flight: {pre[0]['rule']}",
+        )
+
     bin_path = _resolve_binary(path)
+    if bin_path is None:
+        # Auto-install path (Hermes parity): if the operator opted in
+        # via ``security.tirith.auto_install: true``, fetch + verify +
+        # install. The function is best-effort — failure returns None
+        # and we fall through to the fail_open-aware deny branch below.
+        installed = _maybe_auto_install()
+        if installed is not None:
+            bin_path = str(installed)
     if bin_path is None:
         action: Verdict = "allow" if fail_open else "block"
         return TirithResult(
             action=action,
             error=f"tirith binary not found ({path!r})",
-            summary="tirith not installed; install via your package manager",
+            summary=(
+                "tirith not installed; install via your package manager "
+                "or set security.tirith.auto_install: true to fetch"
+            ),
         )
 
     try:

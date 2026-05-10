@@ -15,15 +15,40 @@ from pathlib import Path
 from typing import ClassVar
 
 from . import _common
+from ._naming import _CANONICAL_LABEL, service_label
 from .base import InstallResult, StatusResult, UninstallResult
 
 NAME: ClassVar[str] = "schtasks"
-_TASK_NAME = "OpenComputerGateway"
-_TEMPLATE = (Path(__file__).parent / "templates" / "opencomputer-task.xml").read_text()
+_LEGACY_TASK_NAME = "OpenComputerGateway"
+_LEGACY_XML_FILENAME = "opencomputer-task.xml"
+_TEMPLATE = (Path(__file__).parent / "templates" / _LEGACY_XML_FILENAME).read_text()
 
 
 def supported() -> bool:
     return sys.platform.startswith("win")
+
+
+def _task_name(profile: str = "default") -> str:
+    """Return the schtasks task name for ``profile``.
+
+    Default + canonical home preserves the historical
+    ``OpenComputerGateway`` task name so existing tasks keep working.
+    Multi-install (non-canonical home OR named profile) appends the
+    sha256[:8] hash from ``service_label`` so two daemons can coexist.
+    """
+    label = service_label(profile)
+    if label == _CANONICAL_LABEL:
+        return _LEGACY_TASK_NAME
+    suffix = label.removeprefix(f"{_CANONICAL_LABEL}-")
+    return f"{_LEGACY_TASK_NAME}-{suffix}"
+
+
+def _xml_filename(profile: str = "default") -> str:
+    label = service_label(profile)
+    if label == _CANONICAL_LABEL:
+        return _LEGACY_XML_FILENAME
+    suffix = label.removeprefix(f"{_CANONICAL_LABEL}-")
+    return f"opencomputer-task-{suffix}.xml"
 
 
 def _user_dir() -> Path:
@@ -31,8 +56,8 @@ def _user_dir() -> Path:
     return Path(base) / ".opencomputer"
 
 
-def _xml_path() -> Path:
-    return _user_dir() / "opencomputer-task.xml"
+def _xml_path(profile: str = "default") -> Path:
+    return _user_dir() / _xml_filename(profile)
 
 
 def _resolve_executable() -> str:
@@ -64,14 +89,15 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
     executable = _resolve_executable()
     wd = _common.workdir(profile)
     body = _render_task(executable=executable, workdir=wd, profile=profile)
-    path = _xml_path()
+    task = _task_name(profile)
+    path = _xml_path(profile)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-16")
-    rc, _, err = _schtasks("/create", "/xml", str(path), "/tn", _TASK_NAME, "/f")
+    rc, _, err = _schtasks("/create", "/xml", str(path), "/tn", task, "/f")
     enabled = rc == 0
     started = False
     if restart and enabled:
-        rc_run, _, _ = _schtasks("/run", "/tn", _TASK_NAME)
+        rc_run, _, _ = _schtasks("/run", "/tn", task)
         started = rc_run == 0
     notes: list[str] = []
     if not enabled:
@@ -83,7 +109,7 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
 
 
 def uninstall() -> UninstallResult:
-    _schtasks("/delete", "/tn", _TASK_NAME, "/f")
+    _schtasks("/delete", "/tn", _task_name(), "/f")
     path = _xml_path()
     if path.exists():
         path.unlink()
@@ -98,7 +124,7 @@ def uninstall() -> UninstallResult:
 def status() -> StatusResult:
     path = _xml_path()
     file_present = path.exists()
-    rc, out, _ = _schtasks("/query", "/tn", _TASK_NAME, "/v", "/fo", "list")
+    rc, out, _ = _schtasks("/query", "/tn", _task_name(), "/v", "/fo", "list")
     enabled = rc == 0
     running = False
     if rc == 0:
@@ -119,12 +145,12 @@ def status() -> StatusResult:
 
 
 def start() -> bool:
-    rc, _, _ = _schtasks("/run", "/tn", _TASK_NAME)
+    rc, _, _ = _schtasks("/run", "/tn", _task_name())
     return rc == 0
 
 
 def stop() -> bool:
-    rc, _, _ = _schtasks("/end", "/tn", _TASK_NAME)
+    rc, _, _ = _schtasks("/end", "/tn", _task_name())
     return rc == 0
 
 

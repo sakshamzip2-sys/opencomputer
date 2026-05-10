@@ -34,6 +34,8 @@ from opencomputer.agent.rate_guard import (
 from opencomputer.inference.observability import LLMCallEvent, record_llm_call
 from opencomputer.inference.pricing import compute_cost_usd
 from plugin_sdk.core import Message, ToolCall
+from plugin_sdk.embeddings import MAX_BATCH_SIZE as MAX_EMBED_BATCH_SIZE
+from plugin_sdk.embeddings import EmbeddingBatch
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
@@ -249,6 +251,11 @@ class OpenAIProvider(BaseProvider):
         kwargs: dict[str, Any] = {"api_key": key}
         if base:
             kwargs["base_url"] = base
+        # Wave 3 (2026-05-08) — wire request_timeout_seconds into the SDK
+        # client. AsyncOpenAI accepts a httpx.Timeout (or float). Use the
+        # class-attribute default so subclasses (xai, openrouter, etc.)
+        # inherit cleanly and per-instance overrides work.
+        kwargs["timeout"] = self.request_timeout_seconds
         self.client = AsyncOpenAI(**kwargs)
 
     # ─── message conversion ─────────────────────────────────────────
@@ -399,6 +406,8 @@ class OpenAIProvider(BaseProvider):
         kwargs: dict[str, Any] = {"api_key": key}
         if self._base:
             kwargs["base_url"] = self._base
+        # Wave 3 — pool-rotated clients inherit the same request timeout.
+        kwargs["timeout"] = self.request_timeout_seconds
         return AsyncOpenAI(**kwargs)
 
     async def _do_complete(
@@ -950,6 +959,120 @@ class OpenAIProvider(BaseProvider):
             for t in tools:
                 total += len(enc.encode(_json.dumps(t.to_openai_format())))
         return max(1, total)
+
+    # ─── embeddings (v1.1 plan-3 M6.6) ──────────────────────────────────
+
+    #: Default model used by ``embed()`` when caller does not override.
+    #: 1536-d, ~$0.02/1M tokens (2026-05 pricing).  Both modern and
+    #: cost-efficient — production default.
+    DEFAULT_EMBEDDING_MODEL: str = "text-embedding-3-small"
+
+    #: Per-million-input-tokens USD pricing for known embedding models.
+    #: Only used for ``cost_estimate_usd``.  Unknown model_id → 0.0.
+    _EMBEDDING_PRICING_USD_PER_M_TOK: dict[str, float] = {
+        "text-embedding-3-small": 0.02,
+        "text-embedding-3-large": 0.13,
+        "text-embedding-ada-002": 0.10,
+    }
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str | None = None,
+    ) -> EmbeddingBatch:
+        """OpenAI embeddings via ``AsyncOpenAI.embeddings.create``.
+
+        Chunks internally if ``len(texts) > MAX_EMBED_BATCH_SIZE`` so
+        callers don't need to.  All chunks must succeed; on partial
+        failure the exception propagates and the batch is discarded
+        (the M6.2 vector index treats this as "rebuild later").
+
+        Empty-string inputs are passed through verbatim — OpenAI tolerates
+        them but returns zero-norm vectors that will rank as no-match in
+        cosine retrieval.  Acceptable.
+        """
+        if not texts:
+            # An empty input is a degenerate-but-valid request.  Return
+            # an empty batch with the default model's dimensionality.
+            chosen = model or self.DEFAULT_EMBEDDING_MODEL
+            dim = self._dimensionality_for_model(chosen)
+            return EmbeddingBatch(
+                vectors=[],
+                dimensionality=dim,
+                model_id=chosen,
+                cost_estimate_usd=0.0,
+                prompt_tokens=0,
+            )
+
+        chosen_model = model or self.DEFAULT_EMBEDDING_MODEL
+
+        all_vectors: list[list[float]] = []
+        total_prompt_tokens: int = 0
+        seen_dim: int | None = None
+
+        # Chunk: OpenAI accepts up to 2048 inputs per request but the SDK
+        # contract caps at MAX_EMBED_BATCH_SIZE (100) — use the SDK cap.
+        for i in range(0, len(texts), MAX_EMBED_BATCH_SIZE):
+            chunk = texts[i : i + MAX_EMBED_BATCH_SIZE]
+            response = await self.client.embeddings.create(
+                model=chosen_model,
+                input=chunk,
+            )
+            # OpenAI returns data in input order; we trust that ordering
+            # but verify lengths match.
+            if len(response.data) != len(chunk):
+                raise RuntimeError(
+                    f"OpenAI embeddings returned {len(response.data)} "
+                    f"vectors for {len(chunk)} inputs (chunk index {i})"
+                )
+            for item in response.data:
+                vec = list(item.embedding)
+                if seen_dim is None:
+                    seen_dim = len(vec)
+                elif len(vec) != seen_dim:
+                    raise RuntimeError(
+                        f"OpenAI embeddings returned heterogeneous "
+                        f"dimensionality (saw {seen_dim} then {len(vec)})"
+                    )
+                all_vectors.append(vec)
+
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                total_prompt_tokens += int(getattr(usage, "prompt_tokens", 0) or 0)
+
+        dim = seen_dim if seen_dim is not None else self._dimensionality_for_model(chosen_model)
+
+        cost = self._embedding_cost_usd(chosen_model, total_prompt_tokens)
+
+        return EmbeddingBatch(
+            vectors=all_vectors,
+            dimensionality=dim,
+            model_id=chosen_model,
+            cost_estimate_usd=cost,
+            prompt_tokens=total_prompt_tokens or None,
+        )
+
+    @staticmethod
+    def _dimensionality_for_model(model_id: str) -> int:
+        """Static dimensionality table for known OpenAI embedding models.
+
+        Used only for the empty-input degenerate-batch case where the
+        API is never called.  Unknown model → 1536 (the default-small
+        size).  A non-empty batch always trusts the response shape.
+        """
+        return {
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "text-embedding-ada-002": 1536,
+        }.get(model_id, 1536)
+
+    @classmethod
+    def _embedding_cost_usd(cls, model_id: str, prompt_tokens: int) -> float:
+        per_m = cls._EMBEDDING_PRICING_USD_PER_M_TOK.get(model_id, 0.0)
+        if per_m == 0.0 or prompt_tokens <= 0:
+            return 0.0
+        return round((prompt_tokens / 1_000_000) * per_m, 8)
 
     async def submit_batch(self, requests):
         """Submit a batch via OpenAI's async-file-based batch API.

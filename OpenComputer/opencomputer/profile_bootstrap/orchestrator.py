@@ -134,7 +134,20 @@ def _get_consent_gate() -> Any | None:
 
         store = ConsentStore(conn)
         audit = AuditLogger(conn, hmac_key=key_bytes)
-        return ConsentGate(store=store, audit=audit)
+        gate = ConsentGate(store=store, audit=audit)
+        # Hermes-security-v2 final-gap: subscribe the session-grant
+        # cleanup handler to HookEvent.SESSION_FINALIZE so the in-memory
+        # _session_grants dict doesn't accumulate forever in long-running
+        # gateway daemons. Best-effort: failure is logged but gate is
+        # still returned (sessions just leak grants until restart).
+        try:
+            gate.register_session_finalize_handler()
+        except Exception:  # noqa: BLE001
+            _log.debug(
+                "consent gate session-finalize handler subscription failed",
+                exc_info=True,
+            )
+        return gate
     except Exception:  # noqa: BLE001
         # Any failure → no gate configured. Caller treats as "allow by
         # default". This is the deliberate fallback documented in the

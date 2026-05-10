@@ -5,67 +5,87 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OpenComputer dashboard</title>
   <style>
-    /* Phase 8.A: zero-build CSS. Phase 8.C will replace with proper
-       Tailwind/shadcn — that's a separate frontend project. */
-    html, body { margin: 0; padding: 0; height: 100%; background: #111; color: #ddd;
+    /* Hermes-followup A1 (2026-05-07): swapped hardcoded colours for
+       CSS custom properties driven by ``_themes.js``. Defaults match
+       the original dark theme so existing screenshots still look
+       right. */
+    html, body { margin: 0; padding: 0; height: 100%; background: var(--bg, #111); color: var(--fg, #ddd);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     body { display: flex; flex-direction: column; }
-    header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex;
+    header { padding: 12px 20px; border-bottom: 1px solid var(--border, #333); display: flex;
       gap: 1em; align-items: center; }
-    header .dot { width: 10px; height: 10px; border-radius: 50%; background: #888; }
-    header .dot.up { background: #4ade80; }
-    header .dot.down { background: #ef4444; }
+    header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--fg-muted, #888); }
+    header .dot.up { background: var(--ok, #4ade80); }
+    header .dot.down { background: var(--bad, #ef4444); }
     main { flex: 1; display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
-    aside { border-right: 1px solid #333; overflow-y: auto; padding: 12px; }
-    aside h2 { font-size: 12px; text-transform: uppercase; color: #888;
+    aside { border-right: 1px solid var(--border, #333); overflow-y: auto; padding: 12px; }
+    aside h2 { font-size: 12px; text-transform: uppercase; color: var(--fg-muted, #888);
       margin: 0 0 8px; letter-spacing: 0.05em; }
     aside ul { list-style: none; margin: 0; padding: 0; font-size: 13px; }
     aside li { padding: 6px 8px; border-radius: 4px; cursor: pointer; }
-    aside li:hover { background: #222; }
+    aside li:hover { background: var(--bg-hover, #222); }
     section.chat { display: flex; flex-direction: column; min-height: 0; }
     .messages { flex: 1; overflow-y: auto; padding: 16px 20px; font-size: 14px;
       line-height: 1.5; }
     .messages .turn { margin-bottom: 14px; }
-    .messages .role { font-size: 11px; text-transform: uppercase; color: #888;
+    .messages .role { font-size: 11px; text-transform: uppercase; color: var(--fg-muted, #888);
       margin-bottom: 4px; letter-spacing: 0.05em; }
-    .messages .role.user { color: #93c5fd; }
-    .messages .role.assistant { color: #4ade80; }
+    .messages .role.user { color: var(--user, #93c5fd); }
+    .messages .role.assistant { color: var(--assistant, #4ade80); }
     .messages pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
-    form { display: flex; border-top: 1px solid #333; padding: 12px; gap: 8px; }
-    input[type=text] { flex: 1; background: #1a1a1a; color: #ddd;
-      border: 1px solid #333; border-radius: 4px; padding: 8px 10px;
+    form { display: flex; border-top: 1px solid var(--border, #333); padding: 12px; gap: 8px; }
+    input[type=text] { flex: 1; background: var(--bg-elev, #1a1a1a); color: var(--fg, #ddd);
+      border: 1px solid var(--border, #333); border-radius: 4px; padding: 8px 10px;
       font-family: inherit; font-size: 14px; }
-    input[type=text]:focus { outline: none; border-color: #555; }
-    button { background: #2563eb; color: white; border: 0; padding: 8px 16px;
+    input[type=text]:focus { outline: none; border-color: var(--fg-muted, #555); }
+    button { background: var(--accent, #2563eb); color: white; border: 0; padding: 8px 16px;
       border-radius: 4px; font-family: inherit; cursor: pointer; }
-    button:disabled { background: #444; cursor: not-allowed; }
-    .hint { color: #666; font-size: 11px; padding: 0 20px 8px; }
-    nav.tabs { display: flex; gap: 8px; margin-left: auto; }
-    .tab { padding: 6px 12px; border-radius: 4px; color: #888;
+    button:hover:not(:disabled) { background: var(--accent-hover, #1d4ed8); }
+    button:disabled { background: var(--fg-faint, #444); cursor: not-allowed; }
+    .hint { color: var(--fg-muted, #666); font-size: 11px; padding: 0 20px 8px; }
+    nav.tabs { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+    .tab { padding: 6px 12px; border-radius: 4px; color: var(--fg-muted, #888);
       text-decoration: none; font-size: 13px; }
-    .tab:hover { background: #1a1a1a; color: #ddd; }
-    .tab.active { background: #2563eb; color: white; }
+    .tab:hover { background: var(--bg-elev, #1a1a1a); color: var(--fg, #ddd); }
+    .tab.active { background: var(--accent, #2563eb); color: white; }
+    .nav-divider { width: 1px; height: 16px; background: var(--border, #333); margin: 0 4px; }
+    .theme-picker, .locale-picker {
+      background: var(--bg-elev, #1a1a1a); color: var(--fg, #ddd);
+      border: 1px solid var(--border, #333); border-radius: 4px;
+      padding: 4px 6px; font-family: inherit; font-size: 12px;
+    }
+    /* Tabular layout for the LLM calls page (shared via index.html
+       so other pages can reuse the same .data-table styling). */
+    table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.data-table th { text-align: left; padding: 8px 10px;
+      border-bottom: 1px solid var(--border, #333); color: var(--fg-muted, #888);
+      font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; }
+    table.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border, #222); }
+    table.data-table tr:hover td { background: var(--bg-hover, #1a1a1a); }
+    table.data-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty-state { color: var(--fg-muted, #888); padding: 40px; text-align: center;
+      font-size: 14px; }
   </style>
 </head>
 <body>
   <header>
     <strong>OpenComputer</strong>
     <span class="dot" id="conn-dot"></span>
-    <span id="conn-label">connecting…</span>
+    <span id="conn-label" data-i18n="header.connecting">connecting…</span>
     <nav class="tabs" id="nav-tabs"></nav>
   </header>
   <main>
     <aside>
-      <h2>Sessions</h2>
-      <ul id="sessions"><li style="color:#555">(no sessions yet)</li></ul>
+      <h2 data-i18n="sidebar.sessions">Sessions</h2>
+      <ul id="sessions"><li style="color: var(--fg-faint, #555)" data-i18n="sidebar.no_sessions">(no sessions yet)</li></ul>
     </aside>
     <section class="chat">
       <div class="messages" id="messages">
-        <div class="hint">Type a message and press Enter. The dashboard talks to the wire server at <code id="wire-url-readout"></code>.</div>
+        <div class="hint"><span data-i18n="chat.hint_prefix">Type a message and press Enter. The dashboard talks to the wire server at</span> <code id="wire-url-readout"></code>.</div>
       </div>
       <form id="form" autocomplete="off">
-        <input id="input" type="text" placeholder="Type your message…" disabled>
-        <button id="send" type="submit" disabled>Send</button>
+        <input id="input" type="text" data-i18n-placeholder="chat.placeholder" placeholder="Type your message…" disabled>
+        <button id="send" type="submit" data-i18n="chat.send" disabled>Send</button>
       </form>
     </section>
   </main>
@@ -73,6 +93,8 @@
 <script>
 window.OC_TOKEN = '__SESSION_TOKEN__'.replace(/[<>]/g, '');
 </script>
+<script src="/static/_themes.js"></script>
+<script src="/static/_i18n.js"></script>
 <script src="/static/_dashboard.js"></script>
 <script>
 OCDash.renderNav('chat');
@@ -95,9 +117,10 @@ const pending = new Map();
 
 function setConnected(state) {
   dot.className = "dot " + (state === "up" ? "up" : (state === "down" ? "down" : ""));
-  label.textContent = state === "up" ? "connected"
-                     : state === "down" ? "disconnected"
-                     : "connecting…";
+  const tr = (k, fb) => (window.OCi18n ? window.OCi18n.t(k) : fb);
+  label.textContent = state === "up" ? tr('header.connected', 'connected')
+                     : state === "down" ? tr('header.disconnected', 'disconnected')
+                     : tr('header.connecting', 'connecting…');
   input.disabled = state !== "up";
   sendBtn.disabled = state !== "up";
 }

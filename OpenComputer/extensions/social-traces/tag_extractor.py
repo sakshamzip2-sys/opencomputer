@@ -61,8 +61,7 @@ _STOPWORDS: frozenset[str] = frozenset({
     "something", "anything", "everything", "nothing", "much", "many",
     "very", "just", "also", "then", "than", "such", "only", "still",
     "really", "actually", "basically", "quite", "okay", "sure",
-    "let", "lets", "let's", "going", "got", "get", "able", "should",
-    "want", "wanted", "needs", "look", "looking", "seem", "seems",
+    "let", "lets", "let's", "going", "got", "get", "able", "wanted", "look", "looking", "seem", "seems",
     "tell", "told", "give", "gave", "show", "showed", "shown", "say",
     "said", "know", "knew", "known", "think", "thought", "feel",
     "felt", "find", "found", "ask", "asked", "wonder", "wondered",
@@ -278,7 +277,7 @@ async def extract_tags_via_provider(
             raw = await _call()
         else:
             raw = await asyncio.wait_for(_call(), timeout=timeout_s)
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         _log.debug(
             "social-traces: tag-extract timed out after %.2fs — falling back",
             timeout_s,

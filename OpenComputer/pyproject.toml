@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opencomputer"
-version = "2026.5.5"
+version = "2026.5.9"
 description = "Personal AI agent framework — plugin-first, self-improving, multi-channel"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,6 +44,11 @@ dependencies = [
   "pyperclip>=1.8",
   "rapidocr-onnxruntime>=1.2.3",
   "filelock>=3.16",
+  # Dashboard (`oc dashboard`) is a first-class CLI surface as of 2026-05-07.
+  # cli.py imports cli_dashboard unconditionally (so `oc --help` lists it),
+  # which transitively requires FastAPI. Promoted from the [browser] extra.
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
   # JSON5 manifest tolerance — comments + trailing commas in plugin.json
   # (Sub-project G openclaw-parity Task 4). Two-tier parse: json.loads
   # first, json5.loads only on JSONDecodeError. ~30KB pure-Python lib.
@@ -58,9 +63,37 @@ dependencies = [
   # a transitive dep). Used only when WebFetch is invoked with
   # mode="readability" or auto-mode picks readability for an article URL.
   "readability-lxml>=0.8.1",
+  # BM25 retrieval over MEMORY.md (v1.1 plan-3 M6.1). Pure-Python; ~30KB.
+  # Used by opencomputer.agent.memory_index.BM25Index. Foundation for
+  # M6.2 vector index and M6.3 Active Memory pre-loop injection.
+  "rank_bm25>=0.2.2,<0.3",
 ]
 
 [project.optional-dependencies]
+# PR-A Feature 2 (2026-05-07): wake-word detection via openWakeWord.
+#   pip install opencomputer[wake]
+# Apache 2.0; ONNX-based; CPU-only; no API key. Default model bundled
+# with openwakeword (hey_jarvis). onnxruntime>=1.17 for Apple Silicon
+# stability. Verify install with: oc doctor wake.
+wake = [
+  "openwakeword>=0.6.0",
+  "onnxruntime>=1.17",
+]
+# Custom wake-word training (2026-05-07): produces a hey_open_computer
+# (or other custom-phrase) ONNX model on the user's CPU in ~30 min.
+#   pip install opencomputer[wake-train]
+# Heavy: pulls torch (~2GB) + openwakeword[train] + huggingface_hub for
+# negative-sample download. Cross-platform; CPU-only. Verify install with
+# `oc doctor wake-train`. Run training: `oc voice train-wake`.
+wake-train = [
+  "openwakeword[train]>=0.6.0,<0.7",
+  "torch>=2.1",
+  "huggingface_hub>=0.20",
+  "soundfile>=0.12",
+  "piper-tts>=1.2",
+  "openwakeword>=0.6.0",
+  "onnxruntime>=1.17",
+]
 bedrock = ["boto3>=1.35.0"]
 # Wave 6.D — pseudo-terminal bridge for the dashboard chat tab.
 #   pip install opencomputer[pty]
@@ -155,8 +188,8 @@ browser = [
   # Browser-port subsystems:
   "send2trash>=1.8",   # cross-platform trash for profile reset/delete (W0a)
   "websockets>=12",    # CDP WS handshake check (W0c lifecycle.is_chrome_cdp_ready)
-  "fastapi>=0.110",    # HTTP control surface (W2b)
-  "uvicorn>=0.27",     # ASGI runner for FastAPI (W2b)
+  # fastapi + uvicorn are now base deps (2026-05-07 — `oc dashboard` is
+  # core). Kept commented here for reference; do not re-add.
 ]
 
 [project.scripts]
@@ -178,6 +211,16 @@ packages = ["opencomputer", "plugin_sdk"]
 # systemd unit template — shipped alongside opencomputer.service so
 # `opencomputer service install` can read it from the installed wheel.
 "opencomputer/service/templates/opencomputer.service" = "opencomputer/service/templates/opencomputer.service"
+# Dashboard SPA build artifact (Vite output). Built by
+# `scripts/build-dashboard.sh` before packaging; excluded from git via
+# .gitignore. The dashboard server.py auto-detects the SPA at
+# ``opencomputer/dashboard/static/spa/`` and falls back to the legacy
+# static pages when absent (so source-installs without a frontend
+# build still get a usable dashboard).
+"opencomputer/dashboard/static/spa" = "opencomputer/dashboard/static/spa"
+# TUI build artifact (Ink+React, vendored from hermes-agent/ui-tui under
+# MIT). Built by `scripts/build-tui.sh`, used by `oc tui`.
+"opencomputer/ui-tui/dist" = "opencomputer/ui-tui/dist"
 
 [tool.ruff]
 line-length = 100
@@ -218,6 +261,16 @@ target-version = ["py312"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Default-deselect benchmark tests so the regular suite stays hermetic.
+# The benchmark mark gates live-LLM tests that need a working
+# Anthropic/OpenAI key + network — not a CI gate. To run them:
+#   pytest -m benchmark                # ALL benchmarks
+#   pytest -m benchmark tests/foo.py   # one file's benchmarks
+# The 2026-05-08 incident: a benchmark test was failing in the default
+# suite because the user's ANTHROPIC_API_KEY was a Claude-Router proxy
+# key not valid for direct Anthropic — the test should never have been
+# collected in the first place.
+addopts = "-m 'not benchmark'"
 markers = [
   "benchmark: opt-in slow benchmark tests requiring a live LLM provider (run via `pytest -m benchmark`)",
 ]

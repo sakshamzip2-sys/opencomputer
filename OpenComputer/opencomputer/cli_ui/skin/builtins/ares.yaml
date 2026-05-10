@@ -1,0 +1,49 @@
+name: ares
+description: Crimson + bronze, sword/shield register.
+
+colors:
+  # Banner
+  banner_border:    "#8B1A1A"
+  banner_title:     "#DC143C"
+  banner_accent:    "#CD7F32"
+  banner_dim:       "#8B4513"
+  banner_text:      "#FFD7B8"
+  # UI semantic
+  ui_accent:        "#CD7F32"
+  ui_label:         "#DC143C"
+  ui_ok:            "#9CAF88"
+  ui_error:         "#FF4500"
+  ui_warn:          "#DAA520"
+  # Prompt + input area
+  prompt:           "#FFB347"
+  input_rule:       "#8B1A1A"
+  # Agent response box
+  response_border:  "#DC143C"
+  # Session badge + border
+  session_label:    "#FFD7B8"
+  session_border:   "#5C2A1F"
+  # Status bars
+  status_bar_bg:    "#2A0D0D"
+  status_bar_fg:    "#FFD7B8"
+  voice_status_bg:  "#3D1414"
+  # TUI selection highlight
+  selection_bg:     "#5C2A1F"
+  # Completion menu panes
+  completion_menu_bg:               "#3D1414"
+  completion_menu_current_bg:       "#8B1A1A"
+  completion_menu_meta_bg:          "#2A0D0D"
+  completion_menu_meta_current_bg:  "#5C2A1F"
+  # Legacy / extra
+  agent_text:       "#FFD7B8"
+  agent_label:      "#DC143C"
+
+spinner:
+  thinking_verbs: [strategizing, drilling, sparring, marshalling]
+  wings: [["⚔", "⚔"], ["▲", "▲"]]
+  waiting_faces: ["[◇]", "[◆]", "[◈]"]
+  thinking_faces: ["[⌖]", "[⌬]", "[⌘]"]
+
+branding:
+  agent_name: "Ares"
+  response_label: " ⚔ Ares "
+  prompt_symbol: "⚔"

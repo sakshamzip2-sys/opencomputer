@@ -459,6 +459,14 @@ class SlackAdapter(BaseChannelAdapter):
                         "action_id": f"oc_approve_once_{request_token}",
                         "style": "primary",
                     },
+                    # Hermes parity: 4th verb 'session' — in-memory grant
+                    # cleared on SESSION_FINALIZE.
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🕒 Session"},
+                        "value": f"{_APPROVAL_VALUE_PREFIX}session:{request_token}",
+                        "action_id": f"oc_approve_session_{request_token}",
+                    },
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "✓ Allow always"},

@@ -274,6 +274,15 @@ def build_prompt_session(
         buf.delete_before_cursor(count=len(text))
         buf.insert_text(target)
 
+    # Hermes v2 D7 wiring (2026-05-09): use a DynamicStyle so the
+    # completion menu picks up live skin changes from /skin <name>
+    # without rebuilding the PromptSession. ``current_menu_style`` is
+    # called on every render; ``DynamicStyle`` accepts a callable and
+    # re-resolves each time.
+    from prompt_toolkit.styles import DynamicStyle
+
+    from opencomputer.cli_ui.style import current_menu_style
+
     return PromptSession(
         message=HTML("<ansigreen><b>you ›</b></ansigreen> "),
         history=FileHistory(str(history_path)),
@@ -297,6 +306,7 @@ def build_prompt_session(
         # descriptions on every row. Acceptable V1 — strict Claude-Code
         # parity is a follow-up requiring a custom Application layout.
         complete_style=CompleteStyle.MULTI_COLUMN,
+        style=DynamicStyle(current_menu_style),
         # erase_when_done clears the typed prompt line on submit so the
         # chat loop can re-render the user's message inside a styled
         # boundary box (no duplicate "you › ..." line in scrollback).
@@ -798,6 +808,35 @@ async def read_user_input(
     def _ctrl_j(event):  # noqa: ANN001
         input_buffer.insert_text("\n")
 
+    # Hermes-CLI parity A7 — Ctrl+Z suspends to background (Unix only).
+    # Use ``shell-out`` style: leave alt-screen / restore tty, raise
+    # SIGTSTP, then re-init when ``fg`` returns. prompt-toolkit doesn't
+    # ship ``enable_suspend`` (verified via `inspect.signature`), so we
+    # wire the key binding manually. Windows is no-op.
+    @kb.add(Keys.ControlZ)
+    def _ctrl_z(event):  # noqa: ANN001
+        import os as _os
+        import signal as _signal
+        import sys as _sys
+
+        if _sys.platform == "win32":
+            return  # no SIGTSTP on Windows
+        try:
+            _sys.stderr.write(
+                "\nOpenComputer Agent has been suspended. Run `fg` to bring OpenComputer Agent back.\n"
+            )
+            _sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            event.app.exit(result="")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _os.kill(_os.getpid(), _signal.SIGTSTP)
+        except Exception:  # noqa: BLE001
+            pass
+
     @kb.add(Keys.Escape, Keys.Enter)
     def _alt_enter(event):  # noqa: ANN001
         input_buffer.insert_text("\n")
@@ -973,6 +1012,23 @@ async def read_user_input(
     )
     badge_window = VSplit([badge_text_window, title_window])
 
+    # 2026-05-08 — Claude-Code-style status line. Always visible when a
+    # runtime is wired and stdout is a TTY. Lives BELOW the mode badge
+    # so the badge row stays the "overrides shown only" rail and the
+    # status line is the always-on "where am I in the budget" rail.
+    from opencomputer.cli_ui.status_line import render_status_line
+
+    def _status_line_text() -> list[tuple[str, str]]:
+        return render_status_line(runtime)
+
+    status_line_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_status_line_text),
+            height=1,
+        ),
+        filter=Condition(lambda: _badge_visible),
+    )
+
     layout = Layout(
         HSplit(
             [
@@ -982,6 +1038,7 @@ async def read_user_input(
                 VSplit([prompt_window, input_window]),
                 paste_hint_window,
                 badge_window,
+                status_line_window,
             ]
         ),
         focused_element=input_window,
@@ -1023,4 +1080,31 @@ async def read_user_input(
     )
 
     text = await app.run_async()
-    return _strip_trailing_whitespace(text or "")
+    text = _strip_trailing_whitespace(text or "")
+    text = _maybe_expand_at_refs(text)
+    return text
+
+
+def _maybe_expand_at_refs(text: str) -> str:
+    """Expand ``@file:``/``@folder:``/``@diff``/``@staged``/``@git:N``/``@url:``
+    references in user input. CLI-only — channel adapters do not call this.
+
+    Failures are non-fatal; the original text is returned on any error
+    so the user's send is never blocked by an expander glitch.
+    """
+    if "@" not in text:
+        return text
+    try:
+        import os
+
+        from opencomputer.agent.at_references import AtRefContext, expand
+        return expand(
+            text,
+            ctx=AtRefContext(
+                cwd=os.getcwd(),
+                home=str(Path.home()),
+                context_window_chars=200_000,
+            ),
+        )
+    except Exception:  # noqa: BLE001 — never block send on expander
+        return text

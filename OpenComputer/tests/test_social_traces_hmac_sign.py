@@ -72,7 +72,7 @@ def _ensure_alias() -> None:
             sys.modules[full] = sub_mod
             sub_spec.loader.exec_module(sub_mod)
         spec.loader.exec_module(client_pkg)
-        setattr(parent, "client", client_pkg)
+        parent.client = client_pkg
 
 
 _ensure_alias()
@@ -81,6 +81,7 @@ from extensions.social_traces.client import make_client  # noqa: E402
 from extensions.social_traces.client.http import (  # noqa: E402
     HttpTraceNetworkClient,
 )
+
 from plugin_sdk.traces import TraceCard, TraceMeta, TraceStep  # noqa: E402
 
 
@@ -132,8 +133,8 @@ async def test_submit_unsigned_when_no_creds():
     assert receipt.accepted is True
 
     req = captured["req"]
-    assert "x-submitter-hash" not in {k.lower() for k in req.headers.keys()}
-    assert "x-signature" not in {k.lower() for k in req.headers.keys()}
+    assert "x-submitter-hash" not in {k.lower() for k in req.headers}
+    assert "x-signature" not in {k.lower() for k in req.headers}
 
 
 async def test_submit_signs_when_creds_provided():
@@ -198,7 +199,7 @@ async def test_submit_does_not_sign_with_only_hash():
     await client.submit(_make_card())
 
     req = captured["req"]
-    assert "x-signature" not in {k.lower() for k in req.headers.keys()}
+    assert "x-signature" not in {k.lower() for k in req.headers}
 
 
 async def test_submit_does_not_sign_with_only_key():
@@ -222,7 +223,7 @@ async def test_submit_does_not_sign_with_only_key():
     await client.submit(_make_card())
 
     req = captured["req"]
-    assert "x-signature" not in {k.lower() for k in req.headers.keys()}
+    assert "x-signature" not in {k.lower() for k in req.headers}
 
 
 async def test_submit_body_is_compact_json():

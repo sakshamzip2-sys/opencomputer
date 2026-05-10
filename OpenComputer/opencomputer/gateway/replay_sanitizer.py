@@ -27,9 +27,11 @@ into two for safety. Schema migration is the heavier change.
 """
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Iterable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 
 def sanitize_for_replay(
@@ -79,4 +81,140 @@ def _get(m: Any, key: str) -> Any:
     return getattr(m, key, None)
 
 
-__all__ = ["sanitize_for_replay"]
+# ─── A4 — partial-message recovery (2026-05-06 OpenClaw deep-comparison) ───
+
+
+@dataclass(frozen=True, slots=True)
+class PartialRecoveryResult:
+    """Outcome of attempting to recover a partial assistant stream.
+
+    * ``status`` — what to do with the partial text:
+      - ``"recoverable"`` → ``text`` is safe to re-emit to the channel
+      - ``"unrecoverable"`` → mid-tool-call interruption; ``reason``
+        explains why and the caller should drop the partial.
+    * ``text`` — the cleaned-up text (may be shorter than input if
+      a half-rendered tool-call XML chunk was trimmed).
+    * ``reason`` — short human-readable diagnosis.
+    """
+
+    status: Literal["recoverable", "unrecoverable"]
+    text: str
+    reason: str
+
+
+# Open-tag-without-close patterns. These detect partial XML/markup left
+# behind by a stream that cut mid-tool-call. Order matters: we trim from
+# the LATEST open tag since the rest of the text before it is intact.
+_OPEN_BLOCK_TAGS: tuple[str, ...] = (
+    "thinking",
+    "function_calls",
+    "antml:function_calls",
+    "tool_use",
+)
+
+
+def _last_open_tag_index(text: str) -> int | None:
+    """Return the index of the latest unbalanced `<tag>` opener in text.
+
+    A tag is "unbalanced" if no matching `</tag>` appears AFTER its
+    opener. Returns the byte offset of the offending `<` so the caller
+    can trim the text.
+    """
+    candidates: list[int] = []
+    for tag in _OPEN_BLOCK_TAGS:
+        # Walk left-to-right; for each opener, look for a closer later in
+        # the text. If no closer, this opener is unbalanced.
+        pattern_open = re.compile(r"<" + re.escape(tag) + r"\b")
+        pattern_close = re.compile(r"</" + re.escape(tag) + r">")
+        for m in pattern_open.finditer(text):
+            tail = text[m.end():]
+            if not pattern_close.search(tail):
+                candidates.append(m.start())
+                break  # only the FIRST unbalanced opener for each tag matters
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _has_dangling_minimax_invoke(text: str) -> bool:
+    """Detect MiniMax-style malformed invoke fragment (no closing block)."""
+    # MiniMax models sometimes emit `<|invoke|>...` without a matching close.
+    # The existing inbound sanitizer strips full tokens; here we only care
+    # whether a HALF-rendered fragment is present at the tail.
+    pat = re.compile(r"<\|(invoke|tool_call|tool_use)\|>")
+    matches = list(pat.finditer(text))
+    if not matches:
+        return False
+    last = matches[-1]
+    # If the last opener has no closing `<|/...|>` after it, it's dangling.
+    closer = re.compile(r"<\|/(invoke|tool_call|tool_use)\|>")
+    return not closer.search(text[last.end():])
+
+
+def recover_partial_assistant(
+    text: str,
+    *,
+    drop_threshold_chars: int = 8,
+) -> PartialRecoveryResult:
+    """Attempt to salvage a partial assistant stream interrupted mid-flight.
+
+    Used by the gateway when a stream is cut by network drop, gateway
+    restart, or upstream timeout. The partial text may contain a
+    half-rendered tool-call XML chunk — we either trim it cleanly (if
+    everything before the chunk is intact text) or mark the partial
+    unrecoverable (if there's nothing salvageable left after trim).
+
+    Args:
+        text: raw partial assistant text as accumulated from the stream.
+        drop_threshold_chars: if the recovered text is shorter than this,
+            mark unrecoverable rather than emit a near-empty fragment.
+
+    Returns:
+        PartialRecoveryResult with status + recovered text + reason.
+    """
+    if not text or not text.strip():
+        return PartialRecoveryResult(
+            status="unrecoverable",
+            text="",
+            reason="empty partial",
+        )
+
+    if _has_dangling_minimax_invoke(text):
+        return PartialRecoveryResult(
+            status="unrecoverable",
+            text="",
+            reason="MiniMax-style invoke fragment cut mid-stream",
+        )
+
+    open_idx = _last_open_tag_index(text)
+    if open_idx is None:
+        # No open block tags — text is clean prose. Recoverable as-is.
+        return PartialRecoveryResult(
+            status="recoverable",
+            text=text,
+            reason="no dangling tool-call markup",
+        )
+
+    head = text[:open_idx].rstrip()
+    if len(head) < drop_threshold_chars:
+        return PartialRecoveryResult(
+            status="unrecoverable",
+            text="",
+            reason=(
+                f"only {len(head)} char(s) of clean prose before "
+                f"unclosed tag at offset {open_idx}"
+            ),
+        )
+
+    return PartialRecoveryResult(
+        status="recoverable",
+        text=head,
+        reason=f"trimmed unclosed tag at offset {open_idx}",
+    )
+
+
+__all__ = [
+    "PartialRecoveryResult",
+    "recover_partial_assistant",
+    "sanitize_for_replay",
+]

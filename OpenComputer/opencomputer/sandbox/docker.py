@@ -34,6 +34,32 @@ from plugin_sdk.sandbox import SandboxConfig, SandboxResult, SandboxStrategy
 _log = logging.getLogger("opencomputer.sandbox.docker")
 
 
+#: Security-hardening flags applied to every container.
+#:
+#: Mirrors the Hermes ``terminal/docker.py`` ``_SECURITY_ARGS``: drop
+#: every Linux capability, then add back the three required for
+#: package managers (CHOWN, FOWNER) and bind-mount writes
+#: (DAC_OVERRIDE); block privilege escalation; cap process count;
+#: force tmpfs on world-writable directories with ``noexec`` where
+#: supported.
+#:
+#: These defaults are always-on — Hermes does not expose a config
+#: knob, and neither do we. Containers that need different limits
+#: should set per-call overrides at the ``SandboxConfig`` level
+#: (none currently needed).
+_SECURITY_ARGS: list[str] = [
+    "--cap-drop", "ALL",
+    "--cap-add", "DAC_OVERRIDE",
+    "--cap-add", "CHOWN",
+    "--cap-add", "FOWNER",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", "256",
+    "--tmpfs", "/tmp:rw,nosuid,size=512m",
+    "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
+    "--tmpfs", "/run:rw,noexec,nosuid,size=64m",
+]
+
+
 def _derive_cpu_quota(cpu_seconds_limit: int) -> int:
     """Map wall-clock budget → CPU count for ``docker run --cpus``.
 
@@ -95,16 +121,70 @@ class DockerStrategy(SandboxStrategy):
             "--memory", f"{config.memory_mb_limit}m",
             "--cpus", str(_derive_cpu_quota(config.cpu_seconds_limit)),
         ]
+        # Hermes-parity hardening: cap-drop ALL + selective re-adds,
+        # no-new-privileges, pids-limit, tmpfs trio. Always-on; see
+        # _SECURITY_ARGS for rationale.
+        cmd.extend(_SECURITY_ARGS)
         if not config.network_allowed:
             cmd.extend(["--network", "none"])
+        # Hermes parity: container_persistent: false locks down /workspace
+        # + /root with explicit tmpfs so the implicit container layer can't
+        # accumulate state. Default True (no extra tmpfs) preserves
+        # current behaviour.
+        if not config.container_persistent:
+            cmd.extend(["--tmpfs", "/workspace:rw,size=512m"])
+            cmd.extend(["--tmpfs", "/root:rw,size=256m"])
         for p in config.read_paths:
             cmd.extend(["-v", f"{p}:{p}:ro"])
         for p in config.write_paths:
             cmd.extend(["-v", f"{p}:{p}:rw"])
+        # P3.5 Hermes-parity: bind-mount each
+        # ``required_credential_files`` entry from the active profile
+        # read-only into ``/root/.opencomputer/<path>``. Skills that
+        # declare ``required_credential_files`` in SKILL.md frontmatter
+        # contribute via the global registry; missing files are
+        # skipped silently (logged at debug). All mounts ``:ro`` —
+        # the container can read but never overwrite.
+        try:
+            from opencomputer.profiles import (
+                profile_home_dir,
+                read_active_profile,
+            )
+            from opencomputer.security.env_passthrough import (
+                resolve_credential_file_paths,
+            )
+
+            active = read_active_profile()
+            if active:
+                profile_home = profile_home_dir(active)
+                for host, container in resolve_credential_file_paths(profile_home):
+                    cmd.extend(["-v", f"{host}:{container}:ro"])
+        except Exception:  # noqa: BLE001 — credential-mount failure must
+            # never starve a sandbox launch; the skill that declared the
+            # missing file will surface its own runtime error.
+            _log.debug("credential file mount resolution failed", exc_info=True)
         # Pass through allowed env vars. We use ``-e KEY=VALUE`` rather
         # than ``--env-file`` so the env stays purely in argv (easier to
         # audit + no temp file to clean up).
         env_pass = filtered_env(config)
+        # P3.4 Hermes-parity: union skill-declared env passthrough on
+        # top of config.allowed_env_vars. Skills declare names; the
+        # parent process supplies values via os.environ.
+        try:
+            import os as _os
+
+            from opencomputer.security.env_passthrough import (
+                get_passthrough_env_keys,
+            )
+
+            for key in get_passthrough_env_keys():
+                if key in env_pass:
+                    continue
+                val = _os.environ.get(key)
+                if val is not None:
+                    env_pass[key] = val
+        except Exception:  # noqa: BLE001
+            _log.debug("skill-declared env passthrough union failed", exc_info=True)
         for k, v in env_pass.items():
             cmd.extend(["-e", f"{k}={v}"])
         cmd.append(config.image)

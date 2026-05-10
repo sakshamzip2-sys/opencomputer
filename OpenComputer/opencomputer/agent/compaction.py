@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from opencomputer.agent.context_engine import ContextEngine, ContextEngineResult
 from plugin_sdk.core import Message
@@ -47,8 +49,13 @@ DEFAULT_CONTEXT_WINDOWS: dict[str, int] = {
     # supports a 1M beta; we use the conservative 200k for it too —
     # callers needing the extended window can override via
     # CompactionConfig.
-    "claude-opus-4-7": 200_000,
-    "claude-opus-4-6": 200_000,
+    # Wave 3 (2026-05-08) — Opus 4.6 / 4.7 ship a 1M context window
+    # by default (no beta header required). Older Opus 4.x and the
+    # Sonnet line still use 200k; update those individually as
+    # Anthropic publishes new sizes. User can override per-model via
+    # ``model_context_overrides`` in config.yaml regardless.
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
     "claude-opus-4-5": 200_000,
     "claude-opus-4-1": 200_000,
     "claude-opus-4": 200_000,
@@ -173,6 +180,64 @@ class CompactionResult:
     reason: str = ""
 
 
+def context_window_with_overrides(
+    model: str,
+    custom_providers: tuple = (),
+    model_context_overrides: dict | None = None,
+    *,
+    provider_hint: str = "",
+    enable_probe: bool = True,
+) -> int:
+    """Resolve context length using the full multi-source chain.
+
+    Resolution order (highest → lowest priority):
+
+    1. ``model_context_overrides[<model>]`` — flat user-supplied
+       per-model override that applies to *any* provider, including
+       bundled ones (Anthropic, OpenAI, OpenRouter). Wins always so
+       a documented vendor value can correct probe drift.
+    2. ``custom_providers[].models[<model>].context_length`` — same
+       intent but scoped to a named ``custom_providers`` entry.
+    3. **Persistent cache + dynamic probe chain** (Wave 3 follow-up,
+       2026-05-08) — :func:`context_window_probe.probe_context_window`
+       hits OpenRouter's free catalog, a local Ollama server, the
+       Anthropic API (when keyed), and the models.dev community
+       registry, in that order. Results cached 24h on disk. Pass
+       ``enable_probe=False`` to skip (used by hot-path renders that
+       must stay synchronous).
+    4. :func:`context_window_for` — the embedded static table +
+       family-prefix rules + 64k conservative default.
+
+    Both override layers are user-editable and survive across
+    sessions; a user-overstated window is the user's risk, but if
+    the override comes from concrete vendor docs it's accurate.
+    """
+    if model_context_overrides:
+        explicit = model_context_overrides.get(model)
+        if explicit is not None:
+            return int(explicit)
+    for cp in custom_providers:
+        override = getattr(cp, "models", {}).get(model)
+        if override is not None:
+            ctx_len = getattr(override, "context_length", None)
+            if ctx_len is not None:
+                return int(ctx_len)
+    # Wave 3 follow-up — dynamic probe chain (cache + OR + Ollama +
+    # Anthropic + models.dev). Disabled on hot paths via the
+    # ``enable_probe`` kwarg; the cache layer keeps subsequent calls
+    # synchronous-fast.
+    if enable_probe:
+        try:
+            from opencomputer.agent.context_window_probe import probe_context_window
+
+            probed = probe_context_window(model, provider_hint=provider_hint)
+            if probed is not None:
+                return probed
+        except Exception:  # noqa: BLE001 — never let probe break resolution
+            pass
+    return context_window_for(model)
+
+
 def context_window_for(model: str) -> int:
     """Look up the context window for a model.
 
@@ -217,6 +282,8 @@ class CompactionEngine(ContextEngine):
         config: CompactionConfig | None = None,
         disabled: bool = False,
         memory_bridge: object | None = None,
+        usage_recorder: Callable[[Any], None] | None = None,
+        custom_providers: tuple = (),
     ) -> None:
         self.provider = provider
         self.model = model
@@ -224,6 +291,16 @@ class CompactionEngine(ContextEngine):
         self.disabled = disabled
         #: PR-6 T2.2 — optional MemoryBridge for on_pre_compress key-fact extraction.
         self._memory_bridge = memory_bridge
+        #: Wave 3 (2026-05-08) — pass-through of Config.custom_providers
+        #: so should_compact can honor per-model context_length overrides
+        #: declared under ``custom_providers[].models[<id>].context_length``.
+        self._custom_providers = custom_providers
+        #: Hermes B4 follow-up — optional callback fired with the
+        #: ``ProviderResponse.usage`` after each compaction LLM call.
+        #: Caller (typically AgentLoop) supplies this to route compaction
+        #: cost into ``llm_calls`` so insights reflects the *full*
+        #: conversation cost, not just the user-visible reply.
+        self._usage_recorder = usage_recorder
         #: Flag the loop checks to suppress hook firing while compaction runs.
         self._in_progress = False
 
@@ -258,7 +335,7 @@ class CompactionEngine(ContextEngine):
         """Use actual measured tokens, not an estimate."""
         if self.disabled:
             return False
-        window = context_window_for(self.model)
+        window = context_window_with_overrides(self.model, self._custom_providers)
         threshold = int(window * self.config.threshold_ratio)
         return last_input_tokens >= threshold
 
@@ -420,6 +497,14 @@ class CompactionEngine(ContextEngine):
                 max_tokens=self.config.summarize_max_tokens,
                 temperature=0.3,
             )
+            # Hermes B4 follow-up — emit usage so AgentLoop can record
+            # the compaction call into ``llm_calls``. Best-effort:
+            # telemetry must never wedge compaction.
+            if self._usage_recorder is not None:
+                try:
+                    self._usage_recorder(resp.usage)
+                except Exception:  # noqa: BLE001
+                    logger.debug("compaction usage_recorder swallowed", exc_info=True)
             return resp.message.content or "[compaction returned empty]"
         finally:
             self._in_progress = False
@@ -519,5 +604,6 @@ __all__ = [
     "CompactionConfig",
     "CompactionResult",
     "context_window_for",
+    "context_window_with_overrides",
     "DEFAULT_CONTEXT_WINDOWS",
 ]

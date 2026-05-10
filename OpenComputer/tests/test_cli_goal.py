@@ -248,3 +248,93 @@ def test_status_errors_on_empty_db_when_session_omitted(db):
     result = runner.invoke(goal_app, ["status"])
     assert result.exit_code == 1
     assert "no sessions exist" in result.output.lower()
+
+
+# ─── v2: rich UX strings + last_judge_reason ────────────────────────────
+
+
+def test_v2_set_uses_circled_dot_icon(db):
+    sid = _make_session(db)
+    result = runner.invoke(goal_app, ["set", "ship it", "-s", sid])
+    assert result.exit_code == 0
+    assert "⊙" in result.output
+    assert "Goal set" in result.output
+    assert "20-turn budget" in result.output
+
+
+def test_v2_status_shows_last_judge_reason(db):
+    sid = _make_session(db)
+    db.set_session_goal(sid, text="ship", budget=10)
+    db.update_session_goal(sid, last_judge_reason="2 of 4 done")
+    result = runner.invoke(goal_app, ["status", "-s", sid])
+    assert result.exit_code == 0
+    assert "2 of 4 done" in result.output
+    assert "last judge" in result.output
+
+
+def test_v2_status_omits_reason_when_unset(db):
+    sid = _make_session(db)
+    db.set_session_goal(sid, text="x", budget=20)
+    result = runner.invoke(goal_app, ["status", "-s", sid])
+    assert result.exit_code == 0
+    assert "last judge" not in result.output
+
+
+def test_v2_status_budget_exhausted_renders_pause_banner(db):
+    sid = _make_session(db)
+    db.set_session_goal(sid, text="x", budget=3)
+    db.update_session_goal(sid, turns_used=3)
+    result = runner.invoke(goal_app, ["status", "-s", sid])
+    assert result.exit_code == 0
+    assert "⏸" in result.output
+    assert "3/3" in result.output
+
+
+def test_v2_pause_resume_clear_use_icons(db):
+    sid = _make_session(db)
+    db.set_session_goal(sid, text="x", budget=20)
+    r = runner.invoke(goal_app, ["pause", "-s", sid])
+    assert "⏸" in r.output
+    r = runner.invoke(goal_app, ["resume", "-s", sid])
+    assert "↻" in r.output
+    r = runner.invoke(goal_app, ["clear", "-s", sid])
+    assert "✗" in r.output
+
+
+def test_v2_resume_clears_last_judge_reason(db):
+    sid = _make_session(db)
+    db.set_session_goal(sid, text="x", budget=20)
+    db.update_session_goal(sid, last_judge_reason="midway")
+    runner.invoke(goal_app, ["resume", "-s", sid])
+    g = db.get_session_goal(sid)
+    assert g is not None
+    assert g.last_judge_reason is None
+
+
+def test_v2_status_json_includes_last_judge_reason(db):
+    sid = _make_session(db)
+    db.set_session_goal(sid, text="ship", budget=8)
+    db.update_session_goal(sid, last_judge_reason="halfway")
+    result = runner.invoke(goal_app, ["status", "-s", sid, "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["goal"]["last_judge_reason"] == "halfway"
+
+
+def test_v2_set_omitted_budget_uses_config_default(db, monkeypatch):
+    """No --budget → consult goals.max_turns from config."""
+    import dataclasses
+
+    from opencomputer.agent import config as config_mod
+    from opencomputer.agent.config import GoalsConfig, default_config
+
+    fake = dataclasses.replace(default_config(), goals=GoalsConfig(max_turns=99))
+    monkeypatch.setattr(config_mod, "default_config", lambda: fake)
+
+    sid = _make_session(db)
+    result = runner.invoke(goal_app, ["set", "x", "-s", sid])
+    assert result.exit_code == 0
+    g = db.get_session_goal(sid)
+    assert g is not None
+    assert g.budget == 99
+    assert "99-turn budget" in result.output

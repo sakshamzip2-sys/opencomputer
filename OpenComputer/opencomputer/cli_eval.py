@@ -308,6 +308,17 @@ def history_command(
         )
 
 
+@eval_app.command("list")
+def list_command(
+    site: str = typer.Argument("all"),
+    limit: int = typer.Option(20, "--limit"),
+    history_db: Path | None = typer.Option(None, "--history-db"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Alias for ``oc eval history`` — list recent eval runs (M1.B4)."""
+    history_command(site=site, limit=limit, history_db=history_db, json_output=json_output)
+
+
 @eval_app.command("dashboard")
 def dashboard_command(
     out: Path = typer.Option(Path("evals/dashboard/index.html"), "--out"),

@@ -32,6 +32,24 @@ voice_app = typer.Typer(
 )
 
 
+def _resolve_profile_home() -> Path:
+    """Resolve the active profile's home directory (CLI-side).
+
+    Same logic the wake CLI uses; pulled out as a module-level helper
+    so the new ``train-wake`` command can share it (and tests can
+    monkeypatch a single symbol).
+    """
+    try:
+        from opencomputer.profiles import (  # noqa: PLC0415
+            profile_home_dir,
+            read_active_profile,
+        )
+        active = read_active_profile() or "default"
+        return profile_home_dir(active)
+    except Exception:  # noqa: BLE001
+        return Path.home() / ".opencomputer" / "default"
+
+
 @voice_app.command("synthesize")
 def voice_synthesize(
     text: Annotated[str, typer.Argument(help="Text to speak.")],
@@ -448,6 +466,339 @@ async def _run_realtime_loop(
     finally:
         session.close()
         audio.stop()
+
+
+@voice_app.command("wake")
+def voice_wake(
+    word: Annotated[
+        str,
+        typer.Option(
+            "--word",
+            help="Wake-word model name (default: hey_open_computer; falls "
+                 "back to hey_jarvis when no custom model is trained).",
+        ),
+    ] = "hey_open_computer",
+    threshold: Annotated[
+        float,
+        typer.Option(
+            "--threshold",
+            min=0.0, max=1.0,
+            help="Detection threshold (0.0-1.0; default 0.5).",
+        ),
+    ] = 0.5,
+    model: Annotated[
+        Path | None,
+        typer.Option(
+            "--model",
+            help="Custom ONNX model path (advanced; bypasses fallback).",
+        ),
+    ] = None,
+    handoff: Annotated[
+        bool,
+        typer.Option(
+            "--handoff/--no-handoff",
+            help="On detection, hand off to voice-mode for one push-to-talk "
+                 "turn (--handoff, default) or just print and continue "
+                 "(--no-handoff; useful for tuning the threshold).",
+        ),
+    ] = True,
+) -> None:
+    """Listen for a wake-word and hand off to voice-mode on detection.
+
+    PR-A Feature 2 — default OFF. Continuously feeds 80ms PCM frames to
+    openWakeWord. On score >= --threshold the detection callback fires:
+
+    With ``--handoff`` (default) the wake-word stream is paused, voice-
+    mode runs ONE push-to-talk turn (capture → VAD → STT → agent → TTS),
+    and the stream is resumed for the next wake.
+
+    With ``--no-handoff`` the callback only prints the detection event —
+    useful for tuning the threshold without spending STT/TTS quota.
+
+    Press Ctrl+C to stop.
+    """
+    import asyncio
+
+    try:
+        from opencomputer.voice.wake_word import (
+            FALLBACK_BUNDLED_WORD,
+            TRAINING_URL,
+            WakeDetection,
+            WakeWordDetector,
+            WakeWordError,
+        )
+    except ImportError as exc:
+        typer.secho(
+            f"wake-word support not installed: {exc}\n"
+            "install with: pip install opencomputer[wake]",
+            err=True, fg="red",
+        )
+        raise typer.Exit(code=4) from exc
+
+    # Resolve PID file under the active profile home for singleton.
+    profile_home = _resolve_profile_home()
+
+    pid_file = profile_home / "voice_wake.pid"
+
+    # Detector reference (closed-over by callbacks); set inside _run.
+    # Local annotation kept loose — the value is set by _run.
+    detector_ref: dict[str, object] = {"det": None}
+
+    async def _on_detect(d: WakeDetection) -> None:
+        typer.secho(
+            f"[heard '{d.word}' (score={d.score:.2f})]", fg="green",
+        )
+        if not handoff:
+            return
+        det = detector_ref.get("det")
+        if det is None:
+            return
+        typer.secho("🎙  speak now...", fg="cyan")
+        try:
+            await det.pause()
+            await _run_voice_turn_after_wake(profile_home=profile_home)
+        except Exception as exc:  # noqa: BLE001
+            typer.secho(f"[voice-mode hand-off failed: {exc}]", fg="red")
+        finally:
+            det.resume()
+
+    async def _run() -> None:
+        try:
+            async with WakeWordDetector(
+                word=word,
+                threshold=threshold,
+                model_path=model,
+                on_detect=_on_detect,
+                pid_file=pid_file,
+            ) as det:
+                detector_ref["det"] = det
+                effective = det.effective_word
+                if det.fell_back:
+                    typer.secho(
+                        f"💡 wake: requested '{word}' is not bundled and no "
+                        f"--model was provided. Falling back to "
+                        f"'{FALLBACK_BUNDLED_WORD}'. Train a custom model at "
+                        f"{TRAINING_URL} to use '{word}' for real.",
+                        fg="yellow",
+                    )
+                typer.echo(
+                    f"[listening for '{effective}'... press Ctrl+C to stop]"
+                )
+                # Block until interrupted
+                while True:
+                    await asyncio.sleep(1.0)
+        except WakeWordError as exc:
+            typer.secho(f"wake error: {exc}", fg="red", err=True)
+            raise typer.Exit(code=4) from exc
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        typer.echo("\n[stopped]")
+
+
+async def _run_voice_turn_after_wake(*, profile_home: Path) -> None:
+    """Run one push-to-talk voice-mode turn after a wake-word fire.
+
+    PR-A Feature 2 hand-off — invoked from ``voice wake`` when the
+    detector signals. Owns the audio device for the duration of the
+    turn (the wake-word stream is paused around this call).
+
+    The turn is best-effort: STT or agent failures are logged but never
+    propagated, so the wake loop keeps running for the next utterance.
+    """
+    import asyncio  # noqa: PLC0415  (avoid module-load on cli import)
+
+    try:
+        # Wire-up mirrors `voice talk` but for a single turn. We don't
+        # import voice_mode at module level to keep `voice --help` cheap
+        # for users who don't have the voice extension activated.
+        import sys
+        ext_path = (
+            Path(__file__).resolve().parent.parent
+            / "extensions" / "voice-mode"
+        )
+        if str(ext_path) not in sys.path:
+            sys.path.insert(0, str(ext_path))
+        try:
+            from audio_capture import AudioCapture  # type: ignore[import-not-found]
+            from voice_mode import run_single_turn  # type: ignore[import-not-found]
+        except ImportError as exc:
+            typer.secho(
+                f"[voice-mode extension not importable: {exc}]", fg="yellow",
+            )
+            return
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"[voice-mode wiring failed: {exc}]", fg="yellow")
+        return
+
+    try:
+        from opencomputer.cost_guard import CostGuard
+        cost_guard = CostGuard.load()
+    except Exception:  # noqa: BLE001
+        cost_guard = None  # type: ignore[assignment]
+
+    capture = AudioCapture()
+    try:
+        capture.start()
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"[failed to open mic: {exc}]", fg="red")
+        return
+
+    # Record up to 8 seconds of post-wake utterance. Real production
+    # would use VAD to end-of-speech detect; this v1 uses a fixed
+    # window so the path is simple and deterministic.
+    await asyncio.sleep(8.0)
+
+    async def _agent_runner(text: str) -> str:
+        # Simplest possible agent: echo. Real wiring would call the
+        # AgentLoop's run_conversation but that requires session state
+        # we don't have here; for the wake-mode v1 we surface the
+        # transcribed text and let the user decide what to do.
+        typer.secho(f"[transcript: {text}]", fg="cyan")
+        return f"(heard) {text}"
+
+    try:
+        await run_single_turn(
+            agent_runner=_agent_runner,
+            cost_guard=cost_guard,
+            capture=capture,
+            prefer_local_stt=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"[voice turn failed: {exc}]", fg="red")
+
+
+@voice_app.command("train-wake")
+def voice_train_wake(
+    word: Annotated[
+        str,
+        typer.Option(
+            "--word",
+            help="Wake-word phrase. Lowercase, underscores instead of spaces "
+                 "(default: hey_open_computer).",
+        ),
+    ] = "hey_open_computer",
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out",
+            help="Output ONNX path (default: <profile_home>/wake_models/"
+                 "<word>.onnx).",
+        ),
+    ] = None,
+    samples: Annotated[
+        int,
+        typer.Option(
+            "--samples", min=100, max=5000,
+            help="Synthesized positive sample budget (default 600 ≈ 30 min "
+                 "CPU; 1500 ≈ 60 min CPU; bigger generally improves recall).",
+        ),
+    ] = 600,
+    keep_cache: Annotated[
+        bool,
+        typer.Option(
+            "--keep-cache/--no-keep-cache",
+            help="Keep the per-run cache after success (debugging).",
+        ),
+    ] = False,
+    quick: Annotated[
+        bool,
+        typer.Option(
+            "--quick",
+            help="Smoke run (50 samples, 2 epochs, ~2 min). The output ONNX "
+                 "is NOT usable for real wake — use it to verify the pipeline.",
+        ),
+    ] = False,
+) -> None:
+    """Train a custom wake-word ONNX model on this CPU (~30 min).
+
+    Cross-platform; CPU-only; on-demand. Behind the [wake-train] extra
+    (`pip install opencomputer[wake-train]`). Output lands at
+    <profile_home>/wake_models/<word>.onnx and is auto-discovered by
+    `oc voice wake` on subsequent runs.
+
+    Honest budget:
+      *  --quick               : ~2 min (smoke; not usable)
+      *  --samples 600 (default): ~30 min cache-hit; ~35 min cold
+      *  --samples 1500         : ~60-70 min; better recall
+    """
+    try:
+        from opencomputer.voice.wake_train import (
+            TrainConfig,
+            WakeTrainError,
+            run_training,
+        )
+    except ImportError as exc:
+        typer.secho(
+            f"wake-train support not importable: {exc}\n"
+            "install with: pip install opencomputer[wake-train]",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=3) from exc
+
+    profile_home = _resolve_profile_home()
+    out_path = out if out is not None else (
+        profile_home / "wake_models" / f"{word}.onnx"
+    )
+
+    try:
+        cfg = TrainConfig(
+            word=word,
+            out_path=out_path,
+            profile_home=profile_home,
+            num_positives=samples,
+            quick=quick,
+            keep_cache=keep_cache,
+        )
+    except WakeTrainError as exc:
+        typer.secho(f"config error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(
+        f"training '{word}' → {out_path}\n"
+        f"  positives: {50 if quick else samples}, "
+        f"voices: {cfg.num_voices}, quick: {quick}",
+        fg="cyan",
+    )
+
+    def _progress(msg: str) -> None:
+        typer.echo(f"  {msg}")
+
+    try:
+        result = run_training(cfg, progress=_progress)
+    except KeyboardInterrupt:
+        typer.secho("\ntraining cancelled by user", fg="yellow")
+        raise typer.Exit(code=2)  # noqa: B904
+    except WakeTrainError as exc:
+        # Phase-tagged exit codes mirror the spec:
+        #   ensure_deps → 3 (missing deps)
+        #   train (subprocess) → 4 (upstream crash)
+        #   sanity → 5 (model trained but corrupt)
+        #   anything else → 1 (unknown)
+        code = {
+            "ensure_deps": 3,
+            "train": 4,
+            "sanity": 5,
+        }.get(exc.phase, 1)
+        typer.secho(
+            f"training failed in phase '{exc.phase}': {exc}",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=code) from exc
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"unexpected error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(
+        f"\n✓ wrote {result.out_path}\n"
+        f"  duration: {result.duration_seconds:.0f}s\n"
+        f"  positives: {result.num_positives}, "
+        f"negatives: {result.num_negatives}\n"
+        f"  sanity check: {'ok' if result.sanity_ok else 'FAILED'}\n"
+        f"  next: `oc voice wake` will auto-discover this model",
+        fg="green",
+    )
 
 
 __all__ = ["voice_app"]

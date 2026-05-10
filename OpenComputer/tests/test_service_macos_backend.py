@@ -50,11 +50,16 @@ def test_install_writes_plist_and_calls_bootstrap(
     monkeypatch.setattr(_macos_launchd, "_launchctl", fake_launchctl)
 
     result = _macos_launchd.install(profile="default", extra_args="")
-    expected = fake_home / "Library" / "LaunchAgents" / "com.opencomputer.gateway.plist"
+    # Multi-install hashing: the plist filename / launchd label is
+    # 'com.opencomputer.gateway' on canonical home but
+    # 'com.opencomputer.gateway.<hash>' on a non-canonical home (CI runners).
+    # Mirror what production uses (_label) rather than asserting a static name.
+    label = _macos_launchd._label("default")
+    expected = fake_home / "Library" / "LaunchAgents" / f"{label}.plist"
     assert result.config_path == expected
     assert expected.exists()
     body = expected.read_text()
-    assert "com.opencomputer.gateway" in body
+    assert label in body
     bootstrap_calls = [c for c in calls if c[:1] == ("bootstrap",)]
     assert bootstrap_calls
     assert bootstrap_calls[0][1] == "gui/501"
@@ -129,6 +134,54 @@ gui/501/com.opencomputer.gateway = {
     assert s.pid == 91234
 
 
+def test_status_first_state_line_wins_when_multiple_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: macOS Sequoia's `launchctl print` emits 3 `state =`
+    lines. The first is the lifecycle state (running / not running);
+    the next two are attribute states (active / inactive). Previously
+    the loop overwrote `running` for every match, so the LAST line —
+    which says ``state = active``, NOT ``state = running`` — won and
+    the function returned running=False even when the daemon was up."""
+    from opencomputer.service import _macos_launchd
+
+    monkeypatch.setattr(_macos_launchd, "_uid", lambda: 501)
+    fake_plist = tmp_path / "com.opencomputer.gateway.plist"
+    fake_plist.write_text("(stub)")
+    monkeypatch.setattr(_macos_launchd, "_plist_path", lambda: fake_plist)
+
+    # Real macOS Sequoia output shape — three `state =` lines.
+    sample_print = """\
+gui/501/com.opencomputer.gateway = {
+\tactive count = 1
+\tstate = running
+\tpid = 96119
+\tnested-thing = {
+\t\tstate = active
+\t}
+\tanother-nested = {
+\t\tstate = active
+\t}
+}"""
+
+    monkeypatch.setattr(
+        _macos_launchd,
+        "_launchctl",
+        lambda *args: (0, sample_print, "") if args[0] == "print" else (0, "", ""),
+    )
+    monkeypatch.setattr(
+        "opencomputer.service._common.tail_lines",
+        lambda p, n: [],
+    )
+
+    s = _macos_launchd.status()
+    assert s.running is True, (
+        "first `state =` line was 'running' — top-level lifecycle state — "
+        "the function must NOT be fooled by subsequent attribute-state lines"
+    )
+    assert s.pid == 96119
+
+
 def test_start_kickstart(monkeypatch: pytest.MonkeyPatch) -> None:
     from opencomputer.service import _macos_launchd
 
@@ -142,17 +195,34 @@ def test_start_kickstart(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any(c[0] == "kickstart" for c in calls)
 
 
-def test_stop_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_uses_bootout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Updated 2026-05-08 (PR #489): stop() now uses ``launchctl bootout``
+    instead of ``launchctl kill SIGTERM``. With KeepAlive=dict, a clean
+    SIGTERM exit can still cause launchd to re-bootstrap; bootout
+    atomically removes the service from the domain so KeepAlive can't
+    trigger. See _macos_launchd.stop() docstring for the full rationale."""
     from opencomputer.service import _macos_launchd
 
     monkeypatch.setattr(_macos_launchd, "_uid", lambda: 501)
     calls: list = []
-    monkeypatch.setattr(
-        _macos_launchd, "_launchctl",
-        lambda *a: (calls.append(a) or (0, "", "")),
-    )
+
+    def fake_launchctl(*args: str) -> tuple[int, str, str]:
+        calls.append(args)
+        # First call is "print" (state probe); return rc=0 (loaded).
+        if args[0] == "print":
+            return (0, "state = running", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(_macos_launchd, "_launchctl", fake_launchctl)
     assert _macos_launchd.stop() is True
-    assert any(c[0] == "kill" for c in calls)
+    cmds = [c[0] for c in calls]
+    assert "bootout" in cmds, f"stop() must use bootout (not kill); called: {cmds}"
+    # Regression guard: stop() MUST NOT use raw `kill SIGTERM` because
+    # KeepAlive=dict can re-bootstrap on a clean exit if the service
+    # is still in launchd's domain.
+    for c in calls:
+        if c and c[0] == "kill":
+            raise AssertionError(f"stop() regressed to launchctl kill: {c}")
 
 
 def test_follow_logs_tails_stdout_log(

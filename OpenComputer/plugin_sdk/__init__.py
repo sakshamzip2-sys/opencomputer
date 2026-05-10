@@ -54,6 +54,13 @@ from plugin_sdk.doctor import (
     HealthStatus,
     RepairResult,
 )
+from plugin_sdk.embeddings import (
+    MAX_BATCH_SIZE as MAX_EMBED_BATCH_SIZE,
+)
+from plugin_sdk.embeddings import (
+    EmbeddingBatch,
+    EmbeddingsUnsupportedError,
+)
 from plugin_sdk.hooks import (
     ALL_HOOK_EVENTS,
     HookContext,
@@ -113,8 +120,20 @@ from plugin_sdk.provider_contract import (
     ProviderCapabilities,
     ProviderResponse,
     StreamEvent,
+    StreamStaleError,
     Usage,
     VisionUnsupportedError,
+)
+from plugin_sdk.queue import (
+    ALL_DROP_POLICIES,
+    ALL_QUEUE_MODES,
+    DEFAULT_COLLECT_CAP,
+    DEFAULT_COLLECT_DEBOUNCE_S,
+    DEFAULT_DROP_POLICY,
+    DEFAULT_QUEUE_MODE,
+    DropPolicy,
+    QueueConfig,
+    QueueMode,
 )
 from plugin_sdk.realtime_voice import (
     BaseRealtimeVoiceBridge,
@@ -193,8 +212,13 @@ __all__ = [
     "ProviderCapabilities",
     "ProviderResponse",
     "StreamEvent",
+    "StreamStaleError",
     "Usage",
     "VisionUnsupportedError",
+    # embeddings (v1.1 plan-3 M6.6)
+    "EmbeddingBatch",
+    "EmbeddingsUnsupportedError",
+    "MAX_EMBED_BATCH_SIZE",
     "BaseChannelAdapter",
     "ChannelCapabilities",
     # classifier abstraction (2026-04-28)
@@ -247,6 +271,16 @@ __all__ = [
     # slash commands (Phase 12b.6, Task D8)
     "SlashCommand",
     "SlashCommandResult",
+    # inbound queue modes (S1 from 2026-05-06 OpenClaw deep-comparison)
+    "ALL_DROP_POLICIES",
+    "ALL_QUEUE_MODES",
+    "DEFAULT_COLLECT_CAP",
+    "DEFAULT_COLLECT_DEBOUNCE_S",
+    "DEFAULT_DROP_POLICY",
+    "DEFAULT_QUEUE_MODE",
+    "DropPolicy",
+    "QueueConfig",
+    "QueueMode",
     # consent (F1)
     "ConsentTier",
     "CapabilityClaim",
