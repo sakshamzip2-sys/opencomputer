@@ -234,11 +234,23 @@ def _read_runtime_state(runtime: object) -> dict[str, Any]:
     if not isinstance(model_id, str):
         model_id = str(model_id)
 
-    in_t = custom.get("session_tokens_in", 0)
-    out_t = custom.get("session_tokens_out", 0)
-    in_t = int(in_t) if isinstance(in_t, int) else 0
-    out_t = int(out_t) if isinstance(out_t, int) else 0
-    tokens_used = max(in_t + out_t, 0)
+    # 2026-05-11: the bar reports the CURRENT request size, NEVER the
+    # cumulative ``session_tokens_in + session_tokens_out``. Cumulative
+    # input inflates by ~10x after 10 turns (each turn re-sends the
+    # full history → cumulative input grows linearly with turn count
+    # while the *actual* current request stays bounded). Summing in
+    # output is double-counting — every output token re-enters the
+    # next turn's input and is already in that turn's
+    # ``last_input_tokens``.
+    #
+    # ``resolve_current_input_tokens`` is the single resolver shared
+    # with the ``/context`` slash command — same source of truth for
+    # both surfaces, so they can never drift again.
+    from opencomputer.agent.compaction import (
+        resolve_current_input_tokens,
+    )
+
+    tokens_used = resolve_current_input_tokens(custom)
 
     cost = custom.get("session_cost_usd")
     cost = float(cost) if isinstance(cost, (int, float)) else None

@@ -197,3 +197,98 @@ async def test_context_command_name_and_description():
     cmd = ContextCommand()
     assert cmd.name == "context"
     assert cmd.description  # non-empty
+
+
+# ─── compaction-trigger threshold parity (regression guards) ────────────
+
+
+@pytest.mark.asyncio
+async def test_context_trigger_threshold_matches_compaction_config_default():
+    """The ``compaction triggers at: X%`` line must reflect the engine's
+    actual default. Before this fix, ``/context`` displayed 98% while
+    the engine fired at 80% — 18 percentage points of drift caused by
+    a hand-typed constant in this file.
+    """
+    from opencomputer.agent.compaction import CompactionConfig
+
+    rt = RuntimeContext(custom={"model": "claude-opus-4-7"})
+    out = (await ContextCommand().execute("", rt)).output
+
+    expected_pct = int(CompactionConfig().threshold_ratio * 100)
+    # Render uses ``f"{ratio*100:.0f}%"`` — match the format exactly.
+    assert f"compaction triggers at: {expected_pct}%" in out
+    # Guard against regression to the old hand-typed 98%.
+    assert "compaction triggers at: 98%" not in out
+
+
+@pytest.mark.asyncio
+async def test_context_trigger_threshold_honors_runtime_override():
+    """When the user customises ``loop.compaction.threshold_ratio`` in
+    config.yaml, the loop must publish the effective value into
+    ``runtime.custom`` so ``/context`` displays the customisation."""
+    rt = RuntimeContext(
+        custom={
+            "model": "claude-opus-4-7",
+            "compaction_threshold_ratio": 0.6,
+        }
+    )
+    out = (await ContextCommand().execute("", rt)).output
+    assert "compaction triggers at: 60%" in out
+
+
+@pytest.mark.asyncio
+async def test_context_trigger_threshold_rejects_adversarial_override():
+    """A corrupt runtime override must never bubble into the rendered
+    panel — fall back to the engine default rather than showing
+    "compaction triggers at: 9900%"."""
+    from opencomputer.agent.compaction import CompactionConfig
+
+    rt = RuntimeContext(
+        custom={
+            "model": "claude-opus-4-7",
+            "compaction_threshold_ratio": 99.0,  # out-of-range
+        }
+    )
+    out = (await ContextCommand().execute("", rt)).output
+
+    expected_pct = int(CompactionConfig().threshold_ratio * 100)
+    assert f"compaction triggers at: {expected_pct}%" in out
+    assert "compaction triggers at: 9900%" not in out
+
+
+@pytest.mark.asyncio
+async def test_context_trigger_threshold_rejects_string_override():
+    """YAML round-trip produced a string somehow — fall back to default."""
+    from opencomputer.agent.compaction import CompactionConfig
+
+    rt = RuntimeContext(
+        custom={
+            "model": "claude-opus-4-7",
+            "compaction_threshold_ratio": "80%",
+        }
+    )
+    out = (await ContextCommand().execute("", rt)).output
+
+    expected_pct = int(CompactionConfig().threshold_ratio * 100)
+    assert f"compaction triggers at: {expected_pct}%" in out
+
+
+@pytest.mark.asyncio
+async def test_context_used_does_not_include_session_tokens_out():
+    """Mirrors the status-line bar's contract: the ``used`` field is the
+    current-turn input only, never ``in + out``."""
+    rt = RuntimeContext(
+        custom={
+            "model": "claude-opus-4-7",
+            "last_input_tokens": 30_000,
+            "session_tokens_in": 300_000,
+            "session_tokens_out": 50_000,
+        }
+    )
+    out = (await ContextCommand().execute("", rt)).output
+    # Used is 30K — not 30K+50K, not 300K+50K, not 300K.
+    assert "30,000" in out
+    # Cumulative inflation must NOT appear in the "used" line.
+    used_segment = out.split("used:")[1].split("\n")[0]
+    assert "350,000" not in used_segment
+    assert "80,000" not in used_segment

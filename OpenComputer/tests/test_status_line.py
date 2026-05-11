@@ -227,8 +227,14 @@ class TestRenderStatusLine:
 
         rt = _FakeRuntime({
             "model_id": "claude-opus-4-7",
-            "session_tokens_in": 8_000,
-            "session_tokens_out": 4_400,
+            # The bar reads ``last_input_tokens`` as the current-turn
+            # input size — that is what "% of context used right now"
+            # actually means. Cumulative session counters (kept here
+            # for the cost / usage slash command) must NOT inflate the
+            # bar by 10x.
+            "last_input_tokens": 12_400,
+            "session_tokens_in": 100_000,  # cumulative across history
+            "session_tokens_out": 50_000,  # never summed into the bar
             "session_cost_usd": 0.06,
             "session_started_at": anchor,
         })
@@ -256,7 +262,10 @@ class TestRenderStatusLine:
         monkeypatch.setattr(status_line, "_now_monotonic", lambda: 100.0)
         rt = _FakeRuntime({
             "model_id": "claude-sonnet-4-6-1m",
-            "session_tokens_in": 50_000,
+            # last_input_tokens is what the bar consumes; cumulative
+            # counters stay around for /usage but must not feed the bar.
+            "last_input_tokens": 100_000,
+            "session_tokens_in": 500_000,  # cumulative; irrelevant to bar
             "session_tokens_out": 50_000,
             "session_cost_usd": 1.23,
             "session_started_at": 100.0,
@@ -282,8 +291,7 @@ class TestRenderStatusLine:
         monkeypatch.setattr(status_line, "_now_monotonic", lambda: 100.0)
         rt = _FakeRuntime({
             "model_id": "claude-opus-4-7",
-            "session_tokens_in": 1_000,
-            "session_tokens_out": 0,
+            "last_input_tokens": 1_000,
             # session_cost_usd missing → segment dropped
             "session_started_at": 100.0,
         })
@@ -295,14 +303,15 @@ class TestRenderStatusLine:
         # must not crash; it falls back to zero for that field.
         rt = _FakeRuntime({
             "model_id": "claude-opus-4-7",
+            "last_input_tokens": "junk",  # adversarial — bar coerces to 0
             "session_tokens_in": "garbage",
             "session_tokens_out": 4.5,  # float, not int
             "session_cost_usd": "free",
             "session_started_at": "nowish",
         })
         text = _flatten(render_status_line(rt))
-        # Tokens in: bad → 0; tokens out: float (not int) → 0; cost: bad
-        # → omitted; started_at: bad → 0s.
+        # last_input_tokens: bad → 0; session_tokens_in (fallback): bad
+        # → 0; cost: bad → omitted; started_at: bad → 0s.
         # Wave 3 (2026-05-08) — Opus 4.7 = 1M context.
         assert "0/1M" in text
         assert "$" not in text
@@ -319,6 +328,10 @@ class TestRenderStatusLine:
 
 
 def test_cli_token_tally_sync_updates_status_line_bar() -> None:
+    """``_sync_runtime_token_tally`` is the one-shot CLI's surrogate for
+    the loop's per-turn telemetry. After it writes the tally, the bar
+    must reflect the input portion only — output tokens were never part
+    of the current request's context."""
     from opencomputer import cli
 
     rt = _FakeRuntime({
@@ -330,8 +343,88 @@ def test_cli_token_tally_sync_updates_status_line_bar() -> None:
     cli._sync_runtime_token_tally(rt, {"in": 9_000, "out": 3_000})
 
     text = _flatten(render_status_line(rt))
-    assert "12K/1M" in text
-    assert "1%" in text
+    # Bar reads ``last_input_tokens`` (preferred) or falls back to
+    # ``session_tokens_in`` (set by _sync). Either path resolves to
+    # 9_000 — output is NEVER added in.
+    assert "9K/1M" in text
+    # 9K / 1M = 0.9% → floor 0%. The previous "1%" assertion was
+    # locked in by the double-counting bug.
+    assert "0%" in text
+    # Guard against regression to "12K" (in + out summed).
+    assert "12K/" not in text
+
+
+# ─── current-input-tokens preference (regression guards) ────────────────
+
+
+class TestBarReadsCurrentInputTokens:
+    """Status-line bar must report the CURRENT request size, never the
+    cumulative session in+out. Mirror of :func:`resolve_current_input_tokens`'s
+    contract at the rendering layer."""
+
+    def test_uses_last_input_tokens_when_present(self) -> None:
+        """The current-turn input is the right denominator for "%
+        used right now". A 10-turn history that pushes cumulative
+        session_tokens_in to 300K must not inflate the bar to 30%
+        when the current request is only 30K."""
+        rt = _FakeRuntime({
+            "model_id": "claude-opus-4-7",
+            "last_input_tokens": 30_000,
+            "session_tokens_in": 300_000,  # cumulative across history
+            "session_tokens_out": 50_000,
+        })
+        text = _flatten(render_status_line(rt))
+        # 30K / 1M = 3%
+        assert "30K/1M" in text
+        assert "3%" in text
+        # Cumulative inflation must NOT appear.
+        assert "300K" not in text
+        assert "350K" not in text  # 300K + 50K (the worst-case bug)
+
+    def test_does_not_add_output_tokens(self) -> None:
+        """Output text becomes input on the next turn — already
+        counted in ``last_input_tokens`` then. The bar must never
+        compute ``input + output``."""
+        rt = _FakeRuntime({
+            "model_id": "claude-opus-4-7",
+            "last_input_tokens": 100_000,
+            "session_tokens_out": 50_000,  # would inflate to 150K under the bug
+        })
+        text = _flatten(render_status_line(rt))
+        assert "100K/1M" in text
+        assert "10%" in text
+        assert "150K" not in text
+
+    def test_falls_back_to_session_in_when_last_input_zero(self) -> None:
+        """One-shot CLI mode (``_sync_runtime_token_tally``) populates
+        cumulative session_tokens_in but not last_input_tokens. The
+        bar must still render *something* by falling back."""
+        rt = _FakeRuntime({
+            "model_id": "claude-opus-4-7",
+            "last_input_tokens": 0,
+            "session_tokens_in": 25_000,
+        })
+        text = _flatten(render_status_line(rt))
+        # 25K / 1M = 2.5% → floor 2%
+        assert "25K/1M" in text
+        assert "2%" in text
+
+    def test_falls_back_to_session_in_when_last_input_missing(self) -> None:
+        """Missing key behaves the same as zero."""
+        rt = _FakeRuntime({
+            "model_id": "claude-opus-4-7",
+            "session_tokens_in": 25_000,
+        })
+        text = _flatten(render_status_line(rt))
+        assert "25K/1M" in text
+        assert "2%" in text
+
+    def test_no_signals_renders_zero(self) -> None:
+        """True cold start: bar shows ``0/<window>``, no inflation."""
+        rt = _FakeRuntime({"model_id": "claude-opus-4-7"})
+        text = _flatten(render_status_line(rt))
+        assert "0/1M" in text
+        assert "0%" in text
 
 
 # ─── NO_COLOR honor ────────────────────────────────────────────────────

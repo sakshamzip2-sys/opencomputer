@@ -644,12 +644,144 @@ def _flatten_for_summary(messages: list[Message]) -> str:
     return "\n\n".join(parts)
 
 
+# ─── runtime-state resolvers ─────────────────────────────────────────
+# Shared between the TUI status-line bar (``opencomputer.cli_ui.status_line``)
+# and the ``/context`` slash command (``opencomputer.agent.slash_commands_impl
+# .context_cmd``). Centralising the resolution kills the drift the deep-dive
+# caught: before this layer the bar summed ``session_tokens_in +
+# session_tokens_out`` (a 10x inflation after ~10 turns) while ``/context``
+# read ``last_input_tokens`` correctly; and ``/context`` displayed
+# "compaction triggers at: 98%" while the engine fires at 80%.
+
+
+def _coerce_pos_int_for_tokens(value: object) -> int:
+    """Strict positive-int coercion used by :func:`resolve_current_input_tokens`.
+
+    Rejects ``bool`` (an int-subclass that would otherwise pass), NaN,
+    ``inf``, ``None``, list / dict, and negative values. Numeric
+    strings are tolerated for YAML round-trip robustness.
+
+    Returns ``0`` for anything that doesn't cleanly resolve to a
+    positive integer — callers treat ``0`` as "fall through to next
+    signal".
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value > 0 else 0
+    if isinstance(value, float):
+        # NaN check (NaN != NaN per IEEE 754) AND inf check AND non-positive.
+        if value != value or value == float("inf") or value <= 0:
+            return 0
+        try:
+            return int(value)
+        except (ValueError, OverflowError):
+            return 0
+    if isinstance(value, str):
+        try:
+            v = int(value)
+            return v if v > 0 else 0
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def resolve_current_input_tokens(custom: dict | None) -> int:
+    """Return the current-turn input-token count for context-window meters.
+
+    THE single resolver shared by the TUI status-line bar and the
+    ``/context`` slash command. Centralising here is the fix for the
+    bug the deep-dive caught — before this layer, two surfaces hand-
+    typed their own logic and drifted.
+
+    Resolution priority:
+
+      1. ``last_input_tokens`` — the most recent LLM call's
+         provider-reported ``input_tokens``. Written by the agent
+         loop after each successful response. This is the actual
+         current request size — what "% of context used right now"
+         really means.
+      2. ``session_tokens_in`` — cumulative input across the
+         session. Used as a fallback for one-shot CLI mode
+         (``cli._sync_runtime_token_tally``) where the loop never
+         gets a chance to populate ``last_input_tokens``.
+
+    Output tokens (``session_tokens_out``) are NEVER summed in: every
+    output token re-enters the next turn's input and is already
+    counted in ``last_input_tokens`` then. Summing both double-counts
+    the same content.
+
+    All inputs validated defensively — a buggy plugin that stomped a
+    string / list / NaN onto either key must never crash the bar.
+
+    Args:
+        custom: the ``runtime.custom`` dict. ``None`` is tolerated for
+            cold-start callers that haven't built a runtime yet.
+
+    Returns:
+        Non-negative ``int``. ``0`` only when neither signal carries
+        a positive value (true cold start).
+    """
+    if not isinstance(custom, dict):
+        return 0
+    last_input = _coerce_pos_int_for_tokens(custom.get("last_input_tokens"))
+    if last_input > 0:
+        return last_input
+    return _coerce_pos_int_for_tokens(custom.get("session_tokens_in"))
+
+
+def resolve_effective_compaction_threshold_ratio(
+    custom: dict | None,
+) -> float:
+    """Return the compaction trigger ratio for ``/context`` to display.
+
+    Reads ``runtime.custom["compaction_threshold_ratio"]`` (populated
+    each turn by the agent loop from the active compaction engine's
+    ``config.threshold_ratio``) so a user who customises the ratio
+    via ``config.yaml`` sees the customisation in ``/context``. Falls
+    back to :class:`CompactionConfig` 's default when the key is
+    missing — guaranteeing the displayed value matches whatever the
+    engine would actually fire at on an unconfigured install.
+
+    Validation rejects values outside ``(0.0, 1.0]``, ``None``,
+    ``bool``, ``str``, ``NaN``, and ``inf``. The "out-of-range"
+    branch protects the panel from a corrupt config rendering
+    "compaction triggers at 9900%".
+
+    Args:
+        custom: the ``runtime.custom`` dict. ``None`` is tolerated.
+
+    Returns:
+        Float in ``(0.0, 1.0]`` — either the validated override or
+        :attr:`CompactionConfig.threshold_ratio`.
+    """
+    default = CompactionConfig().threshold_ratio
+    if not isinstance(custom, dict):
+        return default
+    raw = custom.get("compaction_threshold_ratio")
+    # Explicit None / bool / non-numeric rejection. ``bool`` is an
+    # ``int`` subclass — True would otherwise pass as ``1.0``.
+    if raw is None or isinstance(raw, bool):
+        return default
+    if not isinstance(raw, (int, float)):
+        return default
+    if isinstance(raw, float) and (raw != raw or raw == float("inf")):
+        # NaN or +inf.
+        return default
+    ratio = float(raw)
+    if not (0.0 < ratio <= 1.0):
+        return default
+    return ratio
+
+
 __all__ = [
     "CompactionEngine",
     "CompactionConfig",
     "CompactionResult",
     "context_window_for",
     "context_window_with_overrides",
+    "resolve_current_input_tokens",
+    "resolve_effective_compaction_threshold_ratio",
     "resolve_window_safe",
     "DEFAULT_CONTEXT_WINDOWS",
 ]

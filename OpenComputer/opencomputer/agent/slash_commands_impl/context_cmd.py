@@ -25,10 +25,6 @@ from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 
 _LOG = logging.getLogger(__name__)
 
-#: Compaction trigger threshold. OC's CompactionEngine triggers at 98%
-#: of the resolved context window — see compaction.should_compact.
-_COMPACTION_TRIGGER_PCT: float = 0.98
-
 
 def _coerce_int(value: object, default: int = 0) -> int:
     """Best-effort int coercion. Adversarial inputs (strings, None,
@@ -60,20 +56,26 @@ class ContextCommand(SlashCommand):
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         custom = runtime.custom if runtime is not None else {}
 
-        from opencomputer.agent.compaction import resolve_window_safe
+        # 2026-05-11: use the single shared resolvers from
+        # ``compaction`` so this command and the TUI status-line bar
+        # render the same numbers. Before this layer, both surfaces
+        # hand-typed their own logic and drifted (bar double-counted
+        # cumulative in+out; this command displayed "98%" for a
+        # threshold the engine fires at 80%).
+        from opencomputer.agent.compaction import (
+            resolve_current_input_tokens,
+            resolve_effective_compaction_threshold_ratio,
+            resolve_window_safe,
+        )
 
         model_raw = custom.get("model") or ""
         model = str(model_raw) if model_raw else ""
         max_ctx = resolve_window_safe(model)
 
-        # Prefer current-turn (``last_input_tokens``) over cumulative
-        # session count for the "% used" calculation. The cumulative
-        # value double-counts pre-compaction tokens after a rewrite.
-        last_input = _coerce_int(custom.get("last_input_tokens"), 0)
+        used = resolve_current_input_tokens(custom)
         session_in = _coerce_int(custom.get("session_tokens_in"), 0)
-        used = last_input if last_input > 0 else session_in
-
         compactions = _coerce_int(custom.get("session_compactions"), 0)
+        trigger_ratio = resolve_effective_compaction_threshold_ratio(custom)
 
         pct = (used / max_ctx * 100.0) if max_ctx > 0 else 0.0
         remaining = max_ctx - used
@@ -83,7 +85,7 @@ class ContextCommand(SlashCommand):
         lines.append(f"  used: {used:,} / {max_ctx:,} ({pct:.1f}%)")
         lines.append(f"  remaining: {remaining:,} tokens")
         lines.append(
-            f"  compaction triggers at: {_COMPACTION_TRIGGER_PCT * 100:.0f}%"
+            f"  compaction triggers at: {trigger_ratio * 100:.0f}%"
         )
         lines.append(f"  compactions this session: {compactions}")
         lines.append(f"  total session input tokens: {session_in:,}")
