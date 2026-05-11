@@ -252,7 +252,6 @@ ignore = [
 "tests/*" = ["F841", "F401", "B017", "N801"]  # tests may have unused imports, broad assertions, helper classes
 "extensions/aws-bedrock-provider/__init__.py" = ["N999"]  # hyphenated dir; Python module alias handles import name
 "extensions/codex-provider/__init__.py" = ["N999"]  # hyphenated dir
-"opencomputer/cli.py" = ["E402"]  # _install_dependency_warning_filters() must run before urllib3 imports — deliberate order
 
 [tool.black]
 line-length = 100
@@ -270,7 +269,8 @@ testpaths = ["tests"]
 # suite because the user's ANTHROPIC_API_KEY was a Claude-Router proxy
 # key not valid for direct Anthropic — the test should never have been
 # collected in the first place.
-addopts = "-m 'not benchmark'"
+addopts = "-m 'not benchmark and not integration'"
 markers = [
   "benchmark: opt-in slow benchmark tests requiring a live LLM provider (run via `pytest -m benchmark`)",
+  "integration: opt-in PTY-driven integration smoke tests that spawn the real `oc` CLI binary (run via `pytest -m integration`). Requires `oc` on PATH and a usable tty / pty subsystem.",
 ]

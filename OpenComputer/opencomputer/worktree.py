@@ -84,6 +84,91 @@ def repo_root(path: Path) -> Path | None:
         return None
 
 
+def worktree_roots(path: Path) -> list[Path]:
+    """Return every worktree root for the repo containing ``path``.
+
+    Equivalent to parsing ``git worktree list --porcelain`` and returning
+    the ``worktree`` lines. The repo's main worktree is included first,
+    followed by linked worktrees in the order git reports them. Used by
+    the resume picker's ``Ctrl+W`` (widen scope to all worktrees of the
+    current repo) to build the ``repo_paths=`` filter passed to
+    :meth:`SessionDB.list_sessions_with_preview`.
+
+    Fails closed: returns ``[]`` (NOT a single-element list with the
+    cwd) on any of:
+        * git not on PATH
+        * ``path`` not inside a git repo
+        * subprocess timeout
+        * any OSError
+
+    Returning ``[]`` here propagates as "no scope filter" downstream;
+    the picker falls back to ``scope="all"`` in that case, which is the
+    correct degradation (a non-repo cwd has no "repo scope" to widen to).
+    """
+    if not shutil.which("git"):
+        return []
+    try:
+        out = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_profile_scoped_env(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if out.returncode != 0:
+        return []
+
+    roots: list[Path] = []
+    for line in out.stdout.splitlines():
+        # Each worktree block starts with ``worktree <path>``. Empty
+        # lines separate blocks; ``bare`` / ``branch`` / ``HEAD`` etc.
+        # follow within each block. We only care about the path line.
+        if line.startswith("worktree "):
+            roots.append(Path(line[len("worktree "):]))
+    return roots
+
+
+def current_git_branch(path: Path) -> str | None:
+    """Return the current git branch name for ``path``, or ``None``.
+
+    Uses ``git branch --show-current`` (git 2.22+). On a detached HEAD
+    (rebase, bisect, checkout of a tagged commit) ``--show-current``
+    prints an empty string and we return ``None`` — the caller can't
+    distinguish detached HEADs from non-repos but neither has a useful
+    name to display.
+
+    Fails closed: returns ``None`` on:
+        * git not on PATH
+        * ``path`` not inside a git repo
+        * detached HEAD
+        * subprocess timeout (5 s) — defensive against pathological repos
+        * any OSError (permission, file-not-found, etc.)
+
+    Never raises. The picker uses this for the meta line; a missing
+    branch must not break session creation.
+    """
+    if not shutil.which("git"):
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_profile_scoped_env(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if out.returncode != 0:
+        return None
+    branch = out.stdout.strip()
+    return branch or None
+
+
 def create_session_worktree(
     cwd: Path,
     *,

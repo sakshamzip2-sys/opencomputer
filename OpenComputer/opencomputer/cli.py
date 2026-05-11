@@ -1,4 +1,11 @@
-"""OpenComputer CLI entry point — an actual working chat loop."""
+"""OpenComputer CLI entry point — an actual working chat loop.
+
+Warning filters for noisy dependency-version warnings (urllib3 /
+charset_normalizer mismatch UserWarnings) are installed by
+``opencomputer/_early_init.py``, which is imported as the first thing
+``opencomputer/__init__.py`` does. That makes them active for every
+entry point, not just ``oc chat``. See ``_early_init.py`` for rationale.
+"""
 
 from __future__ import annotations
 
@@ -8,21 +15,8 @@ import logging
 import os
 import sys
 import uuid
-import warnings
 from pathlib import Path
 from typing import Any
-
-
-def _install_dependency_warning_filters() -> None:
-    """Hide noisy dependency-version warnings that leak before chat starts."""
-    warnings.filterwarnings(
-        "ignore",
-        message=r"urllib3 .*doesn't match a supported version!",
-        category=Warning,
-    )
-
-
-_install_dependency_warning_filters()
 
 import typer
 from rich.console import Console
@@ -910,18 +904,24 @@ def _resolve_resume_target(spec: str) -> str | None:
         return str(rows[0]["id"])
 
     if spec == "pick":
-        # Open the polished alt-screen picker (PR #207).
+        # Open the polished alt-screen picker (PR #207). Phase B (2026-05-11)
+        # extends the launch with cwd / repo / branch scope state so
+        # Ctrl+W / Ctrl+A / Ctrl+B can rebind the displayed rows live.
         # Falls back to None if the user cancels (Esc / Ctrl+C).
-        from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
+        from pathlib import Path as _Path
 
-        # Re-fetch with the preview JOIN so untitled rows still show a
-        # meaningful headline instead of "default @ HH:MM". The earlier
-        # ``list_sessions(limit=10)`` was just for the title/lineage
-        # shortcut paths above; this call powers the actual picker.
-        if hasattr(db, "list_sessions_with_preview"):
-            picker_db_rows = db.list_sessions_with_preview(limit=200)
-        else:  # pragma: no cover — fallback for stale SessionDB subclasses
-            picker_db_rows = rows
+        from opencomputer.cli_ui.resume_picker import (
+            SCOPE_ALL,
+            SCOPE_CWD,
+            SessionRow,
+            run_resume_picker,
+        )
+        from opencomputer.worktree import current_git_branch, worktree_roots
+
+        _cwd_str = os.getcwd()
+        _cwd_path = _Path(_cwd_str)
+        _repo_roots = [str(p) for p in worktree_roots(_cwd_path)]
+        _current_branch = current_git_branch(_cwd_path)
 
         def _coerce_started_at(v) -> float:
             try:
@@ -929,19 +929,44 @@ def _resolve_resume_target(spec: str) -> str | None:
             except (TypeError, ValueError):
                 return 0.0
 
-        picker_rows = [
-            SessionRow(
-                id=str(r.get("id", "")),
-                title=r.get("title") or "",
-                started_at=_coerce_started_at(r.get("started_at")),
-                message_count=int(r.get("message_count", 0) or 0),
-                cwd=r.get("cwd") or "",
-                first_user_message=r.get("first_user_message") or "",
-            )
-            for r in picker_db_rows
-            if r.get("id")
-        ]
-        return run_resume_picker(picker_rows, db=db)
+        def _rows_from_db(db_rows: list[dict]) -> list[SessionRow]:
+            return [
+                SessionRow(
+                    id=str(r.get("id", "")),
+                    title=r.get("title") or "",
+                    started_at=_coerce_started_at(r.get("started_at")),
+                    message_count=int(r.get("message_count", 0) or 0),
+                    cwd=r.get("cwd") or "",
+                    first_user_message=r.get("first_user_message") or "",
+                    git_branch=r.get("git_branch") or "",  # v19
+                )
+                for r in db_rows
+                if r.get("id")
+            ]
+
+        def _refetch(scope: str, branch_only: bool) -> list[SessionRow]:
+            kwargs: dict[str, Any] = {"scope": scope, "limit": 200}
+            if scope == "cwd":
+                kwargs["cwd"] = _cwd_str
+            elif scope == "repo":
+                kwargs["repo_paths"] = _repo_roots
+            if branch_only and _current_branch:
+                kwargs["branch_filter"] = _current_branch
+            return _rows_from_db(db.list_sessions_with_preview(**kwargs))
+
+        initial_rows = _refetch(SCOPE_CWD, branch_only=False)
+        initial_scope = SCOPE_CWD
+        if not initial_rows:
+            initial_rows = _refetch(SCOPE_ALL, branch_only=False)
+            initial_scope = SCOPE_ALL
+
+        return run_resume_picker(
+            initial_rows,
+            db=db,
+            refetch=_refetch,
+            initial_scope=initial_scope,
+            current_branch=_current_branch,
+        )
 
     # Hermes-CLI parity C5/C6 — title and lineage resolution.
     # Exact-title match first (titles have a UNIQUE index, so at most 1).
@@ -1257,6 +1282,7 @@ def _run_chat_session(
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
     personality: str = "",
     skin: str = "",
+    name: str = "",
 ) -> None:
     """Shared interactive REPL used by ``chat`` and ``code`` commands.
 
@@ -1510,6 +1536,33 @@ def _run_chat_session(
             console.print("[dim]No prior sessions to resume; starting fresh.[/dim]")
             resume = ""
     session_id = resume or str(uuid.uuid4())
+    # Phase D (2026-05-11) — ``oc chat -n <name>`` writes the session
+    # title BEFORE the first turn fires. We don't apply ``--name`` on
+    # the resume path (it would silently mutate a session the user might
+    # be cross-referencing by name elsewhere — use ``/rename`` mid-session
+    # to retitle a resumed conversation instead).
+    if name and not resume:
+        cleaned_name = name.strip()
+        if cleaned_name:
+            try:
+                from opencomputer.agent.state import SessionDB as _SessionDB
+
+                _SessionDB(cfg.session.db_path).set_session_title(
+                    session_id, cleaned_name
+                )
+                _log.info(
+                    "applied --name %r to fresh session %s",
+                    cleaned_name,
+                    session_id,
+                )
+            except Exception as e:  # noqa: BLE001 — --name must never block chat
+                _log.warning(
+                    "failed to set initial session title %r on %s: %s; "
+                    "session will start untitled",
+                    cleaned_name,
+                    session_id,
+                    e,
+                )
     # P-4 — bind session id onto the ContextVar so log records emitted
     # during this chat are stamped with it. SessionDB.create_session
     # also stamps when a fresh session is persisted; doing it here too
@@ -2173,74 +2226,19 @@ def _run_chat_session(
                 the named entry under ``custom_providers:`` in
                 config.yaml (swaps both provider AND model).
                 """
-                import dataclasses as _dc
+                # 2026-05-11 — extracted into shared model_swap helper so
+                # the Alt+M scoped-models keybinding (consumed in
+                # agent/loop.py via consume_pending_model_swap) goes
+                # through the exact same code path. Drift between the
+                # two paths was a real risk; one function eliminates it.
+                from opencomputer.agent.model_swap import swap_model
 
-                from opencomputer.agent.model_resolver import resolve_model
-
-                # Wave 3 — custom:<name>:<model_id> branch
-                if new_model.startswith("custom:"):
-                    from opencomputer.agent.custom_provider_client import (
-                        build_custom_provider,
-                        parse_custom_model_spec,
-                    )
-
-                    try:
-                        cp_name, model_id = parse_custom_model_spec(new_model)
-                        new_provider_inst = build_custom_provider(cp_name, loop.config)
-                    except (ValueError, RuntimeError) as e:
-                        return (False, str(e))
-                    loop.provider = new_provider_inst
-                    new_model_cfg = _dc.replace(
-                        loop.config.model,
-                        provider=f"custom:{cp_name}",
-                        model=model_id,
-                    )
-                    loop.config = _dc.replace(loop.config, model=new_model_cfg)
-                    try:
-                        runtime.custom["_provider_supports_native_thinking"] = (
-                            loop.provider.supports_native_thinking_for(model_id)
-                        )
-                    except Exception:  # noqa: BLE001
-                        runtime.custom["_provider_supports_native_thinking"] = False
-                    return (True, f"swapped to custom:{cp_name}:{model_id}")
-
-                aliases = getattr(loop.config.model, "model_aliases", None) or {}
-                try:
-                    canonical = resolve_model(new_model, aliases)
-                except ValueError as e:
-                    return (False, str(e))
-                if not canonical or not isinstance(canonical, str):
-                    return (False, f"invalid model id: {new_model!r}")
-                # Wave 3 (2026-05-08) — strip + warn on :nitro / :floor
-                # suffix when the active provider is NOT OpenRouter.
-                # Those suffixes are OR-specific routing sugar; passing
-                # them verbatim to (e.g.) Anthropic returns 404. Strip
-                # them here so the swap succeeds; emit a one-shot warning
-                # to alert the user that their preference is being
-                # ignored.
-                from opencomputer.agent.config import split_or_routing_suffix
-                _stripped, _suffix = split_or_routing_suffix(canonical)
-                if _suffix is not None and loop.config.model.provider != "openrouter":
-                    if not getattr(_on_model_swap, "_or_suffix_warned", False):
-                        console.print(
-                            f"[yellow]⚠[/yellow] :{_suffix} suffix is OpenRouter-only; "
-                            f"stripping and using {_stripped!r} on provider "
-                            f"{loop.config.model.provider!r}."
-                        )
-                        _on_model_swap._or_suffix_warned = True  # type: ignore[attr-defined]
-                    canonical = _stripped
-                new_model_cfg = _dc.replace(loop.config.model, model=canonical)
-                loop.config = _dc.replace(loop.config, model=new_model_cfg)
-                # Phase B: refresh native-thinking flag for the new model so
-                # the prompt-based fallback activates correctly mid-session
-                # (e.g. swapping claude-sonnet-4 → gpt-4o without a stale flag).
-                try:
-                    runtime.custom["_provider_supports_native_thinking"] = (
-                        loop.provider.supports_native_thinking_for(canonical)
-                    )
-                except Exception:  # noqa: BLE001
-                    runtime.custom["_provider_supports_native_thinking"] = False
-                return (True, f"swapped to {canonical}")
+                return swap_model(
+                    loop=loop,
+                    runtime=runtime,
+                    new_model=new_model,
+                    console=console,
+                )
 
             def _on_provider_swap(new_provider: str) -> tuple[bool, str]:
                 """``/provider <name>`` mid-session swap (Sub-project D).
@@ -2570,6 +2568,17 @@ def chat(
             "~/.opencomputer/skins/<name>.yaml also accepted."
         ),
     ),
+    name: str = typer.Option(
+        "",
+        "-n",
+        "--name",
+        help=(
+            "Name this session at startup (Claude-Code parity). Equivalent "
+            "to typing ``/rename <name>`` immediately after the chat opens. "
+            "Resume the session later with ``oc resume <name>``. Only "
+            "applies to fresh sessions; ignored when ``--resume`` is set."
+        ),
+    ),
 ) -> None:
     """Start an interactive chat session.
 
@@ -2578,6 +2587,8 @@ def chat(
     ``oc chat -c`` resumes the most recent session.
     ``oc chat -q "..."`` runs one non-interactive turn (Hermes-parity alias
     for ``oc oneshot``).
+    ``oc chat -n <name>`` names the session at startup so you can
+    ``oc resume <name>`` later.
     """
     # ``-q "..."`` short-circuits the REPL — delegate to the shared oneshot
     # helper. Hermes-parity alias for ``hermes chat -q``. Done before any
@@ -2610,6 +2621,7 @@ def chat(
         permission_mode=permission_mode,
         personality=personality,
         skin=skin,
+        name=name,
     )
 
 
@@ -3062,10 +3074,22 @@ def resume(
     # preview of the first user message instead of falling back to a
     # useless "default @ HH:MM" label for sessions started from the
     # profile home.
-    if hasattr(db, "list_sessions_with_preview"):
-        db_rows = db.list_sessions_with_preview(limit=200)
-    else:  # pragma: no cover — fallback for stale SessionDB subclasses in tests
-        db_rows = db.list_sessions(limit=200)
+    #
+    # Phase B (2026-05-11) — Claude-Code parity scope filtering. The
+    # picker now defaults to "current dir" scope (matches CC's "current
+    # worktree" default) and supports Ctrl+W / Ctrl+A / Ctrl+B to widen
+    # or branch-filter. We capture cwd / repo worktrees / current branch
+    # ONCE at picker launch (cheap shell-outs) and build a refetch
+    # closure the picker can call when the user toggles state.
+    from pathlib import Path as _Path
+
+    from opencomputer.cli_ui.resume_picker import SCOPE_CWD
+    from opencomputer.worktree import current_git_branch, worktree_roots
+
+    _cwd_str = os.getcwd()
+    _cwd_path = _Path(_cwd_str)
+    _repo_roots = [str(p) for p in worktree_roots(_cwd_path)]
+    _current_branch = current_git_branch(_cwd_path)
 
     def _coerce_started_at(v) -> float:
         try:
@@ -3073,23 +3097,58 @@ def resume(
         except (TypeError, ValueError):
             return 0.0
 
-    rows = [
-        SessionRow(
-            id=r.get("id", ""),
-            title=r.get("title") or "",
-            started_at=_coerce_started_at(r.get("started_at")),
-            message_count=int(r.get("message_count", 0) or 0),
-            cwd=r.get("cwd") or "",
-            first_user_message=r.get("first_user_message") or "",
-        )
-        for r in db_rows
-        if r.get("id")
-    ]
-    if not rows:
+    def _rows_from_db(db_rows: list[dict]) -> list[SessionRow]:
+        return [
+            SessionRow(
+                id=r.get("id", ""),
+                title=r.get("title") or "",
+                started_at=_coerce_started_at(r.get("started_at")),
+                message_count=int(r.get("message_count", 0) or 0),
+                cwd=r.get("cwd") or "",
+                first_user_message=r.get("first_user_message") or "",
+                git_branch=r.get("git_branch") or "",  # v19
+            )
+            for r in db_rows
+            if r.get("id")
+        ]
+
+    def _refetch(scope: str, branch_only: bool) -> list[SessionRow]:
+        """Bound to the picker — called on Ctrl+W / Ctrl+A / Ctrl+B."""
+        kwargs: dict[str, Any] = {"scope": scope, "limit": 200}
+        if scope == "cwd":
+            kwargs["cwd"] = _cwd_str
+        elif scope == "repo":
+            kwargs["repo_paths"] = _repo_roots
+        if branch_only and _current_branch:
+            kwargs["branch_filter"] = _current_branch
+        rows_dicts = db.list_sessions_with_preview(**kwargs)
+        return _rows_from_db(rows_dicts)
+
+    # Initial fetch at SCOPE_CWD — matches Claude Code's default.
+    initial_rows = _refetch(SCOPE_CWD, branch_only=False)
+    if not initial_rows:
+        # No sessions for THIS cwd. Auto-widen to scope=all so the user
+        # sees something rather than an empty picker — they can press
+        # Ctrl+W to narrow if they want. This matches CC's behaviour for
+        # first-time-in-a-fresh-dir users.
+        from opencomputer.cli_ui.resume_picker import SCOPE_ALL as _SCOPE_ALL
+
+        initial_rows = _refetch(_SCOPE_ALL, branch_only=False)
+        initial_scope = _SCOPE_ALL
+    else:
+        initial_scope = SCOPE_CWD
+
+    if not initial_rows:
         console.print("[dim]no sessions yet — start one with `oc chat`.[/dim]")
         return
 
-    selected_id = run_resume_picker(rows, db=db)
+    selected_id = run_resume_picker(
+        initial_rows,
+        db=db,
+        refetch=_refetch,
+        initial_scope=initial_scope,
+        current_branch=_current_branch,
+    )
     if selected_id is None:
         console.print("[dim]cancelled.[/dim]")
         return
@@ -4086,6 +4145,11 @@ app.add_typer(eval_app, name="eval")
 from opencomputer.cli_browser import browser_app  # noqa: E402
 
 app.add_typer(browser_app, name="browser")
+
+# 2026-05-11 — scoped-models favorites for Alt+M cycling
+from opencomputer.cli_favorites import favorites_app  # noqa: E402
+
+app.add_typer(favorites_app, name="favorites")
 
 # Phase 10f.I — memory CLI subcommand group
 from opencomputer.cli_memory import memory_app  # noqa: E402

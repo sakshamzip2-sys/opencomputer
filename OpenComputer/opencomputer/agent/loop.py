@@ -1262,11 +1262,31 @@ class AgentLoop:
                 ) or None
             except Exception:  # noqa: BLE001 — runtime shape never blocks loop start
                 _parent_sid_from_runtime = None
+            # v19 (2026-05-11) — capture active git branch alongside cwd
+            # so the resume picker can render it in the meta strip and
+            # Ctrl+B can filter by branch. Fails closed (None) for
+            # non-repos, detached HEADs, or absent git. Never blocks
+            # session creation.
+            _git_branch: str | None = None
+            try:
+                from pathlib import Path as _Path
+
+                from opencomputer.worktree import current_git_branch as _cgb
+
+                _git_branch = _cgb(_Path(os.getcwd()))
+            except Exception:  # noqa: BLE001 — branch capture is best-effort
+                _log.debug(
+                    "git branch capture failed; resume picker meta will "
+                    "show no branch for this session",
+                    exc_info=True,
+                )
+                _git_branch = None
             self._pending_session_meta[sid] = {
                 "platform": "cli",
                 "model": self.config.model.model,
                 "cwd": os.getcwd(),  # Plan 3 — profile-analysis cwd-pattern signal
                 "parent_session_id": _parent_sid_from_runtime,
+                "git_branch": _git_branch,
             }
             messages: list[Message] = []
             # Round 2B P-9: optional pre-seed for forked-context delegations.
@@ -1349,6 +1369,16 @@ class AgentLoop:
             "model_context_overrides": dict(getattr(self.config, "model_context_overrides", {}) or {}),
             "custom_providers": tuple(getattr(self.config, "custom_providers", ()) or ()),
         }
+        # 2026-05-11 — thread the PluginRegistry through so the
+        # /plugin reload slash can find the loaded list. Singleton
+        # import is cheap — no init side effects beyond what
+        # already happened at startup.
+        try:
+            from opencomputer.plugins.registry import registry as _plugin_registry
+
+            _new_custom["plugin_registry"] = _plugin_registry
+        except Exception:  # noqa: BLE001 — never block the turn on import drift
+            pass
         if "session_started_at" not in _new_custom:
             _new_custom["session_started_at"] = _session_started_at
         self._runtime = replace(
@@ -1442,6 +1472,44 @@ class AgentLoop:
             prompt_snapshots=getattr(self, "_prompt_snapshots", None),
             sid=sid,
         )
+
+        # 2026-05-11 — Alt+M scoped-models cycling. Pops ``pending_model_id``
+        # set by the input_loop keybinding and routes through the same
+        # ``swap_model`` helper the ``/model <id>`` slash uses, so the
+        # two paths can't drift on alias resolution, ``:nitro``/``:floor``
+        # stripping, ``custom:<provider>:<model>`` routing, or
+        # ``_provider_supports_native_thinking`` refresh. Failures are
+        # logged + surfaced via ``model_cycle_hint`` so the user knows
+        # the next turn is still on the OLD model — never crash a turn.
+        try:
+            from opencomputer.cli_ui._model_swap import consume_pending_model_swap
+
+            pending_model = consume_pending_model_swap(self._runtime)
+            if pending_model:
+                from opencomputer.agent.model_swap import swap_model
+
+                ok, message = swap_model(
+                    loop=self,
+                    runtime=self._runtime,
+                    new_model=pending_model,
+                    console=None,
+                )
+                if not ok:
+                    self._runtime.custom["model_cycle_hint"] = (
+                        f"model swap failed: {message}"
+                    )
+                    _log.warning(
+                        "Alt+M model swap to %r refused: %s",
+                        pending_model,
+                        message,
+                    )
+                else:
+                    _log.info("Alt+M model swap applied: %s", message)
+        except Exception:  # noqa: BLE001 — never wedge the turn
+            _log.warning(
+                "Alt+M pending model swap failed; continuing with previous model",
+                exc_info=True,
+            )
 
         # System prompt is frozen per session: built once on the first turn,
         # then reused verbatim so the prefix cache hits on turn 2+. Memory
@@ -3994,6 +4062,7 @@ class AgentLoop:
             model=meta.get("model", ""),
             cwd=meta.get("cwd"),
             parent_session_id=meta.get("parent_session_id"),  # delegate-lineage 2026-05-10
+            git_branch=meta.get("git_branch"),  # v19 — active branch at run_conversation start
         )
         self._session_ensured.add(sid)
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import sys
 import types
 import warnings
@@ -493,6 +494,54 @@ def _drop_orphan_browser_daemon_singleton() -> Iterator[None]:
         _cd._shared_daemon = None
 
 
+def _resolve_real_profile_home() -> Path:
+    """Resolve the same home path ``opencomputer.agent.config._home()`` uses.
+
+    Kept in sync with production by mirroring the same env-var precedence
+    and default location. Returning a ``Path`` rather than a string so
+    callers can use ``.glob`` / ``.unlink`` directly. Symlinks are NOT
+    resolved here — production code passes the symlinked path to
+    ``record_rate_limit`` and we need to clean files at the same logical
+    location, not the resolved one.
+    """
+    raw = os.environ.get("OPENCOMPUTER_HOME") or str(Path.home() / ".opencomputer")
+    return Path(raw)
+
+
+def _purge_rate_limit_state_files(home: Path) -> list[str]:
+    """Delete every ``<home>/rate_limits/*.json`` file, return names removed.
+
+    Race-safe: uses ``Path.unlink(missing_ok=True)`` so concurrent
+    pytest-xdist workers don't trip on each other. ``OSError`` from
+    permission denied / device errors is logged but never raised — a
+    test polluter is not worth blowing up the whole test session over.
+
+    Returns the list of file names that EXISTED at glob time. The
+    caller uses this list to emit a single WARN per session via
+    ``_warn_once``. An empty return value means "no pollution detected".
+    """
+    rate_dir = home / "rate_limits"
+    if not rate_dir.exists():
+        return []
+
+    # Glob first, then unlink. If a concurrent worker raced us between
+    # glob and unlink, the missing_ok=True will swallow the result.
+    leaked_paths = list(rate_dir.glob("*.json"))
+    leaked_names: list[str] = []
+    for path in leaked_paths:
+        leaked_names.append(path.name)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as err:
+            # Permission denied, read-only filesystem, etc. Don't abort
+            # the test run — log via the well-known iso_log channel so
+            # the source of the failure surfaces in CI without wedging.
+            _iso_log.warning(
+                "could not delete leaked rate-limit state %s: %s", path, err
+            )
+    return leaked_names
+
+
 @pytest.fixture(autouse=True)
 def _clear_provider_rate_limit_pollution() -> Iterator[None]:
     """Delete leaked ``rate_limits/<provider>.json`` state files before each test.
@@ -514,23 +563,17 @@ def _clear_provider_rate_limit_pollution() -> Iterator[None]:
     to come from somewhere — flagged as a separate WARN via
     ``_warn_once`` when a stale file is found, so a real leak source
     surfaces in CI.
-    """
-    import os
-    from pathlib import Path
 
-    home = Path(os.environ.get("OPENCOMPUTER_HOME", str(Path.home() / ".opencomputer")))
-    rate_dir = home / "rate_limits"
-    if rate_dir.exists():
-        leaked = list(rate_dir.glob("*.json"))
-        if leaked:
-            _warn_once(
-                "rate_limit_state_leak",
-                f"deleted stale {[f.name for f in leaked]} before test (a prior "
-                f"test wrote rate-limit state to the real OPENCOMPUTER_HOME)",
-            )
-            for f in leaked:
-                try:
-                    f.unlink()
-                except OSError:
-                    pass
+    The cleanup logic is factored into ``_purge_rate_limit_state_files``
+    so it can be unit-tested without invoking pytest's autouse machinery
+    (see ``tests/test_conftest_rate_limit_pollution_fixture.py``).
+    """
+    home = _resolve_real_profile_home()
+    leaked = _purge_rate_limit_state_files(home)
+    if leaked:
+        _warn_once(
+            "rate_limit_state_leak",
+            f"deleted stale {leaked} before test (a prior test wrote "
+            f"rate-limit state to the real OPENCOMPUTER_HOME={home})",
+        )
     yield

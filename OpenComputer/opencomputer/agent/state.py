@@ -126,7 +126,15 @@ class PromptCheckpoint:
 #: §10 visibility gaps documented at
 #: ``docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md``.
 #: Additive nullable column with DEFAULT 0; legacy rows read 0.
-SCHEMA_VERSION = 18
+#: v19 = git_branch (2026-05-11) — ``sessions.git_branch TEXT NULL``
+#: captures the active git branch at session-create time so the resume
+#: picker can render it in the meta strip and ``Ctrl+B`` can filter the
+#: list to just-this-branch entries (Claude Code parity). NULL for
+#: pre-v19 rows AND for sessions started outside a git repo / on a
+#: detached HEAD. Backfill is impossible (we don't know history); the
+#: picker renders the segment only when the value is present, so old
+#: rows degrade gracefully.
+SCHEMA_VERSION = 19
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -162,11 +170,17 @@ CREATE TABLE IF NOT EXISTS sessions (
                                          -- one of 'cli' | 'webui' | 'discord' | 'telegram' |
                                          -- 'slack' | 'cron' | 'tool' | 'api_server'. Used by
                                          -- oc-webui's sidebar to filter/group rows.
-    compactions_count INTEGER DEFAULT 0  -- compactions-count (v18, 2026-05-10): number of
+    compactions_count INTEGER DEFAULT 0, -- compactions-count (v18, 2026-05-10): number of
                                          -- times CompactionEngine rewrote this session's
                                          -- message history. Bumped by AgentLoop after
                                          -- CompactionResult.did_compact == True. Surfaced by
                                          -- /context, /usage, oc usage, oc context.
+    git_branch    TEXT                   -- v19 (2026-05-11): active git branch at session
+                                         -- start, captured by opencomputer.worktree.current_git_branch.
+                                         -- NULL when the session started outside a git repo,
+                                         -- on a detached HEAD, or for pre-v19 rows. Rendered
+                                         -- in the resume-picker meta strip and used by Ctrl+B
+                                         -- branch-filter.
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
@@ -358,6 +372,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (15, 16): "_migrate_v15_to_v16",
     (16, 17): "_migrate_v16_to_v17",
     (17, 18): "_migrate_v17_to_v18",
+    (18, 19): "_migrate_v18_to_v19",
 }
 
 
@@ -1076,6 +1091,26 @@ def _migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """git_branch (2026-05-11) — capture active git branch on session create.
+
+    Adds ``sessions.git_branch TEXT NULL``. Populated by
+    :meth:`SessionDB.ensure_session` / :meth:`SessionDB.create_session`
+    when the caller passes a non-empty value (``opencomputer.worktree.current_git_branch``
+    is the canonical source). Backfill of historical rows is impossible
+    (we don't know what branch a months-old session was started on);
+    the picker renders the segment only when the value is present, so
+    NULL rows show the prior layout unchanged.
+
+    Idempotent: ALTER is skipped when the column already exists. SQLite
+    ``ADD COLUMN`` is O(1) (a schema-only change in the header) — no
+    table rewrite even on multi-GB DBs.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "git_branch" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN git_branch TEXT")
+
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
     """Advance DB from stored schema_version to SCHEMA_VERSION. Idempotent."""
     current = _read_schema_version(conn)
@@ -1158,6 +1193,7 @@ class SessionDB:
         title: str = "",
         cwd: str | None = None,
         parent_session_id: str | None = None,
+        git_branch: str | None = None,
     ) -> None:
         """Idempotent session-row insert. Existing rows are left untouched.
 
@@ -1172,17 +1208,26 @@ class SessionDB:
         delegating session's id when the row is being inserted by a
         ``DelegateTool`` invocation; defaults to ``None`` for root
         sessions. ``None`` and empty string are normalised to NULL.
+
+        ``git_branch`` (v19, 2026-05-11) records the active git branch
+        at the time of insert — sourced from
+        ``opencomputer.worktree.current_git_branch(cwd)``. ``None`` and
+        empty string are normalised to NULL. Branch is only meaningful
+        on first insert; this method's ``ON CONFLICT DO NOTHING`` means
+        an existing row's branch is never overwritten (a long-running
+        session that survives a branch switch keeps its origin branch).
         """
         psid = parent_session_id or None
+        branch = git_branch or None
         with self._txn() as conn:
             conn.execute(
                 """
                 INSERT INTO sessions
-                    (id, started_at, platform, model, title, cwd, parent_session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, started_at, platform, model, title, cwd, parent_session_id, git_branch)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO NOTHING
                 """,
-                (session_id, time.time(), platform, model, title, cwd, psid),
+                (session_id, time.time(), platform, model, title, cwd, psid, branch),
             )
 
     def create_session(
@@ -1193,6 +1238,7 @@ class SessionDB:
         title: str = "",
         cwd: str | None = None,  # Plan 3 — captured for profile-suggester
         parent_session_id: str | None = None,  # delegate-lineage 2026-05-10
+        git_branch: str | None = None,  # v19 — active git branch at create time
     ) -> None:
         """Create or upsert a session row.
 
@@ -1216,12 +1262,13 @@ class SessionDB:
         parent linkage, but DOES set it on first write.
         """
         psid = parent_session_id or None
+        branch = git_branch or None
         with self._txn() as conn:
             conn.execute(
                 """
                 INSERT INTO sessions
-                    (id, started_at, platform, model, title, cwd, parent_session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, started_at, platform, model, title, cwd, parent_session_id, git_branch)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   started_at        = excluded.started_at,
                   platform          = excluded.platform,
@@ -1229,9 +1276,10 @@ class SessionDB:
                   cwd               = excluded.cwd,
                   parent_session_id = COALESCE(
                       sessions.parent_session_id, excluded.parent_session_id
-                  )
+                  ),
+                  git_branch        = COALESCE(sessions.git_branch, excluded.git_branch)
                 """,
-                (session_id, time.time(), platform, model, title, cwd, psid),
+                (session_id, time.time(), platform, model, title, cwd, psid, branch),
             )
         # Round 2B P-4 — bind the session id onto the
         # observability ContextVar so subsequent log records emitted
@@ -1296,7 +1344,15 @@ class SessionDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def list_sessions_with_preview(self, limit: int = 200) -> list[dict[str, Any]]:
+    def list_sessions_with_preview(
+        self,
+        limit: int = 200,
+        *,
+        scope: str = "all",
+        cwd: str | None = None,
+        repo_paths: list[str] | None = None,
+        branch_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Like :meth:`list_sessions` but joins the first user-role message.
 
         Returns the same dict shape as :meth:`list_sessions` plus a single
@@ -1309,10 +1365,69 @@ class SessionDB:
         per session. Cheap enough for the picker's 200-row budget; if it
         ever becomes a hotspot, swap to a window function on a covering
         index over ``messages(session_id, role, timestamp)``.
+
+        Phase B (2026-05-11) — Claude-Code parity scope filtering:
+
+            ``scope="cwd"``  → ``WHERE sessions.cwd = :cwd`` (exact match).
+                                Pass a non-empty ``cwd`` or this falls
+                                through to no filter (and emits no rows
+                                if every row has NULL cwd, which is the
+                                correct outcome — "the current dir has
+                                no sessions yet").
+            ``scope="repo"`` → ``WHERE sessions.cwd LIKE :root || '%'``
+                                for every root in ``repo_paths``. Covers
+                                the main worktree + all linked worktrees
+                                of the repo. ``None`` / empty list falls
+                                back to ``scope="all"``.
+            ``scope="all"``  → no scope filter (default, preserves the
+                                pre-Phase-B behaviour).
+
+        ``branch_filter`` is orthogonal — when set, adds
+        ``AND sessions.git_branch = :branch``. NULL ``git_branch`` rows
+        (pre-v19) are intentionally excluded when a branch filter is
+        active. Pass ``None`` to disable.
+
+        Defensive defaults
+        -------------------
+        Unknown ``scope`` values fall through to ``"all"`` rather than
+        raising — keeps the picker robust against future enum drift in
+        the calling layer.
         """
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if scope == "cwd" and cwd:
+            clauses.append("s.cwd = ?")
+            params.append(cwd)
+        elif scope == "repo" and repo_paths:
+            # Each worktree root contributes one ``cwd LIKE root%`` clause;
+            # OR them together because a session belongs to AT MOST one
+            # root. Append a trailing path separator so ``/foo`` doesn't
+            # match ``/foobar``.
+            like_terms = []
+            for root in repo_paths:
+                if not root:
+                    continue
+                normalized = root.rstrip("/") + "/"
+                like_terms.append("s.cwd LIKE ?")
+                # Match either exactly ``/path/to/repo`` OR ``/path/to/repo/...``.
+                # We achieve that by OR-ing exact + prefix.
+                params.append(normalized + "%")
+                like_terms.append("s.cwd = ?")
+                params.append(root.rstrip("/"))
+            if like_terms:
+                clauses.append("(" + " OR ".join(like_terms) + ")")
+
+        if branch_filter:
+            clauses.append("s.git_branch = ?")
+            params.append(branch_filter)
+
+        where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT s.*,
                        (SELECT m.content
                           FROM messages m
@@ -1321,10 +1436,11 @@ class SessionDB:
                          ORDER BY m.timestamp ASC
                          LIMIT 1) AS first_user_message
                   FROM sessions s
+                {where_sql}
               ORDER BY s.started_at DESC
                  LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
             return [dict(r) for r in rows]
 

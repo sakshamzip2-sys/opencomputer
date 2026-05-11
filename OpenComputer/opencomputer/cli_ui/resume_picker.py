@@ -41,6 +41,12 @@ class SessionRow:
     # what the conversation was about. Empty when no user message has
     # been recorded yet (e.g., session opened but never sent).
     first_user_message: str = ""
+    # v19 (2026-05-11) — active git branch at session-create time, sourced
+    # from :func:`opencomputer.worktree.current_git_branch`. Empty when the
+    # session started outside a git repo, on a detached HEAD, or for
+    # pre-v19 rows (legacy NULLs). Rendered as an extra meta-strip segment
+    # only when present, so older rows degrade to the prior layout.
+    git_branch: str = ""
 
 
 def _clean_label(text: str, *, max_len: int = 80) -> str:
@@ -286,16 +292,127 @@ def _commit_confirm_delete(state: dict, db) -> None:  # noqa: ANN001 — db is S
         state["selected_idx"] = max(0, len(state["filtered"]) - 1)
 
 
-def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: ANN001
+# ─── Rename state-machine helpers (importable for tests) ───────────────
+
+
+def _enter_rename(state: dict) -> None:
+    """Flip the picker into rename mode for the selected row.
+
+    No-op if the filtered list is empty or no row is selected. The
+    caller is responsible for seeding any input buffer with the row's
+    current title (the picker does this against ``state["rename_seed"]``).
+    """
+    if state["filtered"] and state["selected_idx"] >= 0:
+        target = state["filtered"][state["selected_idx"]]
+        state["mode"] = "rename"
+        state["rename_seed"] = target.title or ""
+
+
+def _exit_rename(state: dict) -> None:
+    """Cancel the in-progress rename and return to navigate mode."""
+    state["mode"] = "navigate"
+    state["rename_seed"] = ""
+
+
+def _commit_rename(
+    state: dict, db, *, new_title: str  # noqa: ANN001 — db is SessionDB
+) -> None:
+    """Commit the new title to DB + replace the row in both lists.
+
+    Empty / whitespace-only ``new_title`` is treated as "clear the
+    title" (set to NULL in DB by passing ``""``). The picker's render
+    pipeline falls back to the first_user_message / cwd preview chain
+    when title is empty — so the user always sees SOMETHING on the row.
+    """
+    state["mode"] = "navigate"
+    state["rename_seed"] = ""
+    if not state["filtered"] or state["selected_idx"] < 0:
+        return
+    target = state["filtered"][state["selected_idx"]]
+    cleaned = (new_title or "").strip()
+    try:
+        db.set_session_title(target.id, cleaned)
+    except Exception as exc:  # noqa: BLE001 — UI must never crash on a DB hiccup
+        import logging as _logging
+
+        _logging.getLogger("opencomputer.cli_ui.resume_picker").warning(
+            "set_session_title(%s, %r) raised %s; row not updated",
+            target.id,
+            cleaned,
+            exc,
+        )
+        return
+
+    # Replace the row in both backing lists so the UI reflects the
+    # change without needing a full refetch. The SessionRow dataclass is
+    # frozen, so we reconstruct it from the existing fields.
+    def _swap(rows: list[SessionRow]) -> list[SessionRow]:
+        return [
+            SessionRow(
+                id=r.id,
+                title=cleaned,
+                started_at=r.started_at,
+                message_count=r.message_count,
+                cwd=r.cwd,
+                first_user_message=r.first_user_message,
+                git_branch=r.git_branch,
+            )
+            if r.id == target.id
+            else r
+            for r in rows
+        ]
+
+    state["rows"] = _swap(state["rows"])
+    state["filtered"] = _swap(state["filtered"])
+
+
+#: Scope values understood by :func:`run_resume_picker` and forwarded to
+#: :meth:`SessionDB.list_sessions_with_preview` via the refetch callback.
+#: Kept as plain string constants (not an Enum) so callers can persist
+#: them in settings.yaml without round-tripping through pickled enums.
+SCOPE_CWD = "cwd"      # default — current working directory only
+SCOPE_REPO = "repo"    # current cwd's repo, all worktrees
+SCOPE_ALL = "all"      # every session on this machine
+
+
+def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
+    rows: list[SessionRow],
+    db=None,
+    *,
+    refetch=None,
+    initial_scope: str = SCOPE_CWD,
+    initial_branch_filter: bool = False,
+    current_branch: str | None = None,
+) -> str | None:
     """Open a full-screen picker and return the selected session id.
 
     Returns ``None`` if the user cancels (Esc, Ctrl+C, or empty input).
     Alternate-screen mode is used so the user's terminal state is restored
     cleanly when the picker exits regardless of outcome.
 
-    ``db`` is an optional :class:`SessionDB` reference used to commit
-    in-picker deletes (Ctrl+D → y). Callers without delete support can
-    omit it; pressing Ctrl+D is a no-op when ``db is None``.
+    Args:
+        rows: initial list of :class:`SessionRow` to render. The picker
+            re-reads via ``refetch`` when the user widens scope (Ctrl+W
+            / Ctrl+A) or toggles the branch filter (Ctrl+B).
+        db: optional :class:`SessionDB` reference used to commit
+            in-picker deletes (Ctrl+D → y). Callers without delete
+            support can omit it; Ctrl+D is a no-op when ``db is None``.
+        refetch: optional ``Callable[[scope: str, branch_only: bool],
+            list[SessionRow]]``. Invoked when the user presses Ctrl+W,
+            Ctrl+A, or Ctrl+B. Receives the new ``scope`` (one of
+            :data:`SCOPE_CWD`, :data:`SCOPE_REPO`, :data:`SCOPE_ALL`)
+            and a boolean indicating whether the branch filter is now
+            active. Returns the new row list. If ``None``, the
+            scope-toggle shortcuts are disabled (footer hint omitted).
+        initial_scope: the scope the caller already used to fetch
+            ``rows``. Influences the chrome label only — the picker
+            doesn't re-fetch on startup.
+        initial_branch_filter: whether ``rows`` was fetched with the
+            branch filter already active. Same purpose as
+            ``initial_scope`` — chrome state only.
+        current_branch: the currently-checked-out branch (used for the
+            chrome's "Ctrl+B (current: <name>)" hint). ``None`` when
+            we're not inside a git repo.
     """
     from prompt_toolkit.application import Application
     from prompt_toolkit.buffer import Buffer
@@ -306,7 +423,11 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
     from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
     from prompt_toolkit.styles import Style
 
-    if not rows:
+    # Allow ``rows == []`` ONLY when the caller wired ``refetch`` — the
+    # user might Ctrl+A their way into a populated list from an empty
+    # cwd scope. Without refetch, an empty list means "no sessions" and
+    # we return None.
+    if not rows and refetch is None:
         return None
 
     # Mutable state captured by the closures below. Plain dict keeps the
@@ -315,12 +436,20 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
     # "confirm-delete" (y/n only). ``rows`` is the canonical mutable
     # backing list — `_commit_confirm_delete` removes from it so a
     # subsequent search won't bring the row back.
-    state = {
+    state: dict = {
         "query": "",
-        "selected_idx": 0,
+        "selected_idx": 0 if rows else -1,
         "filtered": list(rows),
         "rows": list(rows),
         "mode": "navigate",
+        # Phase B — scope + branch filter live in picker state so the
+        # chrome can render them and the shortcuts can toggle them.
+        "scope": initial_scope,
+        "branch_only": initial_branch_filter,
+        # Phase C — Ctrl+R rename. ``rename_seed`` is the title the
+        # rename buffer was initialised with; ``mode == "rename"``
+        # gates the buffer's visibility + the Enter / Esc handlers.
+        "rename_seed": "",
     }
 
     def _is_navigating() -> bool:
@@ -329,9 +458,12 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
     def _is_confirming() -> bool:
         return state["mode"] == "confirm-delete"
 
+    def _is_renaming() -> bool:
+        return state["mode"] == "rename"
+
     def _refilter() -> None:
-        # Don't refilter mid-confirm — keeps the highlighted row visible
-        # while the y/n decision is pending.
+        # Don't refilter mid-confirm OR mid-rename — keeps the highlighted
+        # row visible while the y/n / rename decision is pending.
         if state["mode"] != "navigate":
             return
         state["filtered"] = filter_rows(state["rows"], state["query"])
@@ -345,8 +477,20 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
 
     search_buffer.on_text_changed += _on_search_text_changed
 
+    def _scope_label() -> str:
+        """Human-readable label for the current scope + branch filter."""
+        scope_map = {
+            SCOPE_CWD: "current dir",
+            SCOPE_REPO: "current repo",
+            SCOPE_ALL: "all projects",
+        }
+        base = scope_map.get(state["scope"], "all projects")
+        if state["branch_only"] and current_branch:
+            return f"{base} · branch: {current_branch}"
+        return base
+
     def _header_text():
-        total = len(rows)
+        total = len(state["rows"])
         showing = len(state["filtered"])
         out: list[tuple[str, str]] = [
             ("", "\n  "),
@@ -357,6 +501,7 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
             out.append(("class:header.count", f"({total})"))
         else:
             out.append(("class:header.count", f"({showing} of {total} match)"))
+        out.append(("class:header.scope", f"  ·  {_scope_label()}"))
         out.append(("", "\n"))
         return out
 
@@ -372,7 +517,16 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
                 ("class:footer.key", "n / esc"),
                 ("class:footer", " cancel"),
             ]
-        return [
+        if state["mode"] == "rename":
+            return [
+                ("", "  "),
+                ("class:footer.key", "enter"),
+                ("class:footer", " save    "),
+                ("class:footer.key", "esc"),
+                ("class:footer", " cancel    "),
+                ("class:footer", "(leave blank to clear title)"),
+            ]
+        base = [
             ("", "  "),
             ("class:footer.key", "↑↓"),
             ("class:footer", " navigate    "),
@@ -380,9 +534,39 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
             ("class:footer", " resume    "),
             ("class:footer.key", "Ctrl+D"),
             ("class:footer", " delete    "),
+            ("class:footer.key", "Ctrl+R"),
+            ("class:footer", " rename    "),
+        ]
+        # Scope-toggle hints — only shown when ``refetch`` is wired AND
+        # there's somewhere meaningful to widen TO. ``Ctrl+B`` requires
+        # an active branch (no point filtering by "no branch").
+        if refetch is not None:
+            if state["scope"] != SCOPE_ALL:
+                base.extend([
+                    ("class:footer.key", "Ctrl+W"),
+                    ("class:footer", " widen    "),
+                    ("class:footer.key", "Ctrl+A"),
+                    ("class:footer", " all-projects    "),
+                ])
+            else:
+                # Already at SCOPE_ALL: pressing Ctrl+W/A returns to CWD.
+                base.extend([
+                    ("class:footer.key", "Ctrl+W"),
+                    ("class:footer", " narrow    "),
+                ])
+            if current_branch:
+                base.extend([
+                    ("class:footer.key", "Ctrl+B"),
+                    (
+                        "class:footer",
+                        (" branch-off " if state["branch_only"] else " branch    "),
+                    ),
+                ])
+        base.extend([
             ("class:footer.key", "esc"),
             ("class:footer", " cancel"),
-        ]
+        ])
+        return base
 
     def _list_text():
         if not state["filtered"]:
@@ -416,11 +600,17 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
             arrow = "❯ " if is_sel else "  "
             title = format_session_label(row)
             preview = format_session_preview(row)
-            meta = (
-                f"{format_time_ago(row.started_at)}  ·  "
-                f"{row.message_count} message{'s' if row.message_count != 1 else ''}  ·  "
-                f"{row.id[:8]}"
-            )
+            # v19 — slot the git branch between "N messages" and the id
+            # prefix when present. Pre-v19 rows have ``git_branch == ""``
+            # and degrade to the prior 3-segment layout cleanly.
+            meta_parts = [
+                format_time_ago(row.started_at),
+                f"{row.message_count} message{'s' if row.message_count != 1 else ''}",
+            ]
+            if row.git_branch:
+                meta_parts.append(row.git_branch)
+            meta_parts.append(row.id[:8])
+            meta = "  ·  ".join(meta_parts)
             arrow_cls = "class:row.cursor" if is_sel else "class:row.cursor.dim"
             title_cls = "class:row.title.selected" if is_sel else "class:row.title"
             preview_cls = (
@@ -493,6 +683,115 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
         if state["filtered"]:
             _enter_confirm_delete(state)
 
+    # ─── Phase B — scope-widening + branch-filter shortcuts ──────────
+    #
+    # All three shortcuts share the same "re-fetch via callback, replace
+    # rows, reset search query, clamp cursor" flow. Factor it out so the
+    # individual handlers stay one-liners.
+
+    def _refetch_and_replace(*, new_scope: str, branch_only: bool) -> None:
+        """Re-pull rows from the callback and swap them into picker state.
+
+        Defensive: if ``refetch`` raises (DB went away, query bug, …),
+        we keep the old rows and log to stderr-via-print — the picker
+        must NEVER crash mid-session because of a scope toggle.
+        """
+        if refetch is None:
+            return
+        try:
+            new_rows = refetch(new_scope, branch_only)
+        except Exception as exc:  # noqa: BLE001 — UI must not crash
+            # Surface the error in the picker's "no sessions" empty
+            # state by leaving rows untouched. A more ambitious version
+            # would render a transient toast; for now we degrade silently
+            # plus log at WARNING via the worktree logger (the only
+            # available channel inside an alt-screen Application).
+            import logging as _logging
+
+            _logging.getLogger("opencomputer.cli_ui.resume_picker").warning(
+                "refetch(scope=%r, branch_only=%r) raised %s; rows unchanged",
+                new_scope,
+                branch_only,
+                exc,
+            )
+            return
+        state["scope"] = new_scope
+        state["branch_only"] = branch_only
+        state["rows"] = list(new_rows)
+        state["query"] = ""
+        search_buffer.text = ""  # also clears the search box visually
+        state["filtered"] = list(new_rows)
+        state["selected_idx"] = 0 if new_rows else -1
+
+    @kb.add(Keys.ControlW, filter=Condition(_is_navigating))
+    def _widen_worktree(event):  # noqa: ANN001
+        """Toggle between cwd → repo → all → cwd."""
+        if refetch is None:
+            return
+        # CC's contract: Ctrl+W toggles "current repo's worktrees". From
+        # cwd we widen to repo; from repo we widen to all; from all we
+        # narrow back to cwd. This gives the user a 3-state cycle on a
+        # single keystroke without needing a fourth binding.
+        next_scope = {
+            SCOPE_CWD: SCOPE_REPO,
+            SCOPE_REPO: SCOPE_ALL,
+            SCOPE_ALL: SCOPE_CWD,
+        }.get(state["scope"], SCOPE_CWD)
+        _refetch_and_replace(new_scope=next_scope, branch_only=state["branch_only"])
+
+    @kb.add(Keys.ControlA, filter=Condition(_is_navigating))
+    def _widen_all(event):  # noqa: ANN001
+        """Hard-set scope to ``all`` (Claude Code's ``Ctrl+A``)."""
+        if refetch is None:
+            return
+        # Press twice to return — second press toggles back to CWD,
+        # matching Claude Code's "press again to return" contract.
+        new_scope = SCOPE_CWD if state["scope"] == SCOPE_ALL else SCOPE_ALL
+        _refetch_and_replace(new_scope=new_scope, branch_only=state["branch_only"])
+
+    @kb.add(Keys.ControlB, filter=Condition(_is_navigating))
+    def _toggle_branch_filter(event):  # noqa: ANN001
+        """Toggle the current-branch filter on / off."""
+        if refetch is None or current_branch is None:
+            return
+        _refetch_and_replace(
+            new_scope=state["scope"], branch_only=not state["branch_only"]
+        )
+
+    # ─── Phase C — Ctrl+R rename in picker ───────────────────────────
+
+    @kb.add(Keys.ControlR, filter=Condition(_is_navigating))
+    def _start_rename(event):  # noqa: ANN001
+        """Enter rename mode for the highlighted row.
+
+        Seeds the rename buffer with the row's current title so the
+        user can edit (instead of typing from scratch). Refuses to enter
+        rename mode when no DB is wired — there's nowhere to commit to.
+        """
+        if db is None or not state["filtered"] or state["selected_idx"] < 0:
+            return
+        _enter_rename(state)
+        rename_buffer.text = state["rename_seed"]
+        # Move cursor to end of seeded text so user can keep typing.
+        rename_buffer.cursor_position = len(rename_buffer.text)
+        # Focus the rename buffer so keystrokes land there.
+        event.app.layout.focus(rename_window)
+
+    @kb.add(Keys.Enter, filter=Condition(_is_renaming))
+    def _commit_rename_handler(event):  # noqa: ANN001
+        """Commit the new title to DB + return focus to search buffer."""
+        new_title = rename_buffer.text
+        _commit_rename(state, db, new_title=new_title)
+        rename_buffer.text = ""
+        event.app.layout.focus(search_window)
+
+    @kb.add(Keys.Escape, eager=True, filter=Condition(_is_renaming))
+    def _cancel_rename(event):  # noqa: ANN001
+        """Drop the in-progress rename + return to navigate mode."""
+        _exit_rename(state)
+        rename_buffer.text = ""
+        event.app.layout.focus(search_window)
+
     @kb.add("y", filter=Condition(_is_confirming))
     def _confirm_yes(event):  # noqa: ANN001
         if db is not None:
@@ -502,7 +801,11 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
     def _confirm_no(event):  # noqa: ANN001
         _exit_confirm_delete(state)
 
-    @kb.add(Keys.Escape, eager=True)
+    @kb.add(
+        Keys.Escape,
+        eager=True,
+        filter=Condition(lambda: state["mode"] != "rename"),
+    )
     def _esc(event):  # noqa: ANN001
         # Mid-confirm: Esc cancels the pending delete instead of closing the picker.
         if state["mode"] == "confirm-delete":
@@ -520,6 +823,8 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
         {
             "header.label": "bold #61afef",
             "header.count": "#5f5f5f",
+            "header.scope": "#87875f",  # subdued amber — visible but not loud
+            "rename.symbol": "bold #d75f87",  # rose — distinct from search amber
             "divider": "#3a3a3a",
             "search.symbol": "bold #61afef",
             "footer": "#5f5f5f",
@@ -548,7 +853,7 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
     # Search row: a single inline row with a colored magnifier-glass
     # symbol followed by the buffer. Achieved via a VSplit so the symbol
     # has fixed width and the buffer extends.
-    from prompt_toolkit.layout import VSplit
+    from prompt_toolkit.layout import ConditionalContainer, VSplit
 
     search_label_window = Window(
         content=FormattedTextControl([("class:search.symbol", "  ⌕  ")]),
@@ -556,6 +861,32 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
         dont_extend_width=True,
     )
     search_row = VSplit([search_label_window, search_window])
+
+    # Phase C — rename buffer + row, shown via ConditionalContainer
+    # only when mode == "rename". When we enter rename mode we focus
+    # the rename buffer; on Enter / Esc we commit-or-cancel and return
+    # focus to the search buffer.
+    rename_buffer = Buffer()
+    rename_label_window = Window(
+        content=FormattedTextControl(
+            lambda: [
+                ("class:rename.symbol", "  ✎  "),
+            ]
+        ),
+        height=1,
+        dont_extend_width=True,
+    )
+    rename_window = Window(content=BufferControl(buffer=rename_buffer), height=1)
+    rename_row = VSplit([rename_label_window, rename_window])
+
+    search_row_cond = ConditionalContainer(
+        content=search_row,
+        filter=Condition(lambda: state["mode"] != "rename"),
+    )
+    rename_row_cond = ConditionalContainer(
+        content=rename_row,
+        filter=Condition(_is_renaming),
+    )
 
     layout = Layout(
         HSplit(
@@ -568,7 +899,8 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
                     content=FormattedTextControl(_divider_text),
                     height=1,
                 ),
-                search_row,
+                search_row_cond,
+                rename_row_cond,
                 Window(
                     content=FormattedTextControl(_divider_text),
                     height=1,
