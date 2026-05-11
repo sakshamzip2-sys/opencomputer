@@ -348,3 +348,12 @@ class ACPSession:
         except Exception:
             logger.exception("acp: load_from_db failed for session %s", self.session_id)
         return False
+
+
+#: PascalCase canonical name (``AcpSession``). Behaviourally identical
+#: to :class:`ACPSession`. Same rationale as :class:`AcpServer`.
+class AcpSession(ACPSession):
+    """PascalCase alias of :class:`ACPSession` — see parent docstring."""
+
+
+__all__ = ["ACPSession", "AcpSession", "QueuedMessage"]

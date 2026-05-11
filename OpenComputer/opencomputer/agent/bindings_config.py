@@ -52,6 +52,19 @@ class Binding:
     priority: int = 0
 
 
+class AgentBinding(Binding):
+    """Public alias for :class:`Binding` — canonical OpenClaw /
+    parity-doctor name.
+
+    A "binding" in OC routes an inbound event (channel + chat +
+    peer) to a profile; in OpenClaw the same dataclass is named
+    ``AgentBinding`` since the routed target is an agent. OC's
+    agent/profile mapping is 1:1 so the two views are equivalent.
+    Both classes accept the same constructor args; subclassing keeps
+    ``isinstance`` matching working for both names.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class BindingsConfig:
     """Parsed contents of ``bindings.yaml``."""
@@ -132,6 +145,7 @@ def load_bindings(path: Path) -> BindingsConfig:
 
 
 __all__ = [
+    "AgentBinding",
     "Binding",
     "BindingMatch",
     "BindingsConfig",

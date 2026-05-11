@@ -29,7 +29,6 @@ import pytest
 
 from opencomputer.agent.state import SessionDB
 
-
 # ─── CLI signature ───────────────────────────────────────────────────
 
 

@@ -29,7 +29,42 @@ A user-set value always wins.
 
 from __future__ import annotations
 
+from enum import Enum
+
 from plugin_sdk.runtime_context import RuntimeContext
+
+
+class EffortLevel(str, Enum):
+    """OC's internal effort tier vocabulary.
+
+    Inherits from ``str`` so the value serializes cleanly to JSON / TOML
+    and round-trips through ``runtime.custom`` without conversion. The
+    translator in each provider's ``*_kwargs_from_runtime`` maps these to
+    the provider's native shape — Anthropic ``output_config.effort`` for
+    adaptive models, ``budget_tokens`` for legacy, OpenAI
+    ``reasoning_effort``, Gemini ``thinkingConfig.thinkingBudget``.
+
+    Ordered from cheapest (``MINIMAL``) to most expensive (``MAX``).
+    """
+
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+    @classmethod
+    def from_str(cls, raw: str | None) -> EffortLevel | None:
+        """Best-effort coercion from a free-form string — returns ``None``
+        when the value isn't a recognised tier. Surfaces ``None`` rather
+        than raising so caller code can fall back to ``recommended_effort``."""
+        if not isinstance(raw, str):
+            return None
+        try:
+            return cls(raw.strip().lower())
+        except ValueError:
+            return None
 
 
 def _model_default(model: str) -> str | None:
@@ -86,4 +121,4 @@ def recommended_effort(
     return _model_default(model)
 
 
-__all__ = ["recommended_effort"]
+__all__ = ["EffortLevel", "recommended_effort"]

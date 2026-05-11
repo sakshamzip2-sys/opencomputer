@@ -38,7 +38,6 @@ from opencomputer.cli_ui.resume_picker import (
 )
 from opencomputer.worktree import worktree_roots
 
-
 # ─── git fixture ──────────────────────────────────────────────────────
 
 

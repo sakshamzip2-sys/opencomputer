@@ -168,9 +168,40 @@ def render_orders_for_system_context(orders: list[StandingOrder]) -> str:
     return "\n".join(parts)
 
 
+def load_standing_orders(
+    agents_md_path: str | Path | None = None,
+    *,
+    soul_md_path: str | Path | None = None,
+) -> list[StandingOrder]:
+    """Public entry-point for callers that want the full standing-order
+    set from disk.
+
+    Loads ``AGENTS.md`` (project-wide) and optionally ``SOUL.md``
+    (persona-scoped), parses ``## Program: <name>`` blocks from each,
+    and returns the deduped list. Later sources override earlier ones
+    on name collision — SOUL.md wins over AGENTS.md so a persona can
+    refine a global program.
+
+    Missing files are silently treated as empty lists. Malformed
+    blocks are logged + skipped via the underlying parser.
+    """
+    sources: list[Path] = []
+    if agents_md_path is not None:
+        sources.append(Path(agents_md_path))
+    if soul_md_path is not None:
+        sources.append(Path(soul_md_path))
+
+    by_name: dict[str, StandingOrder] = {}
+    for path in sources:
+        for order in parse_agents_md_file(path):
+            by_name[order.name] = order  # later wins
+    return list(by_name.values())
+
+
 __all__ = [
     "StandingOrder",
     "parse_agents_md",
     "parse_agents_md_file",
+    "load_standing_orders",
     "render_orders_for_system_context",
 ]

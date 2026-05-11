@@ -351,14 +351,14 @@ def test_loop_config_defaults() -> None:
 
 def test_model_config_defaults_after_cap_sweep() -> None:
     """ModelConfig defaults after 2026-05-05 cap-doubling sweep:
-      - max_tokens: 32768 (8x the original 4096)
+      - max_tokens: 64000 (approx 16x the original 4096)
       - temperature: 2.0 (was 1.0)
 
     Lock the new defaults so nobody silently regresses them."""
     from opencomputer.agent.config import ModelConfig
 
     cfg = ModelConfig()
-    assert cfg.max_tokens == 32768
+    assert cfg.max_tokens == 64_000
     assert cfg.temperature == 2.0
 
 

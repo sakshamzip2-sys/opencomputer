@@ -57,6 +57,11 @@ CommandVerdict = Literal["allow", "ask", "deny"]
 VALID_VERDICTS: frozenset[str] = frozenset({"allow", "ask", "deny"})
 
 
+#: Alias for the canonical name pi/OpenClaw uses (``CommandPattern``).
+#: We ship the rule via the ``CommandRule`` name historically; the
+#: alias lets ``oc parity-doctor`` find the shape and keeps external
+#: docs / IDE go-to-definition consistent across forks. Behaviourally
+#: identical to ``CommandRule``.
 @dataclass(frozen=True, slots=True)
 class CommandRule:
     """One per-command approval rule.
@@ -83,6 +88,15 @@ class CommandRule:
     pattern: str
     verdict: CommandVerdict = "ask"
     matcher: Literal["substring", "glob", "regex"] = "substring"
+
+
+class CommandPattern(CommandRule):
+    """Public alias for :class:`CommandRule` — canonical OpenClaw /
+    parity-doctor name. Behaviourally identical to
+    :class:`CommandRule`; both names resolve through the same parsing
+    helpers in this module. Existing ``CommandRule`` import sites
+    keep working via the original class declaration above.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +409,7 @@ __all__ = [
     "VALID_MODES",
     "VALID_VERDICTS",
     "ApprovalsConfig",
+    "CommandPattern",
     "CommandRule",
     "CommandVerdict",
     "SecretsApprovalsError",

@@ -116,7 +116,10 @@ def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = 
         return
 
     if content is None or content == "":
-        msg["cache_control"] = cache_marker
+        # Put the marker on a content block, not the message dict.
+        # Anthropic honors cache_control only on content blocks; a message-level
+        # key is silently ignored, wasting a breakpoint slot.
+        msg["content"] = [{"type": "text", "text": "", "cache_control": cache_marker}]
         return
 
     if isinstance(content, str):
@@ -165,11 +168,11 @@ def _cache_tail_messages(
 ) -> None:
     """Mark up to n_tail non-system messages from the end.
 
-    When ``min_cache_tokens`` > 0, sub-threshold blocks are skipped:
-    we walk back through earlier non-system messages (up to Anthropic's
-    20-block server-side lookback window) to find ones that clear the
-    threshold. Marking a sub-threshold block is a silent server-side
-    no-op that wastes a breakpoint slot.
+    When ``min_cache_tokens`` > 0, sub-threshold blocks are skipped.
+    We iterate non-system message indices in reverse and claim the first
+    eligible (token-size >= threshold) unclaimed index for each slot,
+    stopping after _LOOKBACK_WINDOW candidates or n_tail claims — whichever
+    comes first. This mirrors Anthropic's 20-block server-side lookback.
     """
     non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
     if min_cache_tokens <= 0:
@@ -179,23 +182,12 @@ def _cache_tail_messages(
         return
 
     chosen: list[int] = []
-    used: set[int] = set()
-    for slot_offset in range(n_tail):
-        start = len(non_sys) - 1 - slot_offset
-        if start < 0:
+    for scanned, idx in enumerate(reversed(non_sys)):
+        if len(chosen) >= n_tail or scanned >= _LOOKBACK_WINDOW:
             break
-        for walk in range(_LOOKBACK_WINDOW):
-            cand = start - walk
-            if cand < 0:
-                break
-            idx = non_sys[cand]
-            if idx in used:
-                continue
-            est = _block_token_estimate(messages[idx].get("content"))
-            if est >= min_cache_tokens:
-                chosen.append(idx)
-                used.add(idx)
-                break
+        est = _block_token_estimate(messages[idx].get("content"))
+        if est >= min_cache_tokens:
+            chosen.append(idx)
 
     for idx in chosen:
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
@@ -267,8 +259,17 @@ def apply_full_cache_control(
 
     tools_used = 0
     if tools:
-        tools[-1]["cache_control"] = marker
-        tools_used = 1
+        # Apply the same min_cache_tokens threshold to the tools slot.
+        # Tool definitions are typically large, but small tool sets with a
+        # high threshold (e.g. Opus, 4096 tokens) would waste a breakpoint
+        # on a silent server-side no-op otherwise.
+        tools_token_estimate = sum(
+            _block_token_estimate(t.get("description", "") + json.dumps(t.get("input_schema", {})))
+            for t in tools
+        )
+        if min_cache_tokens <= 0 or tools_token_estimate >= min_cache_tokens:
+            tools[-1]["cache_control"] = marker
+            tools_used = 1
 
     sys_used = 0
     if messages and messages[0].get("role") == "system":

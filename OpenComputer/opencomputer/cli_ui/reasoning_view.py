@@ -67,6 +67,64 @@ def _fmt_duration(seconds: float) -> str:
     return f"{seconds:.1f}s"
 
 
+#: Default cap for display-side tool output truncation. Matches the
+#: same order of magnitude a user can reasonably scroll through —
+#: ``oc session show`` is the escape hatch for the full body.
+_DEFAULT_TOOL_OUTPUT_MAX_LINES: int = 40
+
+
+def _apply_visual_truncate(body: str) -> str:
+    """Truncate tool output for display only — model still sees full body.
+
+    ``truncate_middle`` keeps head + tail with a ``[N lines omitted]``
+    marker. The head usually carries the command echo / params; the
+    tail carries the final state (error or success). Both ends are
+    where users look first when scanning tool output.
+
+    Override via ``OPENCOMPUTER_TOOL_OUTPUT_MAX_LINES`` env var (with
+    legacy ``OC_TOOL_OUTPUT_MAX_LINES`` accepted for backwards compat).
+    Setting to ``0`` disables truncation (verbose mode). Invalid
+    integers fall back to the default with a debug log.
+    """
+    import os
+
+    from opencomputer.cli_ui.visual_truncate import truncate_middle
+
+    raw = os.environ.get(
+        "OPENCOMPUTER_TOOL_OUTPUT_MAX_LINES",
+        os.environ.get("OC_TOOL_OUTPUT_MAX_LINES", ""),
+    )
+    if raw:
+        try:
+            cap = int(raw)
+        except (TypeError, ValueError):
+            import logging as _logging
+
+            _logging.getLogger("opencomputer.cli_ui.reasoning_view").debug(
+                "ignored invalid OPENCOMPUTER_TOOL_OUTPUT_MAX_LINES=%r; "
+                "using default %d",
+                raw,
+                _DEFAULT_TOOL_OUTPUT_MAX_LINES,
+            )
+            cap = _DEFAULT_TOOL_OUTPUT_MAX_LINES
+    else:
+        cap = _DEFAULT_TOOL_OUTPUT_MAX_LINES
+    if cap <= 0:
+        return body
+    result = truncate_middle(body, max_lines=cap)
+    if result.truncated:
+        import logging as _logging
+
+        _logging.getLogger("opencomputer.cli_ui.reasoning_view").debug(
+            "tool output truncated: %d → %d lines (%s, cap=%d)",
+            result.total_lines,
+            result.output_lines,
+            result.truncated_by,
+            cap,
+        )
+    return result.content
+
+
 # ─── ToolView (port of <Tool> + <ToolHeader> + <ToolContent> + ...) ──
 
 
@@ -190,7 +248,16 @@ class ToolView:
         )
 
     def render_output(self) -> Padding | None:
-        """Port of <ToolOutput> — JSON result or destructive error."""
+        """Port of <ToolOutput> — JSON result or destructive error.
+
+        2026-05-11: tool RESULT bodies pass through visual-truncate
+        before reaching Rich so a 50KB grep doesn't push the user's
+        chat history off the screen. The model still sees the full
+        result via the underlying tool_result message; the truncated
+        view is display-only. Override the cap by setting
+        ``OC_TOOL_OUTPUT_MAX_LINES`` (e.g. ``0`` to disable
+        truncation, ``200`` to be generous).
+        """
         if not (self.output or self.errorText):
             return None
         if self.errorText:
@@ -210,6 +277,12 @@ class ToolView:
         else:
             body = str(self.output)
             lang = "text"
+
+        # Display-side truncation. Bash-style "show first + last" works
+        # well for tool output too: the start usually has the command /
+        # parameters echo, the end has the success/failure marker.
+        body = _apply_visual_truncate(body)
+
         return Padding(
             _labelled_block("RESULT", body, lang=lang),
             (0, 0, 0, 2),

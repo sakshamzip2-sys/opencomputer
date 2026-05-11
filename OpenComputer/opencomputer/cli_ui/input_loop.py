@@ -751,6 +751,20 @@ async def read_user_input(
             return
         event.app.invalidate()
 
+    @kb.add(Keys.Escape, "m")  # Alt+M — cycle scoped models (pi-style, 2026-05-11)
+    def _alt_m(event):  # noqa: ANN001
+        # Mirrors Ctrl+P / profile cycling. Picks the next favorite
+        # model from <profile>/favorites.yaml; sets a one-tick hint
+        # when there's nothing to cycle to.
+        if runtime is None:
+            return
+        from opencomputer.cli_ui._model_swap import cycle_model
+        try:
+            cycle_model(runtime)
+        except Exception:  # noqa: BLE001 — never crash the input loop
+            return
+        event.app.invalidate()
+
     @kb.add(Keys.Enter)
     def _enter(event):  # noqa: ANN001
         # If dropdown is open and a row is selected, expand to that
@@ -1079,7 +1093,44 @@ async def read_user_input(
         output=_output,
     )
 
-    text = await app.run_async()
+    # 2026-05-11 — output-guard install. prompt_toolkit's Application
+    # owns the screen while ``run_async`` is running; any rogue
+    # ``print()`` from a background plugin / tool / library bypasses
+    # Rich and corrupts the layout. take_over_stdout redirects every
+    # write to stderr for the duration of the prompt; restore_stdout
+    # puts the real stdout back the moment we hand control to the
+    # caller. Per-prompt scope is the right granularity because
+    # console.print(...) between turns needs the real stdout.
+    from opencomputer.cli_ui.output_guard import (
+        is_stdout_taken_over,
+        restore_stdout,
+        take_over_stdout,
+    )
+
+    _was_active = is_stdout_taken_over()
+    if not _was_active:
+        try:
+            take_over_stdout()
+        except Exception as e:  # noqa: BLE001 — guard install must never block input
+            # An external library or test fixture has already swapped
+            # sys.stdout. Continue without the guard rather than crash.
+            import logging as _logging
+
+            _logging.getLogger("opencomputer.cli_ui.input_loop").debug(
+                "output_guard takeover skipped: %s", e
+            )
+    try:
+        text = await app.run_async()
+    finally:
+        if not _was_active:
+            try:
+                restore_stdout()
+            except Exception as e:  # noqa: BLE001 — restoration must not raise from finally
+                import logging as _logging
+
+                _logging.getLogger("opencomputer.cli_ui.input_loop").warning(
+                    "output_guard restore failed: %s", e
+                )
     text = _strip_trailing_whitespace(text or "")
     text = _maybe_expand_at_refs(text)
     return text

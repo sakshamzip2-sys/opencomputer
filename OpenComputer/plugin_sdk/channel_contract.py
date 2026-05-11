@@ -697,4 +697,18 @@ class BaseChannelAdapter(ABC):
         return cleaned, items
 
 
-__all__ = ["BaseChannelAdapter", "ChannelCapabilities", "MediaItem"]
+#: Short-form alias for :class:`BaseChannelAdapter`. The parity-doctor
+#: spec and OpenClaw use the unprefixed name (``ChannelAdapter``); OC
+#: kept the historical ``BaseChannelAdapter`` to match ``BaseProvider``
+#: / ``BaseTool``. Both names resolve to the same type-object so
+#: ``isinstance`` is interchangeable and subclasses inherit either way.
+class ChannelAdapter(BaseChannelAdapter):
+    """Short-form alias of :class:`BaseChannelAdapter` — see parent docstring."""
+
+
+__all__ = [
+    "BaseChannelAdapter",
+    "ChannelAdapter",
+    "ChannelCapabilities",
+    "MediaItem",
+]

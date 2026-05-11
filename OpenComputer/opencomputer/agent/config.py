@@ -85,14 +85,11 @@ class ModelConfig:
 
     provider: str = "anthropic"  # maps to a provider plugin name
     model: str = "claude-opus-4-7"
-    # Default per-turn output cap. Bumped 8x on 2026-05-05 in three
-    # steps (4096→8192→16384→32768) so even very long responses (full
-    # file rewrites, detailed multi-section plans, exhaustive analysis)
-    # don't truncate by default. Users who want even higher caps can
-    # override via config.yaml `model.max_tokens` or the turn-level
-    # `max_tokens_override` (max_tokens+tool_use retry path lifts to
-    # 64k cap on retry).
-    max_tokens: int = 32768
+    # Default per-turn output cap. Bumped to 64k (2026-05-11) — applies
+    # to all providers/models. Users can override via config.yaml
+    # `model.max_tokens`. The turn-level retry path also lifts to 64k
+    # on max_tokens+tool_use retries.
+    max_tokens: int = 64_000
     # Default sampling temperature. Set to 2.0 (2026-05-05) per user
     # request — the maximum value most OpenAI-compatible providers
     # accept. Note: Anthropic Claude clamps temperature to [0, 1] and

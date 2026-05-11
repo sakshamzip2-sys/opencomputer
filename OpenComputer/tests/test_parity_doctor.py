@@ -162,24 +162,27 @@ def test_run_checks_known_shipped_features_stay_shipped():
     assert by_number[7].status == "shipped"   # Tool-loop detection
 
 
-def test_run_checks_known_missing_features_stay_missing():
-    """Lobster, broadcast groups, trajectory bundles, multi-account
-    channels are unimplemented as of 2026-05-10.
+def test_run_checks_round3_openclaw_drive_landed():
+    """2026-05-11 (round 3) drove OpenClaw parity from 8/20 → 20/20.
 
-    Their entries in ``FEATURE_CHECKS`` deliberately use marker
-    symbols that don't exist anywhere yet. If this fails it means
-    someone implemented them — bump the expectation.
+    Items 6 (Lobster), 9 (Trajectory Bundles), 10 (Broadcast Groups),
+    and 18 (Multi-Account Channel) all shipped real implementations
+    with the symbols the parity-doctor spec mandates. This test pins
+    the new state so a regression on any of them fails loudly.
 
+    The prior version of this test asserted those items stayed
+    ``missing``; flipping the assertion mirrors the codebase reality.
     Items 8 (Tokenjuice) and 20 (Context Pruning Modes) shipped on
-    2026-05-10 in this PR, so they're now expected ``shipped``.
+    2026-05-10. Items 7 + 11–17 + 19 shipped or were promoted in
+    round 3 on 2026-05-11.
     """
     if not _SPEC_PATH.is_file():
         pytest.skip("spec markdown not present")
     results = run_checks(spec_path=_SPEC_PATH, repo_root=_REPO_ROOT)
     by_number = {r.record.number: r for r in results}
     for n in (6, 9, 10, 18):
-        assert by_number[n].status == "missing", (
-            f"item {n} unexpectedly classified {by_number[n].status}"
+        assert by_number[n].status == "shipped", (
+            f"round-3 OpenClaw item {n} regressed to {by_number[n].status}"
         )
 
 

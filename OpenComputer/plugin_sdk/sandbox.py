@@ -110,8 +110,8 @@ class SandboxUnavailable(RuntimeError):  # noqa: N818 — public name is load-be
     """
 
 
-class SandboxStrategy(abc.ABC):
-    """Abstract base class for sandbox strategies.
+class SandboxBackend(abc.ABC):
+    """Abstract base class for sandbox strategies / backends.
 
     Subclasses live in ``opencomputer/sandbox/`` and are picked by
     :func:`opencomputer.sandbox.auto_strategy` based on the host platform
@@ -169,7 +169,18 @@ class SandboxStrategy(abc.ABC):
         """
 
 
+#: Historical OC name for :class:`SandboxBackend`. Kept as a class
+#: alias so the 5 existing subclasses (``DockerStrategy``,
+#: ``LinuxBwrapStrategy``, ``MacOSSandboxExecStrategy``,
+#: ``NoneSandboxStrategy``, ``SSHSandboxStrategy``) continue to
+#: ``class XStrategy(SandboxStrategy)`` without churn. New code
+#: should subclass :class:`SandboxBackend` directly — both names
+#: resolve to the same type object so ``isinstance`` is interchangeable.
+SandboxStrategy = SandboxBackend
+
+
 __all__ = [
+    "SandboxBackend",
     "SandboxConfig",
     "SandboxResult",
     "SandboxStrategy",

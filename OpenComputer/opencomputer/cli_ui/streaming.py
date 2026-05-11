@@ -415,6 +415,40 @@ class StreamingRenderer:
                 "add_search_sources failed: %s", exc
             )
 
+    def emit_compaction_card(
+        self,
+        *,
+        messages_before: int,
+        messages_after: int,
+        tokens_before: int | None = None,
+        tokens_after: int | None = None,
+        reason: str = "auto",
+    ) -> None:
+        """Render an in-chat summary card when a compaction completes.
+
+        Called by ``AgentLoop`` immediately after a successful
+        ``CompactionResult.did_compact``. Best-effort — never raises;
+        a render failure logs at ``DEBUG`` and the agent continues.
+        Token counts are optional; the card omits the token row when
+        either side is ``None`` (honest "we don't know" path).
+        """
+        try:
+            from opencomputer.cli_ui.summary_cards import render_compaction_card
+
+            card = render_compaction_card(
+                messages_before=messages_before,
+                messages_after=messages_after,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
+                reason=reason,
+            )
+            self.console.print(card)
+        except Exception as exc:  # noqa: BLE001 — UI bridge must never crash the loop
+            import logging
+            logging.getLogger(__name__).debug(
+                "emit_compaction_card failed: %s", exc
+            )
+
     # ─── finalize ──────────────────────────────────────────────────
 
     def finalize(

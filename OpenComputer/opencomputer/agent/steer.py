@@ -361,10 +361,53 @@ class SteerBuffer:
 default_buffer = SteerBuffer()
 
 
+def queue_steer(session_id: str, text: str) -> bool:
+    """Convenience entry-point — queue a steer message against the
+    default registry for ``session_id``.
+
+    Returns ``True`` when the submission reached the registry (an
+    in-flight dispatch will see the cancel event); ``False`` on
+    validation failure or registry error. Wraps the canonical
+    ``SteerRegistry.submit`` so gateway / wire / ACP / CLI surfaces
+    share one obvious entry-point.
+    """
+    if not session_id or not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        default_registry.submit(session_id, text.strip())
+        return True
+    except Exception:  # noqa: BLE001 — never raise on a steer attempt
+        return False
+
+
+def cmd_steer(args: str, *, session_id: str) -> tuple[bool, str]:
+    """``/steer <text>`` programmatic entry-point.
+
+    Designed for the ACP server + wire RPC + gateway slash router to
+    route to a single call site. Returns ``(ok, message)`` where
+    ``ok=False`` carries a user-readable reason ("steer needs text",
+    "no active session"). The interactive slash handler keeps its
+    legacy ``_handle_steer`` for the queue-add-back-compat path; new
+    surfaces should use this.
+    """
+    if not session_id:
+        return (False, "no active session — /steer needs a session id")
+    text = (args or "").strip()
+    if not text:
+        return (False, "/steer needs text — e.g. /steer change direction")
+    ok = queue_steer(session_id, text)
+    if not ok:
+        return (False, "steer registry rejected the submission")
+    preview = text if len(text) <= 80 else text[:77] + "..."
+    return (True, f"steered: {preview}")
+
+
 __all__ = [
     "SteerBuffer",
     "SteerRegistry",
+    "cmd_steer",
     "default_buffer",
     "default_registry",
     "format_nudge_message",
+    "queue_steer",
 ]

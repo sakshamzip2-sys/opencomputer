@@ -54,6 +54,9 @@ from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
     PersonaModeCommand,
 )
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
+from opencomputer.agent.slash_commands_impl.plugin_reload_cmd import (
+    PluginReloadCommand,
+)
 from opencomputer.agent.slash_commands_impl.policy import (
     PolicyApproveCommand,
     PolicyChangesCommand,
@@ -160,6 +163,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     SethomeCommand,
     StatusCommand,
     FooterCommand,
+    # 2026-05-11 — /plugin reload <id> hot-reload (pi-style). Requires
+    # ``plugin_registry`` to be wired into ``runtime.custom``; without
+    # that, the command surfaces a clean error rather than crash.
+    PluginReloadCommand,
 )
 
 

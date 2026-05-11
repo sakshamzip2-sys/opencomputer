@@ -1718,11 +1718,71 @@ def teardown_loaded_plugin(
     _clear_plugin_local_cache()
 
 
+def reload_plugin(
+    loaded: LoadedPlugin,
+    api: PluginAPI,
+    *,
+    activation_source: PluginActivationSource | None = None,
+) -> tuple[LoadedPlugin | None, str]:
+    """Tear down + re-load a single plugin in place.
+
+    Used by the ``/plugin reload <id>`` slash command and the
+    ``oc plugin reload <id>`` CLI. Returns ``(new_loaded, message)`` —
+    ``new_loaded`` is ``None`` on failure, ``message`` is a human-
+    readable summary suitable for echoing back to the user.
+
+    Sequence:
+
+    1. ``teardown_loaded_plugin(loaded, api=api)`` — removes the
+       plugin's tools/hooks/providers/channels/slash/injection/etc.
+       from the shared registries and clears its synthetic
+       ``sys.modules`` entry. Best-effort; never raises.
+    2. ``load_plugin(candidate, api, activation_source)`` — re-imports
+       the entry module (now picks up edits on disk) and re-registers.
+
+    On step-2 failure the plugin is left UNLOADED — the caller should
+    surface the message so the user knows the registrations were lost.
+    This is honest: the alternative ("restore old version") would
+    require keeping a snapshot of the prior code in memory, which is
+    not safe across arbitrary plugin internals.
+    """
+    plugin_id = loaded.candidate.manifest.id
+    try:
+        teardown_loaded_plugin(loaded, api=api)
+    except Exception as exc:  # noqa: BLE001 — teardown is best-effort by contract
+        logger.warning(
+            "teardown of %r raised during reload; continuing: %s",
+            plugin_id,
+            exc,
+        )
+    try:
+        new_loaded = load_plugin(
+            loaded.candidate,
+            api,
+            activation_source=activation_source,
+        )
+    except Exception as exc:  # noqa: BLE001 — load_plugin can raise on bad code
+        logger.exception("reload of %r failed during load_plugin", plugin_id)
+        return (None, f"reload failed: {type(exc).__name__}: {exc}")
+
+    if new_loaded is None:
+        return (None, f"reload failed: load_plugin returned None for {plugin_id!r}")
+
+    return (
+        new_loaded,
+        f"reloaded {plugin_id} "
+        f"({len(new_loaded.registrations.tool_names)} tools, "
+        f"{len(new_loaded.registrations.hook_specs)} hooks, "
+        f"{len(new_loaded.registrations.slash_names)} slash commands)",
+    )
+
+
 __all__ = [
     "PluginAPI",
     "LoadedPlugin",
     "PluginRegistrations",
     "load_plugin",
     "teardown_loaded_plugin",
+    "reload_plugin",
     "SingleInstanceError",
 ]

@@ -32,7 +32,6 @@ from opencomputer.agent.state import SessionDB, _migrate_v18_to_v19, apply_migra
 from opencomputer.cli_ui.resume_picker import SessionRow
 from opencomputer.worktree import current_git_branch
 
-
 # ─── helpers ─────────────────────────────────────────────────────────
 
 

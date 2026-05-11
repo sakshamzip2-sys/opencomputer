@@ -498,3 +498,15 @@ class ACPServer:
             sys.stdout.flush()
         except (BrokenPipeError, OSError):
             logger.warning("acp: stdout write failed (client disconnected)")
+
+
+#: PascalCase canonical name (``AcpServer``). Behaviourally identical
+#: to :class:`ACPServer`. Defined as a thin subclass rather than a
+#: bare alias so ``__name__`` reflects the canonical spelling at
+#: introspection time. Existing ``ACPServer`` import sites continue
+#: to work.
+class AcpServer(ACPServer):
+    """PascalCase alias of :class:`ACPServer` — see parent docstring."""
+
+
+__all__ = ["ACPServer", "AcpServer"]

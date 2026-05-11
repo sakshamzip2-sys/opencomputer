@@ -22,7 +22,6 @@ import pytest
 from opencomputer.agent.loop import _session_name_from_plan_content
 from opencomputer.agent.state import SessionDB
 
-
 # ─── _session_name_from_plan_content ─────────────────────────────────
 
 
