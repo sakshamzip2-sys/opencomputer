@@ -206,7 +206,7 @@ def model_picker() -> None:
     # provider we don't already cover (so curated catalog entries with
     # no plugin still surface).
     seen = {r["name"] for r in rows}
-    for prov in grouped.keys():
+    for prov in grouped:
         if prov in seen:
             continue
         rows.append({

@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 
 from opencomputer.agent.auxiliary_client import (
+    DEFAULT_MODEL_BY_TASK,
     AuxiliaryConfig,
     AuxSlotConfig,
-    DEFAULT_MODEL_BY_TASK,
     effective_compression_model,
     resolve_compression_endpoint,
     resolve_compression_provider,

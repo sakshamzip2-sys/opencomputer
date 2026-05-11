@@ -13,7 +13,6 @@ from typer.testing import CliRunner
 
 from opencomputer.profile_env_init import is_secret_key, write_env_var
 
-
 runner = CliRunner()
 
 

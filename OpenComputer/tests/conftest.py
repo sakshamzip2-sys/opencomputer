@@ -491,3 +491,46 @@ def _drop_orphan_browser_daemon_singleton() -> Iterator[None]:
         return
     if getattr(_cd, "_shared_daemon", None) is not None:
         _cd._shared_daemon = None
+
+
+@pytest.fixture(autouse=True)
+def _clear_provider_rate_limit_pollution() -> Iterator[None]:
+    """Delete leaked ``rate_limits/<provider>.json`` state files before each test.
+
+    Symptom this defends against: a test path that instantiates a
+    provider plugin (anthropic, openai, …) without first setting
+    ``OPENCOMPUTER_HOME`` can call ``record_rate_limit`` against the
+    user's REAL ``~/.opencomputer/rate_limits/<provider>.json``.
+    The persisted ``reset_at`` then makes subsequent tests'
+    ``rate_limit_remaining`` calls return a non-None cooldown for
+    ~5 minutes, causing them to skip outbound calls and assert wrong
+    state — the "10 anthropic-provider full-sweep flakes" pattern.
+
+    We DON'T globally redirect ``OPENCOMPUTER_HOME`` (some tests
+    legitimately set it themselves, and a blanket redirect would
+    surprise tests that probe production-path behaviour). Instead we
+    nuke the known state files at the resolved home BEFORE each test
+    so leakage is bounded to one test's window. Pollution still has
+    to come from somewhere — flagged as a separate WARN via
+    ``_warn_once`` when a stale file is found, so a real leak source
+    surfaces in CI.
+    """
+    import os
+    from pathlib import Path
+
+    home = Path(os.environ.get("OPENCOMPUTER_HOME", str(Path.home() / ".opencomputer")))
+    rate_dir = home / "rate_limits"
+    if rate_dir.exists():
+        leaked = list(rate_dir.glob("*.json"))
+        if leaked:
+            _warn_once(
+                "rate_limit_state_leak",
+                f"deleted stale {[f.name for f in leaked]} before test (a prior "
+                f"test wrote rate-limit state to the real OPENCOMPUTER_HOME)",
+            )
+            for f in leaked:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    yield

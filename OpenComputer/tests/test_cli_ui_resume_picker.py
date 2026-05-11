@@ -240,7 +240,7 @@ def test_format_session_preview_falls_back_to_cwd_when_no_title():
     preview = format_session_preview(row)
     assert "projAlpha" in preview
     # Must NOT duplicate the headline content.
-    assert "Help me set up OAuth" != preview
+    assert preview != "Help me set up OAuth"
 
 
 def test_format_session_preview_returns_empty_when_nothing_to_show():
@@ -264,7 +264,7 @@ def test_format_session_preview_cleans_multiline_user_message():
     )
     preview = format_session_preview(row)
     assert "\n" not in preview
-    assert "line one line two line three" == preview
+    assert preview == "line one line two line three"
 
 
 def test_format_session_preview_truncates_long_cwd_from_the_left():

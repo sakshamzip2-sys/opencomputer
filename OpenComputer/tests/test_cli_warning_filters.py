@@ -14,6 +14,7 @@ def test_requests_dependency_warning_is_suppressed():
             "urllib3 (2.6.2) or chardet (7.4.4)/charset_normalizer "
             "(3.4.4) doesn't match a supported version!",
             Warning,
+            stacklevel=2,
         )
 
     assert caught == []

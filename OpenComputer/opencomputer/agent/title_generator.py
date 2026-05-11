@@ -114,11 +114,9 @@ def _looks_like_response_not_title(candidate: str) -> bool:
     lower = candidate.lower().lstrip()
     if any(lower.startswith(p) for p in _BAD_TITLE_PREFIXES):
         return True
-    if "\n" in candidate:
-        # Real titles are single-line. The auto-titler's confused
-        # output usually breaks lines (numbered lists, paragraphs).
-        return True
-    return False
+    # Real titles are single-line. The auto-titler's confused output
+    # usually breaks lines (numbered lists, paragraphs).
+    return "\n" in candidate
 
 
 def _resolve_cheap_provider() -> Any:

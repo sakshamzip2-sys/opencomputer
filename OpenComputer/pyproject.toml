@@ -252,6 +252,7 @@ ignore = [
 "tests/*" = ["F841", "F401", "B017", "N801"]  # tests may have unused imports, broad assertions, helper classes
 "extensions/aws-bedrock-provider/__init__.py" = ["N999"]  # hyphenated dir; Python module alias handles import name
 "extensions/codex-provider/__init__.py" = ["N999"]  # hyphenated dir
+"opencomputer/cli.py" = ["E402"]  # _install_dependency_warning_filters() must run before urllib3 imports — deliberate order
 
 [tool.black]
 line-length = 100

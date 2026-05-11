@@ -2461,11 +2461,9 @@ class SessionDB:
                     content if isinstance(content, str) else json.dumps(content)
                 )
                 tool_calls_raw = msg_dict.get("tool_calls")
-                tool_calls_json: str | None
-                if tool_calls_raw:
-                    tool_calls_json = json.dumps(tool_calls_raw)
-                else:
-                    tool_calls_json = None
+                tool_calls_json: str | None = (
+                    json.dumps(tool_calls_raw) if tool_calls_raw else None
+                )
                 conn.execute(
                     """
                     INSERT INTO messages(session_id, role, content, tool_call_id,

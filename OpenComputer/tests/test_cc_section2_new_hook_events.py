@@ -21,7 +21,6 @@ from plugin_sdk.hooks import (
     HookEvent,
 )
 
-
 _CC2_EVENTS = (
     HookEvent.POST_TOOL_BATCH,
     HookEvent.USER_PROMPT_EXPANSION,

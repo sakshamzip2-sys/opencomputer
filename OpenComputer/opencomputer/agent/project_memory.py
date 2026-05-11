@@ -47,7 +47,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _LOG = logging.getLogger(__name__)
@@ -288,7 +288,7 @@ def append(
         )
         return False
     if timestamp:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         body = f"## {ts}\n{body}\n"
     else:
         body = f"{body}\n"

@@ -33,9 +33,9 @@ def test_load_config_parses_disabled_toolsets(tmp_path: Path) -> None:
 
 def test_set_deny_prefixes_filters_at_register() -> None:
     """A tool registered with a name matching a deny prefix is skipped."""
-    from plugin_sdk.tool_contract import BaseTool, ToolSchema
-    from plugin_sdk.core import ToolCall, ToolResult
     from opencomputer.tools.registry import ToolRegistry
+    from plugin_sdk.core import ToolCall, ToolResult
+    from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
     class _FakeTool(BaseTool):
         def __init__(self, name: str) -> None:
@@ -65,9 +65,9 @@ def test_set_deny_prefixes_filters_at_register() -> None:
 
 
 def test_no_disabled_keeps_all() -> None:
-    from plugin_sdk.tool_contract import BaseTool, ToolSchema
-    from plugin_sdk.core import ToolCall, ToolResult
     from opencomputer.tools.registry import ToolRegistry
+    from plugin_sdk.core import ToolCall, ToolResult
+    from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
     class _FakeTool(BaseTool):
         def __init__(self, name: str) -> None:
@@ -105,9 +105,9 @@ def test_is_denied_prefix_check() -> None:
 
 def test_compose_with_existing_exact_denylist() -> None:
     """Both ``set_denylist`` (exact) and ``set_deny_prefixes`` filter."""
-    from plugin_sdk.tool_contract import BaseTool, ToolSchema
-    from plugin_sdk.core import ToolCall, ToolResult
     from opencomputer.tools.registry import ToolRegistry
+    from plugin_sdk.core import ToolCall, ToolResult
+    from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
     class _FakeTool(BaseTool):
         def __init__(self, name: str) -> None:
