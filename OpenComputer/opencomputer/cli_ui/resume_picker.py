@@ -47,6 +47,81 @@ class SessionRow:
     # pre-v19 rows (legacy NULLs). Rendered as an extra meta-strip segment
     # only when present, so older rows degrade to the prior layout.
     git_branch: str = ""
+    # Phase H (2026-05-11) — Claude-Code fork grouping. Sessions that
+    # were forked from another session via ``/branch`` or the
+    # ``DelegateTool`` carry the parent's id here. The picker groups
+    # children under their parent (collapsed by default; ``→`` to
+    # expand). Empty when this session is a root.
+    parent_session_id: str = ""
+
+
+def _build_fork_groups(
+    rows: list[SessionRow],
+) -> tuple[dict[str, list[SessionRow]], set[str]]:
+    """Phase H — group rows by parent_session_id, return (children_by_parent, child_ids).
+
+    Walks the row list once and builds:
+
+        children_by_parent: maps a parent session id → ordered list of
+            its child SessionRows in the visible set. Parents whose
+            children aren't visible are absent from the dict.
+        child_ids: every row id that appears as a child of any parent
+            in the dict. The list-renderer uses this to suppress
+            children from the top-level when their parent is collapsed.
+
+    Edge cases:
+        * A row with ``parent_session_id == ""`` is a root and never
+          appears as a child.
+        * A row whose parent isn't in the visible list is treated as a
+          root for picker purposes (no parent to nest under).
+        * Cycles are impossible (``parent_session_id`` always points at
+          an older session by definition) but defensively the function
+          doesn't recurse — just one level of grouping. Multi-level
+          fork chains render as multiple flat groups.
+    """
+    visible_ids = {r.id for r in rows}
+    children_by_parent: dict[str, list[SessionRow]] = {}
+    child_ids: set[str] = set()
+    for row in rows:
+        psid = row.parent_session_id
+        if not psid:
+            continue
+        if psid not in visible_ids:
+            continue
+        children_by_parent.setdefault(psid, []).append(row)
+        child_ids.add(row.id)
+    return children_by_parent, child_ids
+
+
+def _project_basename_for_meta(cwd: str) -> str:
+    """Return a short project label for ``cwd``, or ``""``.
+
+    Phase G (2026-05-11) — the picker shows this label in the meta
+    strip only when scope=SCOPE_ALL so the user can tell sessions
+    apart across projects. Rules:
+
+        * Strip trailing ``/`` to make ``Path.name`` work for
+          ``/x/y/``-style cwds.
+        * Returns ``""`` for empty input or for ``/`` (root) — no
+          useful label in either case.
+        * Returns the cwd's basename for everything else.
+
+    We deliberately don't shell out to ``git`` to find the repo root
+    here — the picker renders many rows per frame and each row would
+    fire a subprocess. The cwd's basename is "good enough" for
+    cross-project disambiguation; the few false-pairs (e.g. two
+    ``src/`` dirs) are rare and the row's id-prefix still uniquely
+    identifies the session.
+    """
+    if not cwd:
+        return ""
+    stripped = cwd.rstrip("/")
+    if not stripped:  # was "/" or all slashes
+        return ""
+    import os as _os
+
+    base = _os.path.basename(stripped)
+    return base or ""
 
 
 def _clean_label(text: str, *, max_len: int = 80) -> str:
@@ -264,13 +339,35 @@ def compute_visible_window(
 # ─── Confirm-delete state machine helpers (importable for tests) ──────
 
 
+def _resolve_selected_row(state: dict) -> SessionRow | None:
+    """Phase H — return the SessionRow at ``state["selected_idx"]``.
+
+    The picker maintains two parallel views of the row list:
+
+        * ``state["filtered"]`` — flat list after search-text filter
+        * ``state["render_rows"]`` — list of ``(SessionRow, indent)``
+          pairs after fork-group expansion. This is what the renderer
+          + arrow handlers index into.
+
+    Helpers that operate on the user's selection (delete, rename) must
+    use ``render_rows`` because ``selected_idx`` is defined relative
+    to it. We expose this resolver as a module function so the helpers
+    don't duplicate the bounds-check logic.
+    """
+    render = state.get("render_rows", [])
+    idx = state.get("selected_idx", -1)
+    if 0 <= idx < len(render):
+        return render[idx][0]
+    return None
+
+
 def _enter_confirm_delete(state: dict) -> None:
     """Flip the picker into confirm-delete mode for the selected row.
 
-    No-op if the filtered list is empty or no row is selected — there
+    No-op if the render list is empty or no row is selected — there
     is nothing to delete.
     """
-    if state["filtered"] and state["selected_idx"] >= 0:
+    if _resolve_selected_row(state) is not None:
         state["mode"] = "confirm-delete"
 
 
@@ -282,14 +379,30 @@ def _exit_confirm_delete(state: dict) -> None:
 def _commit_confirm_delete(state: dict, db) -> None:  # noqa: ANN001 — db is SessionDB
     """Commit the pending delete: drop row from DB + both lists, clamp cursor."""
     state["mode"] = "navigate"
-    if not state["filtered"] or state["selected_idx"] < 0:
+    target = _resolve_selected_row(state)
+    if target is None:
         return
-    target = state["filtered"][state["selected_idx"]]
     db.delete_session(target.id)
     state["rows"] = [r for r in state["rows"] if r.id != target.id]
     state["filtered"] = [r for r in state["filtered"] if r.id != target.id]
-    if state["selected_idx"] >= len(state["filtered"]):
-        state["selected_idx"] = max(0, len(state["filtered"]) - 1)
+    # Render rows must be rebuilt so the deleted row + any children
+    # tracked under it disappear together. The picker closure's
+    # ``_rebuild_render_rows`` does this but isn't reachable from here;
+    # we manually re-derive render_rows from filtered + expanded.
+    children_by_parent, child_ids = _build_fork_groups(state["filtered"])
+    expanded: set[str] = state.get("expanded_parents", set())
+    render: list[tuple[SessionRow, int]] = []
+    for row in state["filtered"]:
+        if row.id in child_ids:
+            continue
+        render.append((row, 0))
+        if row.id in expanded and row.id in children_by_parent:
+            for child in children_by_parent[row.id]:
+                render.append((child, 1))
+    state["render_rows"] = render
+    state["children_by_parent"] = children_by_parent
+    if state["selected_idx"] >= len(render):
+        state["selected_idx"] = max(0, len(render) - 1) if render else -1
 
 
 # ─── Rename state-machine helpers (importable for tests) ───────────────
@@ -298,12 +411,12 @@ def _commit_confirm_delete(state: dict, db) -> None:  # noqa: ANN001 — db is S
 def _enter_rename(state: dict) -> None:
     """Flip the picker into rename mode for the selected row.
 
-    No-op if the filtered list is empty or no row is selected. The
-    caller is responsible for seeding any input buffer with the row's
-    current title (the picker does this against ``state["rename_seed"]``).
+    No-op if no row is selected. The caller is responsible for seeding
+    any input buffer with the row's current title (the picker does this
+    against ``state["rename_seed"]``).
     """
-    if state["filtered"] and state["selected_idx"] >= 0:
-        target = state["filtered"][state["selected_idx"]]
+    target = _resolve_selected_row(state)
+    if target is not None:
         state["mode"] = "rename"
         state["rename_seed"] = target.title or ""
 
@@ -326,9 +439,9 @@ def _commit_rename(
     """
     state["mode"] = "navigate"
     state["rename_seed"] = ""
-    if not state["filtered"] or state["selected_idx"] < 0:
+    target = _resolve_selected_row(state)
+    if target is None:
         return
-    target = state["filtered"][state["selected_idx"]]
     cleaned = (new_title or "").strip()
     try:
         db.set_session_title(target.id, cleaned)
@@ -356,6 +469,7 @@ def _commit_rename(
                 cwd=r.cwd,
                 first_user_message=r.first_user_message,
                 git_branch=r.git_branch,
+                parent_session_id=r.parent_session_id,
             )
             if r.id == target.id
             else r
@@ -364,6 +478,31 @@ def _commit_rename(
 
     state["rows"] = _swap(state["rows"])
     state["filtered"] = _swap(state["filtered"])
+    # Phase H — also swap the row inside render_rows so the renderer
+    # picks up the new title without waiting for the next _refilter.
+    if "render_rows" in state:
+        new_render: list[tuple[SessionRow, int]] = []
+        for r, level in state["render_rows"]:
+            if r.id == target.id:
+                # Reconstruct the SessionRow with the new title.
+                new_render.append(
+                    (
+                        SessionRow(
+                            id=r.id,
+                            title=cleaned,
+                            started_at=r.started_at,
+                            message_count=r.message_count,
+                            cwd=r.cwd,
+                            first_user_message=r.first_user_message,
+                            git_branch=r.git_branch,
+                            parent_session_id=r.parent_session_id,
+                        ),
+                        level,
+                    )
+                )
+            else:
+                new_render.append((r, level))
+        state["render_rows"] = new_render
 
 
 #: Scope values understood by :func:`run_resume_picker` and forwarded to
@@ -450,6 +589,11 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
         # rename buffer was initialised with; ``mode == "rename"``
         # gates the buffer's visibility + the Enter / Esc handlers.
         "rename_seed": "",
+        # Phase H — fork grouping. ``expanded_parents`` holds the ids
+        # of root sessions whose children are currently shown inline.
+        # Pressing ``→`` on a root with children adds it; ``←`` removes.
+        # By default everything is collapsed.
+        "expanded_parents": set(),
     }
 
     def _is_navigating() -> bool:
@@ -461,6 +605,41 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
     def _is_renaming() -> bool:
         return state["mode"] == "rename"
 
+    def _rebuild_render_rows() -> None:
+        """Phase H — compute the flat list of (row, indent) the renderer + arrows use.
+
+        Walks ``state["filtered"]`` once and emits:
+
+            * every row whose parent isn't in the visible filtered set
+              (treated as a root for picker purposes)
+            * children of expanded parents, indented one level
+
+        Children of COLLAPSED parents are omitted. This is the only
+        rendering path that uses ``expanded_parents``; arrow handlers
+        index into the result via ``state["selected_idx"]``.
+        """
+        filtered = state["filtered"]
+        children_by_parent, child_ids = _build_fork_groups(filtered)
+        expanded: set[str] = state["expanded_parents"]
+        render: list[tuple[SessionRow, int]] = []
+        for row in filtered:
+            if row.id in child_ids:
+                # Will be emitted (or hidden) as part of its parent's group.
+                continue
+            render.append((row, 0))
+            if row.id in expanded and row.id in children_by_parent:
+                for child in children_by_parent[row.id]:
+                    render.append((child, 1))
+        state["render_rows"] = render
+        state["children_by_parent"] = children_by_parent
+        # Clamp selected_idx to the new render bounds.
+        if not render:
+            state["selected_idx"] = -1
+        elif state["selected_idx"] >= len(render):
+            state["selected_idx"] = len(render) - 1
+        elif state["selected_idx"] < 0:
+            state["selected_idx"] = 0
+
     def _refilter() -> None:
         # Don't refilter mid-confirm OR mid-rename — keeps the highlighted
         # row visible while the y/n / rename decision is pending.
@@ -468,6 +647,13 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
             return
         state["filtered"] = filter_rows(state["rows"], state["query"])
         state["selected_idx"] = 0 if state["filtered"] else -1
+        _rebuild_render_rows()
+
+    # Initial population so subsequent renders + arrow handlers see a
+    # populated ``render_rows`` even before the first _refilter fires.
+    state["render_rows"] = [(r, 0) for r in state["filtered"]]
+    state["children_by_parent"] = {}
+    _rebuild_render_rows()
 
     search_buffer = Buffer()
 
@@ -537,6 +723,23 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
             ("class:footer.key", "Ctrl+R"),
             ("class:footer", " rename    "),
         ]
+        # Phase H — show expand/collapse hint only when the highlighted
+        # row IS a group head with children (otherwise the binding is a
+        # no-op and surfacing it just adds visual noise).
+        sel_row = _resolve_selected_row(state)
+        if sel_row is not None:
+            has_children = bool(
+                state.get("children_by_parent", {}).get(sel_row.id)
+            )
+            if has_children:
+                expanded = sel_row.id in state["expanded_parents"]
+                base.extend([
+                    ("class:footer.key", "→" if not expanded else "←"),
+                    (
+                        "class:footer",
+                        " expand forks    " if not expanded else " collapse    ",
+                    ),
+                ])
         # Scope-toggle hints — only shown when ``refetch`` is wired AND
         # there's somewhere meaningful to widen TO. ``Ctrl+B`` requires
         # an active branch (no point filtering by "no branch").
@@ -569,7 +772,8 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
         return base
 
     def _list_text():
-        if not state["filtered"]:
+        render_rows = state.get("render_rows", [])
+        if not render_rows:
             return [("", "\n"), ("class:empty", "  no sessions match\n")]
 
         # Compute the visible window from terminal height. Each row in
@@ -585,24 +789,55 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
             term_rows = 24  # safe default
         visible_count = max(1, (term_rows - 9) // 3)
 
-        visible_rows, scroll_offset = compute_visible_window(
-            state["filtered"],
+        visible_pairs, scroll_offset = compute_visible_window(
+            render_rows,
             selected_idx=state["selected_idx"],
             window_height=visible_count,
         )
         state["scroll_offset"] = scroll_offset  # surface for tests
 
+        children_by_parent = state.get("children_by_parent", {})
+        expanded_parents: set[str] = state["expanded_parents"]
+
         out: list[tuple[str, str]] = [("", "\n")]
-        for local_i, row in enumerate(visible_rows):
+        for local_i, pair in enumerate(visible_pairs):
+            row, indent_level = pair
             absolute_i = scroll_offset + local_i
             is_sel = absolute_i == state["selected_idx"]
             is_confirming = is_sel and state["mode"] == "confirm-delete"
+            # Phase H — visual fork grouping. Roots with hidden children
+            # get a ▶ (collapsed) or ▼ (expanded) prefix; children get
+            # the cursor only when selected and an extra indent.
+            child_count = len(children_by_parent.get(row.id, []))
+            is_root_with_children = child_count > 0
+            indent_pad = "    " if indent_level > 0 else ""
+            arrow_prefix = ""
+            if indent_level == 0 and is_root_with_children:
+                arrow_prefix = "▼ " if row.id in expanded_parents else "▶ "
             arrow = "❯ " if is_sel else "  "
             title = format_session_label(row)
+            if is_root_with_children and not row.title:
+                # Roots with children but no title: surface child count
+                # so the user knows they're a group head.
+                title = (
+                    f"{title}  [{child_count} fork"
+                    f"{'s' if child_count != 1 else ''}]"
+                )
+            elif is_root_with_children:
+                title = (
+                    f"{title}  [{child_count} fork"
+                    f"{'s' if child_count != 1 else ''}]"
+                )
             preview = format_session_preview(row)
             # v19 — slot the git branch between "N messages" and the id
             # prefix when present. Pre-v19 rows have ``git_branch == ""``
             # and degrade to the prior 3-segment layout cleanly.
+            #
+            # Phase G (2026-05-11) — when scope=SCOPE_ALL, append the
+            # row's project basename so sessions from different repos
+            # are visually distinguished. Hidden in SCOPE_CWD / SCOPE_REPO
+            # where all visible rows share the same project (would be
+            # redundant noise).
             meta_parts = [
                 format_time_ago(row.started_at),
                 f"{row.message_count} message{'s' if row.message_count != 1 else ''}",
@@ -610,6 +845,10 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
             if row.git_branch:
                 meta_parts.append(row.git_branch)
             meta_parts.append(row.id[:8])
+            if state["scope"] == SCOPE_ALL and row.cwd:
+                proj = _project_basename_for_meta(row.cwd)
+                if proj:
+                    meta_parts.append(proj)
             meta = "  ·  ".join(meta_parts)
             arrow_cls = "class:row.cursor" if is_sel else "class:row.cursor.dim"
             title_cls = "class:row.title.selected" if is_sel else "class:row.title"
@@ -617,9 +856,13 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
                 "class:row.preview.selected" if is_sel else "class:row.preview"
             )
             meta_cls = "class:meta.selected" if is_sel else "class:meta"
-            # Line 1: cursor + title (bold) — or confirm-delete prompt
-            out.append(("", "  "))  # left padding
+            fork_marker_cls = "class:row.fork.marker"
+            # Line 1: cursor + (optional fork marker) + title (bold)
+            #         — or confirm-delete prompt
+            out.append(("", "  " + indent_pad))  # left padding + group indent
             out.append((arrow_cls, arrow))
+            if arrow_prefix:
+                out.append((fork_marker_cls, arrow_prefix))
             if is_confirming:
                 out.append(
                     (
@@ -631,19 +874,19 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
                 out.append((title_cls, f"{title}\n"))
             # Line 2: preview context (dim) — always present so row
             # height stays uniform. Empty preview becomes a blank line.
-            out.append(("", "      "))
+            out.append(("", "      " + indent_pad))
             out.append((preview_cls, f"{preview}\n"))
             # Line 3: meta strip (dimmer)
-            out.append(("", "      "))
+            out.append(("", "      " + indent_pad))
             out.append((meta_cls, f"{meta}\n"))
 
         # Visual indicator that more rows exist below/above the window —
         # only shown when there's actually overflow, so a small list looks
         # uncluttered.
-        total = len(state["filtered"])
+        total = len(state.get("render_rows", []))
         if total > visible_count:
             shown_lo = scroll_offset + 1
-            shown_hi = scroll_offset + len(visible_rows)
+            shown_hi = scroll_offset + len(visible_pairs)
             out.append(
                 ("class:meta", f"\n  showing {shown_lo}-{shown_hi} of {total}\n")
             )
@@ -658,29 +901,74 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
     # they only intercept input while the picker is in confirm mode —
     # otherwise they fall through to the search buffer.
 
+    def _selected_row() -> SessionRow | None:
+        """Return the SessionRow at the current selection (or None)."""
+        render = state.get("render_rows", [])
+        idx = state["selected_idx"]
+        if 0 <= idx < len(render):
+            return render[idx][0]
+        return None
+
     @kb.add(Keys.Up, filter=Condition(_is_navigating))
     def _up(event):  # noqa: ANN001
-        if state["filtered"]:
+        if state.get("render_rows"):
             state["selected_idx"] = max(0, state["selected_idx"] - 1)
 
     @kb.add(Keys.Down, filter=Condition(_is_navigating))
     def _down(event):  # noqa: ANN001
-        if state["filtered"]:
+        render = state.get("render_rows", [])
+        if render:
             state["selected_idx"] = min(
-                len(state["filtered"]) - 1, state["selected_idx"] + 1
+                len(render) - 1, state["selected_idx"] + 1
             )
+
+    @kb.add(Keys.Right, filter=Condition(_is_navigating))
+    def _expand_group(event):  # noqa: ANN001
+        """Phase H — expand the fork group under the highlighted root."""
+        sel = _selected_row()
+        if sel is None:
+            return
+        children = state.get("children_by_parent", {}).get(sel.id)
+        if not children:
+            return
+        state["expanded_parents"].add(sel.id)
+        _rebuild_render_rows()
+
+    @kb.add(Keys.Left, filter=Condition(_is_navigating))
+    def _collapse_group(event):  # noqa: ANN001
+        """Phase H — collapse the group under the highlighted root, OR
+        collapse the parent group when the highlighted row is a child."""
+        sel = _selected_row()
+        if sel is None:
+            return
+        # If selected is a root with expanded children, collapse it.
+        if sel.id in state["expanded_parents"]:
+            state["expanded_parents"].discard(sel.id)
+            _rebuild_render_rows()
+            return
+        # Else if selected is a CHILD, collapse its parent and move
+        # selection to the parent so the user doesn't lose their place.
+        psid = sel.parent_session_id
+        if psid and psid in state["expanded_parents"]:
+            state["expanded_parents"].discard(psid)
+            _rebuild_render_rows()
+            # Re-find the parent's position in the freshly-rebuilt list.
+            for i, (row, _level) in enumerate(state["render_rows"]):
+                if row.id == psid:
+                    state["selected_idx"] = i
+                    break
 
     @kb.add(Keys.Enter, filter=Condition(_is_navigating))
     def _enter(event):  # noqa: ANN001
-        if state["filtered"] and 0 <= state["selected_idx"] < len(state["filtered"]):
-            sel = state["filtered"][state["selected_idx"]]
+        sel = _selected_row()
+        if sel is not None:
             event.app.exit(result=sel.id)
         else:
             event.app.exit(result=None)
 
     @kb.add(Keys.ControlD, filter=Condition(_is_navigating))
     def _delete_request(event):  # noqa: ANN001
-        if state["filtered"]:
+        if state.get("render_rows"):
             _enter_confirm_delete(state)
 
     # ─── Phase B — scope-widening + branch-filter shortcuts ──────────
@@ -825,6 +1113,7 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
             "header.count": "#5f5f5f",
             "header.scope": "#87875f",  # subdued amber — visible but not loud
             "rename.symbol": "bold #d75f87",  # rose — distinct from search amber
+            "row.fork.marker": "#5fafff",  # cool blue — fork tree icons
             "divider": "#3a3a3a",
             "search.symbol": "bold #61afef",
             "footer": "#5f5f5f",

@@ -395,5 +395,94 @@ def test_slash_handler_family_does_not_silently_degrade() -> None:
     )
 
 
+# ─── Phase J — keybinding smoke tests for new picker shortcuts ───────
+
+
+def _spawn_resume_and_send(keys: bytes, *, drain_after_s: float = 4.0) -> str:
+    """Spawn `oc resume`, wait for first frame, send ``keys``, drain output.
+
+    Returns the ANSI-stripped captured output. The picker is exited via
+    Esc after key-send so the subprocess always terminates cleanly.
+    """
+    proc, master_fd = _spawn_with_pty(["oc", "resume"])
+    captured = b""
+    try:
+        captured += _drain(master_fd, timeout_s=5.0)
+        os.write(master_fd, keys)
+        captured += _drain(master_fd, timeout_s=drain_after_s)
+        os.write(master_fd, b"\x1b")  # Esc to exit
+        captured += _drain(master_fd, timeout_s=2.0)
+    finally:
+        _terminate_with_grace(proc, master_fd)
+    return _strip_ansi(captured)
+
+
+def test_ctrl_w_widens_scope_to_current_repo() -> None:
+    """Pressing Ctrl+W (\\x17) from default cwd-scope must surface
+    a frame mentioning 'current repo' in the chrome scope label."""
+    db = os.path.expanduser("~/.opencomputer/sessions.db")
+    if not os.path.exists(db):
+        pytest.skip(f"no SessionDB at {db}; picker would render empty")
+
+    text = _spawn_resume_and_send(b"\x17")  # Ctrl+W
+
+    # Must not have crashed (picker reached the exit cleanly).
+    # The chrome scope label cycles cwd → repo on first Ctrl+W.
+    assert "current repo" in text or "all projects" in text, (
+        "expected scope label to change after Ctrl+W (cwd → repo). "
+        f"Captured (last 2000 chars):\n{text[-2000:]}"
+    )
+
+
+def test_ctrl_a_jumps_scope_to_all_projects() -> None:
+    """Ctrl+A (\\x01) is the CC 'show all projects' toggle."""
+    db = os.path.expanduser("~/.opencomputer/sessions.db")
+    if not os.path.exists(db):
+        pytest.skip(f"no SessionDB at {db}")
+
+    text = _spawn_resume_and_send(b"\x01")  # Ctrl+A
+
+    assert "all projects" in text, (
+        "expected scope label 'all projects' after Ctrl+A. "
+        f"Captured (last 2000 chars):\n{text[-2000:]}"
+    )
+
+
+def test_ctrl_r_enters_rename_mode_and_shows_pencil_symbol() -> None:
+    """Ctrl+R (\\x12) flips the picker into rename mode; layout swaps
+    the search row for a rename row prefixed with the pencil glyph (✎)."""
+    db = os.path.expanduser("~/.opencomputer/sessions.db")
+    if not os.path.exists(db):
+        pytest.skip(f"no SessionDB at {db}")
+
+    text = _spawn_resume_and_send(b"\x12")  # Ctrl+R
+
+    # The rename row uses "✎" as its label symbol. Confirm-delete uses
+    # different glyphs ("y/N"), so this isolates the rename path.
+    assert "✎" in text, (
+        "expected pencil glyph ✎ in picker output after Ctrl+R. "
+        f"Captured (last 2000 chars):\n{text[-2000:]}"
+    )
+
+
+def test_picker_does_not_crash_on_unknown_control_sequences() -> None:
+    """Defensive smoke — random control codes shouldn't kill the picker.
+
+    Pressing several no-op control sequences (Ctrl+E, Ctrl+F, Ctrl+G,
+    Ctrl+J) must leave the picker still rendering its layout.
+    """
+    db = os.path.expanduser("~/.opencomputer/sessions.db")
+    if not os.path.exists(db):
+        pytest.skip(f"no SessionDB at {db}")
+
+    text = _spawn_resume_and_send(b"\x05\x06\x07\x0a")
+
+    # Picker must still have rendered SOMETHING (the header label).
+    assert "Resume Session" in text, (
+        "expected picker to keep rendering after random control sequences. "
+        f"Captured (last 2000 chars):\n{text[-2000:]}"
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover — manual debugging entry point
     sys.exit(pytest.main([__file__, "-v", "-s", "-m", "integration"]))

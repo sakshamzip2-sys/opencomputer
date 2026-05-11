@@ -40,9 +40,17 @@ def _row(rid: str, title: str = "") -> SessionRow:
 
 
 def _state(rows: list[SessionRow], selected_idx: int = 0) -> dict:
+    # Phase H — render_rows is now the selection target. For tests
+    # without fork groups, it's just a 1:1 mirror of ``rows`` with
+    # indent level 0. (See _build_fork_groups in resume_picker.py for
+    # the production rebuild logic.)
+    render_rows = [(r, 0) for r in rows]
     return {
         "rows": list(rows),
         "filtered": list(rows),
+        "render_rows": render_rows,
+        "children_by_parent": {},
+        "expanded_parents": set(),
         "selected_idx": selected_idx,
         "mode": "navigate",
         "rename_seed": "",

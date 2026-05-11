@@ -34,6 +34,7 @@ from opencomputer.cli_ui.resume_picker import (
     SCOPE_CWD,
     SCOPE_REPO,
     SessionRow,
+    _project_basename_for_meta,
 )
 from opencomputer.worktree import worktree_roots
 
@@ -311,3 +312,34 @@ def test_refetch_closure_routes_scope_to_db(tmp_path: Path) -> None:
     r = refetch(SCOPE_REPO, branch_only=True)
     assert {row.id for row in r} == {"a", "b"}
     assert calls[-1]["branch_filter"] == "main"
+
+
+# ─── Phase G — project-basename for meta strip ────────────────────────
+
+
+def test_project_basename_returns_empty_for_empty_cwd() -> None:
+    assert _project_basename_for_meta("") == ""
+
+
+def test_project_basename_returns_empty_for_root() -> None:
+    """`/` has no meaningful basename — return empty."""
+    assert _project_basename_for_meta("/") == ""
+    assert _project_basename_for_meta("///") == ""
+
+
+def test_project_basename_returns_directory_name() -> None:
+    assert _project_basename_for_meta("/Users/saksham/Vscode/claude/OpenComputer") == "OpenComputer"
+
+
+def test_project_basename_handles_trailing_slash() -> None:
+    assert _project_basename_for_meta("/Users/saksham/Vscode/claude/OpenComputer/") == "OpenComputer"
+
+
+def test_project_basename_handles_relative_path() -> None:
+    """basename(`work/proj`) → `proj`. Picker rarely gets relative paths
+    but we don't crash if it does."""
+    assert _project_basename_for_meta("work/proj") == "proj"
+
+
+def test_project_basename_handles_single_segment() -> None:
+    assert _project_basename_for_meta("proj") == "proj"

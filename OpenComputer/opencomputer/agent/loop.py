@@ -5836,6 +5836,14 @@ class AgentLoop:
         (a core module so the tool's writer and this reader share
         identity even when the tool's file is loaded under a
         synthetic plugin-loader name).
+
+        Phase F (2026-05-11) — Claude-Code parity: when the user
+        ACCEPTS the plan (next_mode in {auto, acceptEdits, manual},
+        i.e. they're exiting plan-mode forward), derive a session title
+        from the plan content via :func:`_session_name_from_plan_content`
+        and call :meth:`SessionDB.set_session_title` — BUT only if the
+        current title is empty / NULL. A user-set name (via ``/rename``,
+        ``oc -n``, or a prior auto-name) is never overwritten.
         """
         from opencomputer.agent.exit_plan_proposal import pop_last_proposal
 
@@ -5875,6 +5883,142 @@ class AgentLoop:
                 proposal.next_mode,
                 exc_info=True,
             )
+
+        # Phase F — Claude-Code "name session from plan content on accept".
+        self._maybe_auto_name_from_plan(proposal.plan)
+
+    def _maybe_auto_name_from_plan(self, plan_text: str) -> None:
+        """Set the active session's title from plan content if currently empty.
+
+        Phase F. Fires exactly once per session, at plan-mode-accept time.
+        Skipped silently when:
+
+            * no active session (rare, defensive)
+            * the session already has a non-empty title (user set it via
+              ``oc -n``, ``/rename``, or auto-titler already fired)
+            * the plan content yields no usable name after sanitisation
+              (all-whitespace, only markdown chrome, …)
+            * DB read or write fails — chat must NEVER block on auto-name
+
+        The derived name is short (≤60 chars), single-line, with
+        markdown headers / bullets stripped. See
+        :func:`_session_name_from_plan_content` for the full rules.
+        """
+        sid = self._current_session_id
+        if not sid:
+            _log.debug("Phase F: no current_session_id; skipping auto-name")
+            return
+
+        derived = _session_name_from_plan_content(plan_text)
+        if not derived:
+            _log.debug("Phase F: plan content yielded no usable name")
+            return
+
+        try:
+            existing = self.db.get_session_title(sid)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "Phase F: get_session_title(%s) raised %s; skipping auto-name",
+                sid,
+                exc,
+            )
+            return
+        if existing and existing.strip():
+            _log.info(
+                "Phase F: session %s already named %r; skipping auto-name",
+                sid,
+                existing,
+            )
+            return
+
+        try:
+            self.db.set_session_title(sid, derived)
+            _log.info(
+                "Phase F: auto-named session %s from plan content: %r",
+                sid,
+                derived,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "Phase F: set_session_title(%s, %r) raised %s; session "
+                "will stay untitled",
+                sid,
+                derived,
+                exc,
+            )
+
+
+def _session_name_from_plan_content(
+    plan_text: str, *, max_len: int = 60
+) -> str:
+    """Derive a short session name from the plan text shown on accept.
+
+    Phase F (2026-05-11) — Claude Code names a session from its plan
+    content when the user accepts plan mode. This helper is the
+    deterministic rule we use:
+
+        1. Skip blank lines and trim each candidate line.
+        2. Strip markdown headers (leading ``#``, ``##``, …) so a plan
+           that opens with ``# Migration plan`` becomes ``Migration plan``.
+        3. Strip leading bullet/list markers (``-``, ``*``, ``+``,
+           numbered ``1.`` / ``1)``) so ``- Step 1: refactor`` becomes
+           ``Step 1: refactor``.
+        4. Strip trailing punctuation that's purely decorative
+           (``:``, ``…``, ``...``) — a title doesn't need them.
+        5. Collapse internal whitespace runs to single spaces.
+        6. Cap at ``max_len`` with an ``…`` suffix if exceeded.
+
+    Returns ``""`` when the plan yields nothing usable (empty,
+    whitespace-only, all-chrome). The caller (
+    :meth:`AgentLoop._maybe_auto_name_from_plan`) treats ``""`` as
+    "don't write a title".
+
+    Mirrors the spirit of :func:`opencomputer.agent.title_generator`'s
+    ``_looks_like_response_not_title`` — same defensive posture, but
+    works on hand-authored plan content rather than LLM output, so the
+    inputs are typically cleaner.
+    """
+    if not plan_text:
+        return ""
+
+    import re as _re
+
+    for raw_line in plan_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Strip leading markdown headers.
+        while line.startswith("#"):
+            line = line[1:]
+        line = line.lstrip()
+        if not line:
+            continue
+        # Strip leading bullet / list markers.
+        for marker in ("- ", "* ", "+ "):
+            if line.startswith(marker):
+                line = line[len(marker):]
+                break
+        # Strip leading numbered bullet (``1.`` / ``1)`` / ``12.``).
+        line = _re.sub(r"^\d+[\.\)]\s+", "", line)
+        # Collapse whitespace runs to single spaces.
+        line = " ".join(line.split())
+        # Strip trailing decoration.
+        while line and line[-1] in ":…":
+            line = line[:-1].rstrip()
+        if line.endswith("..."):
+            line = line[:-3].rstrip()
+        if not line:
+            continue
+        # A line that survives stripping but has no alphanumeric
+        # content is still chrome (e.g. a bare ``-`` or ``*``).
+        if not any(ch.isalnum() for ch in line):
+            continue
+        # Length cap.
+        if len(line) > max_len:
+            line = line[: max_len - 1].rstrip() + "…"
+        return line
+
+    return ""
 
 
 def _msg_to_dict(msg: Any) -> dict[str, Any]:

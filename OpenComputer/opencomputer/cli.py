@@ -98,6 +98,131 @@ def _emit_yolo_deprecation() -> None:
         err=True,
     )
 
+
+def _is_session_in_other_project(
+    *,
+    db,  # noqa: ANN001 — duck-typed SessionDB
+    session_id: str,
+    cwd_str: str,
+    repo_paths: list[str],
+) -> bool:
+    """Phase I — return True iff ``session_id``'s cwd is outside this project.
+
+    "This project" means: the current cwd (or any of its subdirs), OR
+    any path under one of the supplied ``repo_paths`` (which the picker
+    treats as worktrees of the current repo).
+
+    Rules:
+        * Session with no recorded ``cwd`` is treated as "same project"
+          — we have no evidence either way and refusing to resume in
+          place would be more annoying than the alternative.
+        * A NULL session row (id not in DB) is "same project" — the
+          caller's resume will fail loudly with its own error message,
+          not silently get redirected.
+        * Path comparison uses normpath + a trailing-separator-aware
+          prefix check so ``/work/proj-a`` does not match ``/work/proj``.
+
+    Never raises. DB errors are swallowed and treated as "same project"
+    — the user gets the legacy resume-in-place behaviour rather than
+    a cryptic failure mode.
+    """
+    if not session_id:
+        return False
+    try:
+        row = db.get_session(session_id)
+    except Exception:  # noqa: BLE001 — DB lookup must not crash resume
+        return False
+    if row is None:
+        return False
+    session_cwd_raw = row.get("cwd") if hasattr(row, "get") else None
+    if not session_cwd_raw:
+        return False
+
+    import os as _os
+
+    session_cwd = _os.path.normpath(str(session_cwd_raw))
+
+    candidates = [cwd_str, *repo_paths]
+    for root in candidates:
+        if not root:
+            continue
+        norm_root = _os.path.normpath(root)
+        if session_cwd == norm_root:
+            return False
+        # Prefix check with trailing sep so /work/p does NOT match /work/p2.
+        if session_cwd.startswith(norm_root + _os.sep):
+            return False
+    return True
+
+
+def _emit_cross_project_handoff(
+    *,
+    db,  # noqa: ANN001 — duck-typed SessionDB
+    session_id: str,
+) -> bool:
+    """Phase I — copy a ``cd && oc resume`` one-liner for ``session_id``.
+
+    Looks up the session's recorded cwd, builds the shell command,
+    copies it to the clipboard via pyperclip, and prints a hint.
+    Returns ``True`` on success, ``False`` on failure (in which case
+    the caller falls back to resume-in-place).
+
+    Failure modes (all fall back gracefully):
+        * Session row not found in DB → False + warn
+        * Session has no recorded cwd → False + warn
+        * pyperclip raises (no clipboard backend / X server / wayland
+          handler) → False + warn but print the command to stdout so
+          the user can copy it manually
+    """
+    try:
+        row = db.get_session(session_id)
+    except Exception as exc:  # noqa: BLE001 — DB failure during handoff
+        console.print(
+            f"[yellow]could not look up session {session_id[:8]} "
+            f"for cross-project handoff: {exc}[/yellow]"
+        )
+        return False
+    if row is None:
+        console.print(
+            f"[yellow]session {session_id[:8]} not found in DB — "
+            f"resuming in place.[/yellow]"
+        )
+        return False
+    session_cwd = row.get("cwd") if hasattr(row, "get") else None
+    if not session_cwd:
+        console.print(
+            f"[yellow]session {session_id[:8]} has no recorded cwd — "
+            f"resuming in place.[/yellow]"
+        )
+        return False
+
+    # Use shlex.quote on the cwd so paths with spaces / special chars
+    # round-trip correctly through bash / zsh.
+    import shlex as _shlex
+
+    quoted_cwd = _shlex.quote(str(session_cwd))
+    cmd = f"cd {quoted_cwd} && oc resume {session_id}"
+
+    try:
+        import pyperclip as _pyperclip
+
+        _pyperclip.copy(cmd)
+    except Exception as exc:  # noqa: BLE001 — no clipboard backend etc.
+        console.print(
+            f"[yellow]Selected session lives in another project "
+            f"({session_cwd!r}). Could not copy to clipboard "
+            f"({type(exc).__name__}). Run this instead:[/yellow]"
+        )
+        console.print(f"  [cyan]{cmd}[/cyan]")
+        return True  # we DID surface the handoff, even without clipboard
+
+    console.print(
+        f"[green]✓[/green] Selected session lives in another project. "
+        f"Resume command copied to clipboard — run it in [cyan]{session_cwd}[/cyan]:"
+    )
+    console.print(f"  [dim]{cmd}[/dim]")
+    return True
+
 _log = logging.getLogger("opencomputer.cli")
 
 _LOGGING_CONFIGURED = False
@@ -939,6 +1064,7 @@ def _resolve_resume_target(spec: str) -> str | None:
                     cwd=r.get("cwd") or "",
                     first_user_message=r.get("first_user_message") or "",
                     git_branch=r.get("git_branch") or "",  # v19
+                    parent_session_id=r.get("parent_session_id") or "",  # Phase H
                 )
                 for r in db_rows
                 if r.get("id")
@@ -3107,6 +3233,7 @@ def resume(
                 cwd=r.get("cwd") or "",
                 first_user_message=r.get("first_user_message") or "",
                 git_branch=r.get("git_branch") or "",  # v19
+                parent_session_id=r.get("parent_session_id") or "",  # Phase H
             )
             for r in db_rows
             if r.get("id")
@@ -3152,6 +3279,24 @@ def resume(
     if selected_id is None:
         console.print("[dim]cancelled.[/dim]")
         return
+
+    # Phase I (2026-05-11) — Claude-Code "unrelated project" handoff.
+    # If the user picked a session whose cwd is OUTSIDE this repo / this
+    # cwd, refuse to resume in place (we'd be running with the wrong
+    # working directory; tool calls hitting Read/Write/Bash would
+    # silently target the wrong files). Instead copy a one-liner the
+    # user can paste in another terminal to resume there.
+    if _is_session_in_other_project(
+        db=db,
+        session_id=selected_id,
+        cwd_str=_cwd_str,
+        repo_paths=_repo_roots,
+    ):
+        if _emit_cross_project_handoff(db=db, session_id=selected_id):
+            return
+        # Clipboard failed AND we already warned the user — fall through
+        # to resume in place. They get the session even if the
+        # clipboard handoff didn't work.
 
     if yolo:
         _emit_yolo_deprecation()
