@@ -89,6 +89,77 @@ class ToolRegistry:
     def schemas(self) -> list[ToolSchema]:
         return [t.schema for t in self._tools.values()]
 
+    def tool_summaries(
+        self, max_description_len: int = 80
+    ) -> list[dict[str, str]]:
+        """Return minimal ``{"name", "description"}`` dicts per tool.
+
+        Used by providers operating in CC §4 lazy-schema-loading mode:
+        the system prompt advertises only the tool catalog (names +
+        short descriptions) and the agent fetches full schemas on
+        demand via the ``ToolSearch`` tool.
+
+        Args:
+            max_description_len: cap on each description string.
+                Strings longer than this are truncated and suffixed
+                with ``"…"`` (single character) so the rendered size
+                stays predictable. Clamped to ``[0, 4096]``;
+                ``0`` produces name-only entries (description empty
+                string).
+
+        Returns:
+            A list (NOT generator) of plain dicts — JSON-serialisable
+            and provider-agnostic. Empty list for an empty registry.
+
+        Spec: docs/OC-FROM-CLAUDE-CODE.md §4.
+        """
+        cap = max(0, min(int(max_description_len), 4096))
+        out: list[dict[str, str]] = []
+        for tool in self._tools.values():
+            schema = tool.schema
+            desc = schema.description or ""
+            if cap == 0:
+                short = ""
+            elif len(desc) > cap:
+                short = desc[:cap] + "…"
+            else:
+                short = desc
+            out.append({"name": schema.name, "description": short})
+        return out
+
+    def summary_schemas(
+        self, max_description_len: int = 80
+    ) -> list[ToolSchema]:
+        """Return ``ToolSchema`` instances with empty parameters blocks.
+
+        Same intent as :meth:`tool_summaries` but typed as the provider-
+        contract ``ToolSchema`` so providers can pass them through
+        their existing serialisation pipeline. The parameters block is
+        the minimum-valid JSON Schema (``{"type": "object", "properties": {}}``)
+        — agents that need the real arguments call ``ToolSearch``.
+
+        Spec: docs/OC-FROM-CLAUDE-CODE.md §4.
+        """
+        cap = max(0, min(int(max_description_len), 4096))
+        out: list[ToolSchema] = []
+        for tool in self._tools.values():
+            schema = tool.schema
+            desc = schema.description or ""
+            if cap == 0:
+                short = ""
+            elif len(desc) > cap:
+                short = desc[:cap] + "…"
+            else:
+                short = desc
+            out.append(
+                ToolSchema(
+                    name=schema.name,
+                    description=short,
+                    parameters={"type": "object", "properties": {}},
+                )
+            )
+        return out
+
     def names(self) -> Iterable[str]:
         return self._tools.keys()
 

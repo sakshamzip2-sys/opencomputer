@@ -382,6 +382,35 @@ class SkillMeta:
     #: ``os:linux``, ``plugin:unbrowse``) so callers can render or
     #: aggregate by kind without re-evaluating.
     unmet_requirements: tuple[str, ...] = field(default_factory=tuple)
+    # CC §7 frontmatter parity (2026-05-11). All default to permissive
+    # so pre-existing skills load unchanged.
+    #:
+    #: ``disable_model_invocation: true`` — only the human can invoke
+    #: this skill via ``/<name>``; the LLM should not auto-call it.
+    #: Useful for destructive operations (deploy, commit) where you
+    #: want to retain a human gate even when the agent could pick it.
+    disable_model_invocation: bool = False
+    #: ``user_invocable: false`` — hide the skill from the ``/``
+    #: autocomplete menu. The skill body is still injected as
+    #: background knowledge; only the slash discovery surface hides.
+    user_invocable: bool = True
+    #: Free-text hint shown next to the slash name in autocomplete UI
+    #: (e.g. ``"<file_path>"``). Empty = no hint rendered.
+    argument_hint: str = ""
+    #: Glob array gating auto-injection: the skill only loads into
+    #: the system prompt when the agent's cwd matches at least one
+    #: pattern. Empty tuple = "always active" (existing behaviour).
+    #: See :func:`skill_matches_cwd` for the matcher.
+    paths: tuple[str, ...] = field(default_factory=tuple)
+    #: Per-skill model override. Empty = use the loop's configured
+    #: model. Mirrors AgentTemplate.model for symmetric "model:" UX
+    #: across agents + skills.
+    skill_model: str = ""
+    #: Per-skill tool allowlist (analog of AgentTemplate.tools). When
+    #: non-empty, the slash dispatcher / agent loop filters the tool
+    #: set seen by the model to this subset while the skill is the
+    #: active context. Empty = inherit full tool set.
+    allowed_tools: tuple[str, ...] = field(default_factory=tuple)
 
 
 # ─── Hermes-parity skill-frontmatter parsers (P3.4 + P3.5) ────────────
@@ -467,6 +496,145 @@ def _platform_name() -> str:
     if sysname == "darwin":
         return "macos"
     return sysname  # ``linux``, ``windows``, or whatever else
+
+
+# ─── CC §7 extra-frontmatter parser ────────────────────────────────────
+
+
+def _parse_skill_extras(raw: object) -> dict[str, object]:
+    """Parse the CC §7 optional frontmatter knobs and return a dict
+    suitable to splat into :class:`SkillMeta` (under the field names
+    declared on the dataclass).
+
+    Accepts BOTH the Python snake_case form (``disable_model_invocation``)
+    AND the Claude-Code dashed form (``disable-model-invocation``) so
+    skills authored against either project drop in without churn.
+
+    Permissive: malformed values fall back to defaults silently. The
+    skill author shouldn't have their other skills break just because
+    one frontmatter key is the wrong shape.
+
+    Returns a dict with keys:
+        - ``disable_model_invocation`` (bool; default False)
+        - ``user_invocable``           (bool; default True)
+        - ``argument_hint``            (str;  default "")
+        - ``paths``                    (tuple[str,...]; default ())
+        - ``skill_model``              (str;  default "")
+        - ``allowed_tools``            (tuple[str,...]; default ())
+
+    Spec: docs/OC-FROM-CLAUDE-CODE.md §7.
+    """
+    out: dict[str, object] = {
+        "disable_model_invocation": False,
+        "user_invocable": True,
+        "argument_hint": "",
+        "paths": (),
+        "skill_model": "",
+        "allowed_tools": (),
+    }
+    if not isinstance(raw, dict):
+        return out
+
+    def _get(*keys: str, default: object = None) -> object:
+        """Return the first present key (snake_case or dashed)."""
+        for k in keys:
+            if k in raw:
+                return raw[k]
+        return default
+
+    # disable_model_invocation
+    val = _get("disable_model_invocation", "disable-model-invocation")
+    if isinstance(val, bool):
+        out["disable_model_invocation"] = val
+
+    # user_invocable (default True; explicit False to hide)
+    val = _get("user_invocable", "user-invocable")
+    if isinstance(val, bool):
+        out["user_invocable"] = val
+
+    # argument_hint
+    val = _get("argument_hint", "argument-hint", default="")
+    if isinstance(val, str):
+        out["argument_hint"] = val.strip()
+
+    # paths: list-of-str OR a bare string (wrap to single-item tuple)
+    val = _get("paths")
+    if isinstance(val, list):
+        cleaned_paths = tuple(p for p in val if isinstance(p, str) and p)
+        out["paths"] = cleaned_paths
+    elif isinstance(val, str) and val.strip():
+        out["paths"] = (val.strip(),)
+
+    # model — stored as skill_model on SkillMeta to avoid colliding
+    # with provider-model resolution elsewhere.
+    val = _get("model")
+    if isinstance(val, str) and val.strip():
+        out["skill_model"] = val.strip()
+
+    # allowed_tools — list of strings
+    val = _get("allowed_tools", "allowed-tools")
+    if isinstance(val, list):
+        cleaned_tools = tuple(t for t in val if isinstance(t, str) and t)
+        out["allowed_tools"] = cleaned_tools
+
+    return out
+
+
+#: Cap on parent-walk depth when searching for files matching a
+#: ``paths:`` glob. The agent's cwd might be deep inside a tree;
+#: 16 levels covers any realistic monorepo without runaway traversal
+#: on broken filesystems.
+_SKILL_PATHS_WALK_UP_LIMIT: int = 16
+
+
+def skill_matches_cwd(skill: SkillMeta, cwd: Path) -> bool:
+    """Return True if ``skill`` should auto-activate in directory ``cwd``.
+
+    A skill with empty ``paths`` is universal — always matches. When
+    ``paths`` is non-empty, the skill matches iff at least one
+    ``paths:`` pattern is satisfied by the cwd OR by any of its
+    ancestors (up to :data:`_SKILL_PATHS_WALK_UP_LIMIT` levels).
+    The walk-up handles the common case where the agent's cwd is
+    deep inside a tree (e.g. ``src/components/Button/``) but the
+    skill's glob is anchored at the project root
+    (e.g. ``src/**/*.ts``).
+
+    For each pattern + each ancestor, we try two matchers:
+
+      1. **Glob match**: ``ancestor.glob(pattern)`` yields ≥1 entry.
+         Handles ``src/**/*.ts`` semantics natively when the ancestor
+         is the project root.
+      2. **Substring fallback**: ``pattern in str(cwd)``. Picks up
+         literal directory patterns like ``"src/components"`` even
+         when the pattern is on a directory we don't have read-access
+         to glob.
+
+    Non-existent ``cwd`` returns False. Errors during glob (permission
+    denied, broken symlink loop) skip the current ancestor and try
+    the next — never raise.
+    """
+    if not skill.paths:
+        return True
+    if not cwd.exists() or not cwd.is_dir():
+        return False
+    # Walk cwd → /, capped. Try glob from each ancestor — the first
+    # ancestor where the pattern resolves is enough.
+    cursor = cwd
+    for _ in range(_SKILL_PATHS_WALK_UP_LIMIT):
+        for pattern in skill.paths:
+            try:
+                for _ in cursor.glob(pattern):
+                    return True
+            except (OSError, ValueError):
+                pass
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    # Substring fallback for literal-directory patterns where neither
+    # ancestor had glob access (e.g. read-only mounts higher up).
+    cwd_str = str(cwd)
+    return any(pattern in cwd_str for pattern in skill.paths)
 
 
 def _evaluate_skill_requirements(
