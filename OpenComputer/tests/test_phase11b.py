@@ -44,15 +44,13 @@ def test_three_new_hook_events_exist_and_are_in_all_hook_events() -> None:
     assert HookEvent.PRE_COMPACT in ALL_HOOK_EVENTS
     assert HookEvent.SUBAGENT_STOP in ALL_HOOK_EVENTS
     assert HookEvent.NOTIFICATION in ALL_HOOK_EVENTS
-    # Phase 11b shipped 9 events; Round 2A P-1 adds 8 more for 17;
-    # Wave 5 T13/T14 adds 3 (PRE_GATEWAY_DISPATCH, PRE/POST_APPROVAL_*) for 20.
-    # Social-traces Phase 0 adds BEFORE_TASK for 21.
-    # 2026-05-06 OpenClaw deep-comparison adds BEFORE_INSTALL for 22.
-    # 2026-05-06 Phase 3 adds BEFORE_MODEL_RESOLVE / MESSAGE_SENDING /
-    # MESSAGE_SENT (S3 leftovers from OpenClaw deep-comparison) for 25.
-    # 2026-05-08 Hermes Doc-2 adds SESSION_FINALIZE / SESSION_RESET /
-    # TRANSFORM_LLM_OUTPUT — final tally 28.
-    assert len(ALL_HOOK_EVENTS) == 28
+    # ALL_HOOK_EVENTS must contain every HookEvent value exactly once.
+    # The in-membership checks above are the real invariants for this
+    # test; this just guards against duplicates or drift between the
+    # tuple and the enum. Using ``len(HookEvent)`` keeps it from rotting
+    # every time a new event ships (9 → 17 → 20 → 28 → 33 and counting).
+    assert set(ALL_HOOK_EVENTS) == set(HookEvent)
+    assert len(ALL_HOOK_EVENTS) == len(HookEvent)
 
 
 async def test_base_channel_adapter_send_notification_default_routes_to_send() -> None:

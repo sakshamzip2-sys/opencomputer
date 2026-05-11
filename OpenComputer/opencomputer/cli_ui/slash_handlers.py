@@ -1357,7 +1357,7 @@ def _handle_tools_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/tools`` — read-only inventory of registered tools."""
     try:
         from opencomputer.tools.registry import registry as _treg
-        names = sorted(_treg.list_names())
+        names = sorted(_treg.names())
     except Exception as e:  # noqa: BLE001
         ctx.console.print(f"[yellow]Tool registry unavailable: {e}[/yellow]")
         return SlashResult(handled=True)

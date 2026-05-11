@@ -367,7 +367,7 @@ def test_schema_v17_adds_source_column_to_fresh_db(tmp_path) -> None:
 
 def test_schema_v17_backfills_existing_rows(tmp_path) -> None:
     """Verify v16→v17 migration is idempotent and backfills NULL source rows."""
-    from opencomputer.agent.state import SessionDB
+    from opencomputer.agent.state import SCHEMA_VERSION, SessionDB
 
     p = tmp_path / "pre17.db"
     SessionDB(p)
@@ -396,7 +396,10 @@ def test_schema_v17_backfills_existing_rows(tmp_path) -> None:
             ).fetchall()
         ]
         v = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert v == 17
+    # Migration rolls forward to whatever the current SCHEMA_VERSION is —
+    # the v16→v17 step under test is the source backfill (asserted below);
+    # the loop continues to the latest version (was 17, now 18, …).
+    assert v == SCHEMA_VERSION
     assert rows == [("a", "cli"), ("b", "cli")]
 
 

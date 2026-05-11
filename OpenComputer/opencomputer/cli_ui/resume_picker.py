@@ -34,13 +34,41 @@ class SessionRow:
     # empty — gives the picker a useful label even before the auto-titler
     # has fired.
     cwd: str = ""
+    # First user-role message captured when listing sessions for the
+    # picker. Used by :func:`format_session_label` as the preferred
+    # fallback when no manual or auto-generated title exists — mirrors
+    # Claude Code's resume picker, which always shows a short preview of
+    # what the conversation was about. Empty when no user message has
+    # been recorded yet (e.g., session opened but never sent).
+    first_user_message: str = ""
+
+
+def _clean_label(text: str, *, max_len: int = 80) -> str:
+    """Single-line, length-capped label from possibly-multiline text.
+
+    Replaces ``\\r``/``\\n``/``\\t`` with spaces, collapses whitespace
+    runs, and truncates with a single ``…`` suffix if longer than
+    ``max_len``. Empty input passes through unchanged.
+
+    This is shared between :func:`format_session_label` (cleans titles
+    that contain newlines — the legacy auto-titler shipped many) and the
+    first-user-message fallback (cleans pasted multi-paragraph prompts).
+    """
+    if not text:
+        return ""
+    cleaned = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
 
 
 def filter_rows(rows: list[SessionRow], query: str) -> list[SessionRow]:
-    """Case-insensitive substring filter over title + id prefix.
+    """Case-insensitive substring filter over title + preview + id prefix.
 
-    Empty query returns all rows unchanged. Matches on either:
+    Empty query returns all rows unchanged. Matches on any of:
     - ``query`` is a substring of ``row.title`` (case-insensitive), OR
+    - ``query`` is a substring of ``row.first_user_message`` (case-insensitive), OR
     - ``row.id`` starts with ``query`` (case-insensitive — for paste-friendly
       partial-UUID lookups from log scrolls)
     """
@@ -50,7 +78,9 @@ def filter_rows(rows: list[SessionRow], query: str) -> list[SessionRow]:
     return [
         r
         for r in rows
-        if q in r.title.lower() or r.id.lower().startswith(q)
+        if q in r.title.lower()
+        or q in r.first_user_message.lower()
+        or r.id.lower().startswith(q)
     ]
 
 
@@ -88,16 +118,21 @@ def format_time_ago(ts: float, *, now: float | None = None) -> str:
 def format_session_label(row: SessionRow, *, now: float | None = None) -> str:
     """Headline label for one row in the picker.
 
-    Resolution order:
+    Resolution order (mirrors Claude Code's ``/resume``):
 
-    1. ``row.title`` (set by :func:`opencomputer.agent.title_generator.maybe_auto_title`
-       after the first user→assistant exchange) wins when present.
-    2. ``<cwd-basename> @ HH:MM`` when title is empty but cwd is set —
-       gives the user real signal (which project + when) without the
-       useless "(untitled · ID)" string. Mirrors how Claude Code
-       headlines untitled sessions.
-    3. ``(untitled · <id-prefix>)`` legacy fallback for very old rows
-       that have neither title nor cwd recorded.
+    1. ``row.title`` when present — set either via ``/rename`` or by
+       :func:`opencomputer.agent.title_generator.maybe_auto_title`. Cleaned
+       to single-line via :func:`_clean_label` since legacy auto-titler
+       output occasionally contained embedded newlines.
+    2. ``row.first_user_message`` (truncated, single-line) when no title
+       is set — gives every session a meaningful headline instead of a
+       useless ``default @ HH:MM`` for sessions started from the profile
+       home. This is the key parity with Claude Code's resume picker.
+    3. ``<cwd-basename> @ HH:MM`` when there is also no first user
+       message recorded — still better than ``(untitled · ID)`` for
+       sessions that opened and exited before a turn fired.
+    4. ``(untitled · <id-prefix>)`` legacy fallback for very old rows
+       that have neither title, message, nor cwd recorded.
 
     ``started_at`` is rendered in *local time* via :mod:`time.strftime`,
     matching the user's terminal locale. ``now`` is accepted only for
@@ -107,7 +142,12 @@ def format_session_label(row: SessionRow, *, now: float | None = None) -> str:
     del now  # accepted for test-API symmetry; not used for absolute time
 
     if row.title:
-        return row.title
+        return _clean_label(row.title)
+
+    if row.first_user_message:
+        preview = _clean_label(row.first_user_message)
+        if preview:
+            return preview
 
     if row.cwd:
         import os as _os

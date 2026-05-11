@@ -26,6 +26,44 @@ def test_session_cwd_persisted(tmp_path: Path) -> None:
     assert rows[0]["cwd"] == "/Users/test/Vscode/work"
 
 
+def test_list_sessions_with_preview_returns_first_user_message(tmp_path: Path) -> None:
+    """JOIN variant returns the first user-role message per session.
+
+    Powers the resume picker's Claude-Code-style preview line for
+    untitled sessions. Verifies: (a) the field is named
+    ``first_user_message``, (b) it picks the *first* user message by
+    timestamp, (c) it picks only user-role messages (skips assistant),
+    (d) NULL when no user message exists yet.
+    """
+    from plugin_sdk.core import Message
+
+    db = SessionDB(tmp_path / "test.db")
+    db.create_session(session_id="sid-1", platform="cli", model="m", cwd="/x")
+    db.create_session(session_id="sid-2", platform="cli", model="m", cwd="/y")
+    db.create_session(session_id="sid-3", platform="cli", model="m", cwd="/z")
+
+    # sid-1: user-then-assistant; preview should be the user msg
+    db.append_message("sid-1", Message(role="user", content="first user prompt"))
+    db.append_message(
+        "sid-1", Message(role="assistant", content="my assistant reply")
+    )
+    db.append_message("sid-1", Message(role="user", content="second user prompt"))
+
+    # sid-2: assistant-only (rare but possible) — first_user_message is None
+    db.append_message("sid-2", Message(role="assistant", content="hi"))
+
+    # sid-3: no messages at all
+    # (no append)
+
+    rows = db.list_sessions_with_preview(limit=10)
+    by_id = {r["id"]: r for r in rows}
+
+    assert "first_user_message" in by_id["sid-1"]
+    assert by_id["sid-1"]["first_user_message"] == "first user prompt"
+    assert by_id["sid-2"]["first_user_message"] is None
+    assert by_id["sid-3"]["first_user_message"] is None
+
+
 def test_session_cwd_optional_for_legacy_rows(tmp_path: Path) -> None:
     """Old rows (pre-migration) have NULL cwd; reads return None.
 

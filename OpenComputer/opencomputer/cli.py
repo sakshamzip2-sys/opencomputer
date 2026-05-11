@@ -914,6 +914,15 @@ def _resolve_resume_target(spec: str) -> str | None:
         # Falls back to None if the user cancels (Esc / Ctrl+C).
         from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
 
+        # Re-fetch with the preview JOIN so untitled rows still show a
+        # meaningful headline instead of "default @ HH:MM". The earlier
+        # ``list_sessions(limit=10)`` was just for the title/lineage
+        # shortcut paths above; this call powers the actual picker.
+        if hasattr(db, "list_sessions_with_preview"):
+            picker_db_rows = db.list_sessions_with_preview(limit=200)
+        else:  # pragma: no cover — fallback for stale SessionDB subclasses
+            picker_db_rows = rows
+
         def _coerce_started_at(v) -> float:
             try:
                 return float(v) if v is not None else 0.0
@@ -926,8 +935,10 @@ def _resolve_resume_target(spec: str) -> str | None:
                 title=r.get("title") or "",
                 started_at=_coerce_started_at(r.get("started_at")),
                 message_count=int(r.get("message_count", 0) or 0),
+                cwd=r.get("cwd") or "",
+                first_user_message=r.get("first_user_message") or "",
             )
-            for r in rows
+            for r in picker_db_rows
             if r.get("id")
         ]
         return run_resume_picker(picker_rows, db=db)
@@ -3047,7 +3058,14 @@ def resume(
         return
 
     # ── Picker path: no positional, or explicit 'pick' magic ──────────
-    db_rows = db.list_sessions(limit=200)
+    # Use the JOIN variant so untitled rows can render a Claude-Code-style
+    # preview of the first user message instead of falling back to a
+    # useless "default @ HH:MM" label for sessions started from the
+    # profile home.
+    if hasattr(db, "list_sessions_with_preview"):
+        db_rows = db.list_sessions_with_preview(limit=200)
+    else:  # pragma: no cover — fallback for stale SessionDB subclasses in tests
+        db_rows = db.list_sessions(limit=200)
 
     def _coerce_started_at(v) -> float:
         try:
@@ -3062,6 +3080,7 @@ def resume(
             started_at=_coerce_started_at(r.get("started_at")),
             message_count=int(r.get("message_count", 0) or 0),
             cwd=r.get("cwd") or "",
+            first_user_message=r.get("first_user_message") or "",
         )
         for r in db_rows
         if r.get("id")

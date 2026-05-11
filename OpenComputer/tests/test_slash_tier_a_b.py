@@ -157,6 +157,9 @@ def test_handle_tools_inline_runs_without_crashing():
     ctx = _ctx()
     result = _handle_tools_inline(ctx, [])
     assert result.handled
+    out = _captured(ctx)
+    assert "Tool registry unavailable" not in out
+    assert ("Registered tools" in out) or ("No tools registered" in out)
 
 
 # ─── /image ─────────────────────────────────────────────────────────

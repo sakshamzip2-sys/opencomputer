@@ -1296,6 +1296,38 @@ class SessionDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def list_sessions_with_preview(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Like :meth:`list_sessions` but joins the first user-role message.
+
+        Returns the same dict shape as :meth:`list_sessions` plus a single
+        extra key ``first_user_message`` per row. Used by the resume
+        picker to render a Claude-Code-style preview line when the
+        session has no title yet — so untitled rows show their actual
+        conversation context instead of a useless ``default @ HH:MM``.
+
+        Uses a correlated subquery to fetch only the first user message
+        per session. Cheap enough for the picker's 200-row budget; if it
+        ever becomes a hotspot, swap to a window function on a covering
+        index over ``messages(session_id, role, timestamp)``.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT s.*,
+                       (SELECT m.content
+                          FROM messages m
+                         WHERE m.session_id = s.id
+                           AND m.role = 'user'
+                         ORDER BY m.timestamp ASC
+                         LIMIT 1) AS first_user_message
+                  FROM sessions s
+              ORDER BY s.started_at DESC
+                 LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     # ─── Prompt checkpoints (CC §11 — user-invocable /checkpoint, /restore) ──
 
     def create_prompt_checkpoint(
