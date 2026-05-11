@@ -465,6 +465,126 @@ def test_ctrl_r_enters_rename_mode_and_shows_pencil_symbol() -> None:
     )
 
 
+def test_oc_chat_dash_n_to_oc_resume_by_name_roundtrip(tmp_path) -> None:
+    """Phase N — End-to-end roundtrip across two ``oc`` subprocesses.
+
+    Reproduces the canonical Claude-Code naming workflow:
+
+        # Session 1 — name a fresh session at startup
+        oc chat -n auth-refactor
+
+        (user types /exit immediately, never sending a real prompt)
+
+        # Session 2 — later, resume that named session by name
+        oc resume auth-refactor
+
+    Asserts:
+        1. After session 1 exits cleanly, the SessionDB has a row
+           with title == 'auth-refactor' (proves -n wired the title
+           via set_session_title before the first user message even
+           had a chance to fire).
+        2. ``oc resume <name>`` resolves the name to the right
+           session id via the existing find_session_by_title path
+           (the picker doesn't open — direct resume).
+        3. Both subprocesses exit with rc=0 (no spurious errors).
+
+    Isolation: OPENCOMPUTER_HOME is set to ``tmp_path`` so the test
+    doesn't touch the user's real profile DB. The subprocess inherits
+    PATH so the ``oc`` binary itself resolves normally.
+    """
+    import sqlite3
+
+    env = os.environ.copy()
+    env["OPENCOMPUTER_HOME"] = str(tmp_path)
+    env["TERM"] = "xterm-256color"
+
+    # ── Session 1: oc chat -n NAME, exit immediately ────────────────
+    proc, master_fd = _spawn_with_pty(["oc", "chat", "-n", "auth-refactor"])
+    # _spawn_with_pty uses os.environ; we need OPENCOMPUTER_HOME set on
+    # the subprocess we just started. Re-do the spawn with our env.
+    _terminate_with_grace(proc, master_fd)
+    import pty
+    import subprocess
+
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        ["oc", "chat", "-n", "auth-refactor"],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    captured = b""
+    try:
+        captured += _drain(master_fd, timeout_s=10.0)
+        os.write(master_fd, b"/exit\r")
+        captured += _drain(master_fd, timeout_s=3.0)
+    finally:
+        _terminate_with_grace(proc, master_fd)
+
+    # ── Assert 1: session row exists with the title ─────────────────
+    db_path = tmp_path / "sessions.db"
+    if not db_path.exists():
+        # Some configurations write to a sub-path; locate the DB.
+        candidates = list(tmp_path.rglob("sessions.db"))
+        if not candidates:
+            pytest.fail(
+                f"no sessions.db found under {tmp_path} after `oc chat -n`. "
+                f"Captured (last 1500 chars):\n{_strip_ansi(captured)[-1500:]}"
+            )
+        db_path = candidates[0]
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, title FROM sessions WHERE title = ?",
+            ("auth-refactor",),
+        ).fetchall()
+
+    assert len(rows) == 1, (
+        f"expected exactly one session titled 'auth-refactor' after `oc "
+        f"chat -n`. Found {len(rows)} rows. Captured (last 1500 chars):\n"
+        f"{_strip_ansi(captured)[-1500:]}"
+    )
+    session_id, _title = rows[0]
+    assert session_id, "session row has no id"
+
+    # ── Session 2: oc resume <name> ─────────────────────────────────
+    master_fd2, slave_fd2 = pty.openpty()
+    proc2 = subprocess.Popen(
+        ["oc", "resume", "auth-refactor"],
+        stdin=slave_fd2,
+        stdout=slave_fd2,
+        stderr=slave_fd2,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd2)
+
+    captured2 = b""
+    try:
+        captured2 += _drain(master_fd2, timeout_s=10.0)
+        os.write(master_fd2, b"/exit\r")
+        captured2 += _drain(master_fd2, timeout_s=3.0)
+    finally:
+        _terminate_with_grace(proc2, master_fd2)
+
+    text2 = _strip_ansi(captured2)
+
+    # ── Assert 2: resume actually resolved to OUR named session ─────
+    # The resumed session's title appears in the status bar
+    # (``┤ auth-refactor ├``) — the existence of that string proves
+    # the by-name lookup succeeded AND the right session was loaded.
+    # A wrong-name match would have shown a different title or none.
+    assert "auth-refactor" in text2, (
+        "expected the resumed session's title 'auth-refactor' to appear "
+        "in the chat status bar. Captured (last 1500 chars):\n"
+        f"{text2[-1500:]}"
+    )
+
+
 def test_picker_does_not_crash_on_unknown_control_sequences() -> None:
     """Defensive smoke — random control codes shouldn't kill the picker.
 

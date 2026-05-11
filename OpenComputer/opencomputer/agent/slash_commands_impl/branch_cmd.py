@@ -74,11 +74,18 @@ class BranchCommand(SlashCommand):
             new_title = f"{src_title} (fork)".strip() if src_title else "(fork)"
 
         try:
+            # Phase H integration (2026-05-11) — record the lineage so
+            # the resume picker can render the new session under its
+            # parent in the fork-group UI. The session is still
+            # functionally independent (messages are a deep copy, the
+            # agent loop's runtime is unchanged) — parent_session_id
+            # is metadata for the picker / `oc sessions tree` CLI only.
             db.create_session(
                 new_id,
                 platform=src.get("platform", "") or "cli",
                 model=src.get("model", "") or "",
                 title=new_title,
+                parent_session_id=sid,
             )
             if messages:
                 db.append_messages_batch(new_id, messages)
@@ -88,12 +95,18 @@ class BranchCommand(SlashCommand):
                 handled=True,
             )
 
+        # 2026-05-11 — PI-style summary card. Pure-text Unicode box so
+        # we don't need a Rich Console here; the chat output stream
+        # renders it verbatim and the user sees a clear "branch event"
+        # marker rather than three terse lines that blend into the
+        # rest of the assistant text.
+        from opencomputer.cli_ui.summary_cards import render_branch_card
+
         return SlashCommandResult(
-            output=(
-                f"Branched: new session [{new_id}] "
-                f"with {len(messages)} message(s) copied.\n"
-                f"Title: {new_title}\n"
-                f"Resume with: oc chat --resume {new_id}"
+            output=render_branch_card(
+                new_session_id=new_id,
+                title=new_title,
+                messages_copied=len(messages),
             ),
             handled=True,
         )

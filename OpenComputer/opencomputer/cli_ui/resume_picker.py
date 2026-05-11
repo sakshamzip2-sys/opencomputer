@@ -18,6 +18,7 @@ terminals (VS Code, JetBrains) that don't reliably respond to CPR.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -53,6 +54,55 @@ class SessionRow:
     # children under their parent (collapsed by default; ``→`` to
     # expand). Empty when this session is a root.
     parent_session_id: str = ""
+
+
+#: Compiled regex patterns matching the PR / MR URL shapes Claude Code
+#: supports per https://code.claude.com — GitHub (with Enterprise via
+#: arbitrary host), GitLab, and Bitbucket. The capture group is the
+#: PR / MR number.
+#:
+#: We deliberately don't anchor at start/end so a URL pasted with
+#: leading whitespace, trailing punctuation, or surrounding context
+#: still resolves. The regex is run via ``.search`` on the search box
+#: text on every keystroke; it's O(n) in the buffer length and the
+#: buffer is bounded by what a user could paste, so the overhead is
+#: negligible.
+_PR_URL_PATTERNS: list = [
+    # GitHub / GitHub Enterprise: <host>/<owner>/<repo>/pull/<n>
+    re.compile(r"https?://[^\s/]+/[^\s/]+/[^\s/]+/pull/(\d+)"),
+    # GitLab: <host>/<group>/<proj>/-/merge_requests/<n>
+    re.compile(r"https?://[^\s/]+/[^\s/]+/[^\s/]+/-/merge_requests/(\d+)"),
+    # Bitbucket Cloud: bitbucket.org/<owner>/<repo>/pull-requests/<n>
+    re.compile(r"https?://[^\s/]+/[^\s/]+/[^\s/]+/pull-requests/(\d+)"),
+]
+
+
+def _extract_pr_number_from_url(text: str) -> int | None:
+    """Phase M — return the PR/MR number in ``text`` or ``None``.
+
+    Recognises GitHub, GitHub Enterprise (any host), GitLab, and
+    Bitbucket pull/merge request URLs. Returns the first match found
+    (left-to-right, GitHub > GitLab > Bitbucket).
+
+    Defensive: leading whitespace, trailing slashes / query strings /
+    fragments don't break the match. Empty input returns ``None`` fast
+    (no regex pass). Non-string input also returns ``None``.
+
+    Tested in tests/test_resume_picker_pr_url_detection.py.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    for pattern in _PR_URL_PATTERNS:
+        match = pattern.search(stripped)
+        if match:
+            try:
+                return int(match.group(1))
+            except (ValueError, TypeError):
+                continue
+    return None
 
 
 def _build_fork_groups(
@@ -522,6 +572,7 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
     initial_scope: str = SCOPE_CWD,
     initial_branch_filter: bool = False,
     current_branch: str | None = None,
+    pr_branch_resolver=None,
 ) -> str | None:
     """Open a full-screen picker and return the selected session id.
 
@@ -594,6 +645,13 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
         # Pressing ``→`` on a root with children adds it; ``←`` removes.
         # By default everything is collapsed.
         "expanded_parents": set(),
+        # Phase M — PR URL paste detection. ``pr_branch`` holds the
+        # currently-pinned branch from a pasted PR URL (set by the
+        # resolver in ``_on_search_text_changed``). ``pr_resolved``
+        # holds the PR number we already resolved so we don't retrigger
+        # gh while the user types past the URL.
+        "pr_branch": "",
+        "pr_resolved": None,
     }
 
     def _is_navigating() -> bool:
@@ -645,7 +703,15 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
         # row visible while the y/n / rename decision is pending.
         if state["mode"] != "navigate":
             return
-        state["filtered"] = filter_rows(state["rows"], state["query"])
+        base = state["rows"]
+        # Phase M — when a PR-pinned branch is active, intersect the
+        # base list with rows on that branch BEFORE the search-text
+        # filter runs. This is in-memory only (no DB refetch) so it's
+        # fast and degrades gracefully if no rows match.
+        pr_branch = state.get("pr_branch", "")
+        if pr_branch:
+            base = [r for r in base if r.git_branch == pr_branch]
+        state["filtered"] = filter_rows(base, state["query"])
         state["selected_idx"] = 0 if state["filtered"] else -1
         _rebuild_render_rows()
 
@@ -658,7 +724,44 @@ def run_resume_picker(  # noqa: ANN001 — `db` is duck-typed SessionDB
     search_buffer = Buffer()
 
     def _on_search_text_changed(_buf):  # noqa: ANN001 — pt fires (sender,)
-        state["query"] = search_buffer.text
+        text = search_buffer.text
+        state["query"] = text
+
+        # Phase M — PR URL paste detection. If the buffer text contains
+        # a GitHub/GitLab/Bitbucket PR/MR URL AND the caller wired a
+        # resolver, resolve to a branch and filter the visible rows to
+        # sessions on that branch. Synchronous because the user just
+        # pasted — a 1-2s gh round-trip is acceptable and far better
+        # than running it on every keystroke.
+        if pr_branch_resolver is not None:
+            pr_number = _extract_pr_number_from_url(text)
+            # Only fire when this PR number hasn't already been resolved
+            # for the current text — avoids retriggering when the user
+            # types past the URL (we keep the filter pinned until they
+            # clear the box).
+            if pr_number is not None and state.get("pr_resolved") != pr_number:
+                try:
+                    branch = pr_branch_resolver(pr_number)
+                except Exception:  # noqa: BLE001 — resolver may shell out
+                    branch = None
+                state["pr_resolved"] = pr_number
+                if branch:
+                    # Pin the rows to only this branch via the picker's
+                    # in-memory filter. Don't clear the search box — the
+                    # URL stays visible so the user can see what filter
+                    # is active. _refilter respects state["pr_branch"].
+                    state["pr_branch"] = branch
+                    _refilter()
+                    return
+                # Resolution failed — clear any prior PR branch pin so
+                # the standard substring filter runs. Diagnostic is
+                # already printed by the resolver itself.
+                state["pr_branch"] = ""
+            elif pr_number is None and state.get("pr_branch"):
+                # User cleared the URL → drop the branch pin.
+                state["pr_branch"] = ""
+                state["pr_resolved"] = None
+
         _refilter()
 
     search_buffer.on_text_changed += _on_search_text_changed

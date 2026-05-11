@@ -155,6 +155,123 @@ def _is_session_in_other_project(
     return True
 
 
+def _resolve_pr_to_branch(pr_number: int, *, cwd: str | None = None) -> str | None:
+    """Phase L — return the head branch name for ``pr_number``, or ``None``.
+
+    Shells out to ``gh pr view <number> --json headRefName``. Fails
+    closed (returns ``None`` + prints a diagnostic) on:
+
+        * ``gh`` not installed
+        * ``gh`` not authenticated
+        * PR doesn't exist in the current repo
+        * subprocess timeout (10 s — generous because gh sometimes
+          hits the network)
+        * JSON parse error
+
+    ``cwd`` overrides the working dir for the subprocess; defaults to
+    the process's actual cwd. Useful for tests + for repos that aren't
+    the current directory.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    if not shutil.which("gh"):
+        console.print(
+            "[red]error:[/red] `gh` CLI not found on PATH. Install via "
+            "[cyan]brew install gh[/cyan] (macOS) or see "
+            "https://cli.github.com for other platforms."
+        )
+        return None
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "headRefName"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        console.print(
+            f"[red]error:[/red] `gh pr view {pr_number}` failed "
+            f"({type(exc).__name__}: {exc})."
+        )
+        return None
+    if out.returncode != 0:
+        # gh writes its own error to stderr — surface it verbatim.
+        stderr = out.stderr.strip() or "(no error message)"
+        console.print(
+            f"[red]error:[/red] `gh pr view {pr_number}` exited "
+            f"with code {out.returncode}: {stderr}"
+        )
+        return None
+    try:
+        payload = json.loads(out.stdout)
+    except json.JSONDecodeError as exc:
+        console.print(
+            f"[red]error:[/red] could not parse gh JSON output for "
+            f"PR {pr_number}: {exc}"
+        )
+        return None
+    branch = payload.get("headRefName") if isinstance(payload, dict) else None
+    if not branch or not isinstance(branch, str):
+        console.print(
+            f"[red]error:[/red] PR {pr_number} has no headRefName "
+            "in the gh response. Output was:\n"
+            f"  {out.stdout.strip()}"
+        )
+        return None
+    return branch
+
+
+def _resolve_pr_to_session_id(pr_number: int) -> str | None:
+    """Phase L — resolve PR number to the most recent matching session id.
+
+    Two-step lookup:
+
+        1. ``gh pr view <number>`` → head branch name
+        2. ``SessionDB.list_sessions_with_preview(branch_filter=branch)``
+           → most recent session on that branch
+
+    Returns the session id on success, ``None`` (with a printed
+    diagnostic) on any failure mode. Caller (the ``oc resume`` Typer
+    handler) should ``raise typer.Exit(1)`` when ``None``.
+    """
+    from opencomputer.agent.state import SessionDB
+
+    branch = _resolve_pr_to_branch(pr_number)
+    if branch is None:
+        return None
+    cfg = load_config()
+    db = SessionDB(cfg.session.db_path)
+    try:
+        rows = db.list_sessions_with_preview(branch_filter=branch, limit=10)
+    except Exception as exc:  # noqa: BLE001 — DB failure during PR resolution
+        console.print(
+            f"[red]error:[/red] DB query for branch {branch!r} failed: {exc}"
+        )
+        return None
+    if not rows:
+        console.print(
+            f"[yellow]No saved session for PR #{pr_number} "
+            f"(head branch: [cyan]{branch}[/cyan]).[/yellow] "
+            f"Start one with [cyan]oc chat[/cyan] on that branch first."
+        )
+        return None
+    sid = str(rows[0].get("id") or "")
+    if not sid:
+        console.print(
+            f"[red]error:[/red] session row for branch {branch!r} has no id; "
+            "DB may be inconsistent."
+        )
+        return None
+    console.print(
+        f"[green]Resuming session for PR #{pr_number}[/green] "
+        f"(branch: [cyan]{branch}[/cyan], id: [dim]{sid[:8]}[/dim])."
+    )
+    return sid
+
+
 def _emit_cross_project_handoff(
     *,
     db,  # noqa: ANN001 — duck-typed SessionDB
@@ -1092,6 +1209,7 @@ def _resolve_resume_target(spec: str) -> str | None:
             refetch=_refetch,
             initial_scope=initial_scope,
             current_branch=_current_branch,
+            pr_branch_resolver=_resolve_pr_to_branch,
         )
 
     # Hermes-CLI parity C5/C6 — title and lineage resolution.
@@ -3124,6 +3242,16 @@ def resume(
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction."
     ),
+    from_pr: int = typer.Option(
+        0,
+        "--from-pr",
+        help=(
+            "Resume the most recent session whose git_branch matches the head "
+            "branch of GitHub PR <number>. Uses the `gh` CLI to resolve the PR "
+            "(install via `brew install gh` if absent). Mirrors Claude Code's "
+            "`claude --from-pr <number>`."
+        ),
+    ),
 ) -> None:
     """Resume a saved session — by id, by id-prefix, or via the picker.
 
@@ -3134,11 +3262,36 @@ def resume(
     - ``oc resume last`` — resumes the most recent session.
     - ``oc resume <id-prefix>`` — resumes the matching session directly,
       skipping the picker. Mirrors ``claude --resume <id>``.
+    - ``oc resume --from-pr <number>`` — resumes the session linked to a
+      GitHub PR (via head branch match). Mirrors ``claude --from-pr``.
 
     Alt-screen mode bypasses Cursor-Position-Report, so the picker works
     in editor terminals (VS Code, JetBrains) where the inline dropdown
     can't render.
     """
+    # Phase L (2026-05-11) — --from-pr resolves to a session via the
+    # PR's head branch. Runs BEFORE the positional / picker paths so
+    # users get the PR linkage even if they pass both flags.
+    if from_pr:
+        target_id = _resolve_pr_to_session_id(from_pr)
+        if target_id is None:
+            raise typer.Exit(1)
+        if yolo:
+            _emit_yolo_deprecation()
+            auto = True
+        permission_mode = _derive_permission_mode(
+            plan=plan, auto=auto, accept_edits=accept_edits
+        )
+        _run_chat_session(
+            resume=target_id,
+            plan=plan,
+            no_compact=no_compact,
+            yolo=auto,
+            accept_edits=accept_edits,
+            permission_mode=permission_mode,
+        )
+        return
+
     from opencomputer.agent.config import _home as _profile_home_fn
     from opencomputer.agent.state import SessionDB
     from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
@@ -3275,6 +3428,7 @@ def resume(
         refetch=_refetch,
         initial_scope=initial_scope,
         current_branch=_current_branch,
+        pr_branch_resolver=_resolve_pr_to_branch,
     )
     if selected_id is None:
         console.print("[dim]cancelled.[/dim]")
