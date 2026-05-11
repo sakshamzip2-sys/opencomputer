@@ -79,21 +79,29 @@ def resolve_model(
         aliases: user-defined ``alias → target`` map. Always tried first.
             Falsy values (None, {}) skip straight to the builtin fallback.
             Target may itself be an alias (chained up to ``max_depth``).
-        strict: if True, raise ``ValueError`` when ``name`` is unknown
-            even after builtin fallback. Default False — but a name
-            that is a bare lowercase short string without a ``-`` /
-            ``/`` / ``:`` separator AND not in any alias map is rejected
-            regardless of ``strict`` to prevent the silent-404 trap
-            (``/model opus`` storing literal ``"opus"`` and tanking on
-            the next API call).
+        strict: when True, an unresolved name that doesn't look like a
+            real model id (no ``-`` / ``/`` / ``:`` separator) raises
+            ``ValueError`` listing the built-in short names + the
+            full-id escape hatch. Used by ``swap_model`` to refuse
+            ``/model opuse`` typos at the point of swap.
+
+            When False (default), unresolved names pass through
+            unchanged — the legacy behavior. This matters for the hot
+            path in ``AgentLoop._call_provider`` (loop.py:4524) which
+            calls ``resolve_model`` once per turn against
+            ``self.config.model.model``: test stubs use ``"mock"``,
+            CI uses synthetic ids, and legitimately-unknown model ids
+            from third-party plugins must continue to pass through.
+            Strict-mode validation belongs at the WRITE site (swap_model,
+            config_store load) rather than the per-turn READ site.
         max_depth: chain-following depth cap.
 
     Returns:
         The fully-resolved canonical model id.
 
     Raises:
-        ValueError: on cyclic alias chain, depth overflow, unrecognised
-            bare-short name, or (when strict) any unknown name.
+        ValueError: on cyclic alias chain, depth overflow, empty input,
+            or (when ``strict``) an unresolved bare-short name.
     """
     if not isinstance(name, str) or not name:
         raise ValueError(f"model name must be a non-empty string (got {name!r})")
@@ -116,14 +124,15 @@ def resolve_model(
         if current in _BUILTIN_SHORT_ALIASES:
             current = _BUILTIN_SHORT_ALIASES[current]
             continue
-        # No more alias to resolve. Decide whether to accept the name as
-        # a canonical id or reject it.
+        # No more alias to resolve. In strict mode, refuse bare-short
+        # unknowns to prevent the silent-404 trap (``/model opus``
+        # storing literal ``"opus"``). In lenient mode (the default),
+        # pass through — legacy callers like loop.py:_call_provider
+        # need this for test stubs and third-party model ids.
+        if not strict:
+            return current
         if _looks_like_model_id(current):
             return current
-        if strict:
-            raise ValueError(f"unknown model alias {name!r}")
-        # Bare short name not in any alias map — the swap would silently
-        # persist garbage and produce a 404 on the next API call. Reject.
         known_short = sorted(_BUILTIN_SHORT_ALIASES.keys())
         raise ValueError(
             f"unknown model alias {name!r}; built-in short names are "

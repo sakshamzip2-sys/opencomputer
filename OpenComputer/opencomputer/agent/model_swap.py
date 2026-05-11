@@ -71,7 +71,13 @@ def swap_model(
 
     aliases = getattr(loop.config.model, "model_aliases", None) or {}
     try:
-        canonical = resolve_model(new_model, aliases)
+        # strict=True so /model opus correctly resolves to claude-opus-4-7
+        # via the builtin short-alias table AND /model opuse (typo)
+        # surfaces a clean error instead of silently persisting garbage.
+        # The lenient call site is loop.py:4524 inside _call_provider —
+        # that one must pass test stubs ("mock") and third-party model
+        # ids through unchanged, so it uses strict=False (the default).
+        canonical = resolve_model(new_model, aliases, strict=True)
     except ValueError as e:
         return (False, str(e))
     if not canonical or not isinstance(canonical, str):

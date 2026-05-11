@@ -184,7 +184,7 @@ class TestCycleAfterSwap:
         from opencomputer.agent import model_resolver as mr
         from opencomputer.agent.model_swap import swap_model
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         ok, _ = swap_model(loop=loop, runtime=runtime, new_model="b")
         assert ok is True
         # After the swap the cache anchors at "b" — Alt+M now advances
@@ -226,7 +226,7 @@ class TestCycleAfterSwap:
         from opencomputer.agent import model_resolver as mr
         from opencomputer.agent.model_swap import swap_model
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         swap_model(loop=loop, runtime=runtime, new_model="c")
         nxt = cycle_model(runtime)
         assert nxt == "a"

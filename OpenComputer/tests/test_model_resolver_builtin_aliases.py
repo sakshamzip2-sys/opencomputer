@@ -84,19 +84,38 @@ class TestUserAliasesWinOverBuiltins:
 
 
 class TestUnknownShortNamesRejected:
-    def test_bare_short_typo_raises(self) -> None:
-        """``/model opuse`` (typo) used to silently store ``"opuse"`` and
-        404 on the next API call. Now raises so the slash handler can
-        surface the error before persisting garbage."""
-        with pytest.raises(ValueError, match="unknown model alias 'opuse'"):
-            resolve_model("opuse", {})
+    """Bare-short rejection lives behind ``strict=True`` so the user-facing
+    swap path catches typos while the hot path in
+    ``AgentLoop._call_provider`` (loop.py:4524) keeps the legacy lenient
+    behavior — test stubs and third-party model ids need to pass through
+    unchanged.
+    """
 
-    def test_rejected_message_lists_known_short_names(self) -> None:
+    def test_strict_bare_short_typo_raises(self) -> None:
+        """``/model opuse`` (typo) used to silently store ``"opuse"`` and
+        404 on the next API call. swap_model now calls resolve_model
+        with strict=True so the slash handler surfaces the error
+        before persisting garbage."""
+        with pytest.raises(ValueError, match="unknown model alias 'opuse'"):
+            resolve_model("opuse", {}, strict=True)
+
+    def test_non_strict_bare_short_passes_through(self) -> None:
+        """Lenient mode (default) preserves the legacy behavior: bare
+        short names pass through unchanged. This matters because
+        loop.py:_call_provider runs resolve_model on every turn against
+        whatever's in loop.config.model.model — test stubs use ``mock``,
+        CI uses synthetic ids, and third-party plugins may register
+        unknown short names that the loop must forward to their
+        provider verbatim."""
+        assert resolve_model("mock", {}) == "mock"
+        assert resolve_model("custom-stub", {}) == "custom-stub"
+
+    def test_strict_rejected_message_lists_known_short_names(self) -> None:
         """Error message must tell the user what their options ARE,
         not just that their input was bad. UX nicety: shows the
         built-in list sorted so they can scan it."""
         with pytest.raises(ValueError) as exc_info:
-            resolve_model("opuse", {})
+            resolve_model("opuse", {}, strict=True)
         msg = str(exc_info.value)
         assert "haiku" in msg
         assert "opus" in msg
@@ -105,9 +124,10 @@ class TestUnknownShortNamesRejected:
         assert "claude-opus-4-7" in msg
 
     def test_empty_string_raises_distinctly(self) -> None:
-        """Whitespace-only / empty input is its own kind of bad. The
-        swap callsite already strips whitespace before calling, so
-        this is mostly defense for direct callers."""
+        """Whitespace-only / empty input is its own kind of bad — raised
+        BEFORE the strict-mode branch so it fires regardless of mode.
+        The swap callsite already strips whitespace before calling,
+        so this is mostly defense for direct callers."""
         with pytest.raises(ValueError, match="non-empty string"):
             resolve_model("", {})
 

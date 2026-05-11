@@ -117,7 +117,7 @@ class TestAliasResolution:
         # Stub resolve_model to return the alias-resolved value.
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: a.get(x, x))
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: a.get(x, x))
 
         ok, msg = swap_model(loop=loop, runtime=_make_runtime(), new_model="sonnet")
         assert ok is True
@@ -157,7 +157,7 @@ class TestRoutingSuffix:
         loop = _FakeLoop(provider="anthropic")
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         ok, msg = swap_model(
             loop=loop,
             runtime=_make_runtime(),
@@ -174,7 +174,7 @@ class TestRoutingSuffix:
         loop = _FakeLoop(provider="openrouter")
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         ok, msg = swap_model(
             loop=loop,
             runtime=_make_runtime(),
@@ -190,7 +190,7 @@ class TestRoutingSuffix:
         loop = _FakeLoop(provider="anthropic")
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
 
         printed: list[str] = []
 
@@ -219,7 +219,7 @@ class TestProviderRefresh:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         swap_model(loop=loop, runtime=rt, new_model="new-model")
         # Provider was queried for the new model id.
         assert loop.provider.calls == ["new-model"]
@@ -233,7 +233,7 @@ class TestProviderRefresh:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         ok, _ = swap_model(loop=loop, runtime=rt, new_model="new-model")
         # Swap still succeeded — the refresh failure is non-fatal.
         assert ok is True
@@ -251,7 +251,7 @@ class TestHookFire:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
 
         fired: list = []
         from opencomputer.hooks import engine as engine_mod
@@ -279,7 +279,7 @@ class TestHookFire:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
 
         from opencomputer.hooks import engine as engine_mod
 
@@ -360,7 +360,7 @@ class TestRuntimeActiveModelCache:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
 
         ok, _ = swap_model(loop=loop, runtime=rt, new_model="claude-opus-4-7")
         assert ok is True
@@ -374,7 +374,7 @@ class TestRuntimeActiveModelCache:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
 
         swap_model(loop=loop, runtime=rt, new_model="claude-opus-4-7")
         # Alt+M cycle anchor — without this the cycle always restarts
@@ -390,7 +390,7 @@ class TestRuntimeActiveModelCache:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: a.get(x, x))
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: a.get(x, x))
 
         swap_model(loop=loop, runtime=rt, new_model="fast")
         assert rt.custom["model_id"] == "claude-haiku-4-5-20251001"
@@ -406,7 +406,7 @@ class TestRuntimeActiveModelCache:
         rt = _make_runtime()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
 
         swap_model(
             loop=loop, runtime=rt, new_model="claude-sonnet-4-6:nitro"
@@ -482,7 +482,7 @@ class TestRuntimeActiveModelCache:
         loop = _FakeLoop()
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         # The current API contract has runtime as non-None, but the
         # cache-refresh helper must degrade gracefully so a future
         # caller mistake doesn't turn into a NoneType.custom crash.
@@ -561,7 +561,7 @@ class TestSubagentInheritsSwap:
         # Swap on the parent.
         from opencomputer.agent import model_resolver as mr
 
-        monkeypatch.setattr(mr, "resolve_model", lambda x, a: x)
+        monkeypatch.setattr(mr, "resolve_model", lambda x, a, **_kw: x)
         ok, _ = swap_model(
             loop=parent, runtime=_make_runtime(), new_model="claude-opus-4-7"
         )
