@@ -11,6 +11,7 @@ from opencomputer.cli_ui.resume_picker import (
     _clean_label,
     filter_rows,
     format_session_label,
+    format_session_preview,
     format_time_ago,
 )
 
@@ -203,3 +204,81 @@ def test_filter_rows_matches_first_user_message():
     )
     out = filter_rows([titled, untitled], "picker")
     assert out == [untitled]
+
+
+# ─── format_session_preview (Claude-Code 3-line layout helper) ────────
+
+
+def test_format_session_preview_shows_first_user_message_when_title_set():
+    """Title is rendered as line 1; preview line 2 shows the user's
+    first message so the reader knows what the named session was about.
+    """
+    row = SessionRow(
+        id="x",
+        title="OAuth integration",
+        started_at=0.0,
+        message_count=4,
+        cwd="/Users/saksham/work",
+        first_user_message="Help me set up OAuth with PKCE",
+    )
+    assert format_session_preview(row) == "Help me set up OAuth with PKCE"
+
+
+def test_format_session_preview_falls_back_to_cwd_when_no_title():
+    """When no title is set, the headline IS the first_user_message
+    (per format_session_label), so showing the same string again would
+    be a duplicate. The preview line falls through to the cwd hint so
+    line 2 is additive context, not noise."""
+    row = SessionRow(
+        id="x",
+        title="",
+        started_at=0.0,
+        message_count=1,
+        cwd="/Users/saksham/work/projAlpha",
+        first_user_message="Help me set up OAuth",
+    )
+    preview = format_session_preview(row)
+    assert "projAlpha" in preview
+    # Must NOT duplicate the headline content.
+    assert "Help me set up OAuth" != preview
+
+
+def test_format_session_preview_returns_empty_when_nothing_to_show():
+    """Empty title + empty first_user_message + empty cwd → no preview
+    text, but the picker still reserves the line slot for uniform row
+    height. Returning empty string is the signal."""
+    row = SessionRow(
+        id="x", title="", started_at=0.0, message_count=0
+    )
+    assert format_session_preview(row) == ""
+
+
+def test_format_session_preview_cleans_multiline_user_message():
+    """User pasted a multi-paragraph prompt; preview collapses to one line."""
+    row = SessionRow(
+        id="x",
+        title="big paste",
+        started_at=0.0,
+        message_count=2,
+        first_user_message="line one\n\nline two\nline three",
+    )
+    preview = format_session_preview(row)
+    assert "\n" not in preview
+    assert "line one line two line three" == preview
+
+
+def test_format_session_preview_truncates_long_cwd_from_the_left():
+    """Long cwd paths (deeply nested) keep the meaningful tail visible."""
+    long_cwd = "/Users/saksham/" + "very/deep/nested/path/" * 5 + "actual-project"
+    row = SessionRow(
+        id="x",
+        title="",
+        started_at=0.0,
+        message_count=1,
+        cwd=long_cwd,
+        first_user_message="",  # forces cwd fallback
+    )
+    preview = format_session_preview(row, max_len=40)
+    assert len(preview) <= 40
+    # Tail must be visible — the project name carries the signal.
+    assert "actual-project" in preview

@@ -163,6 +163,41 @@ def format_session_label(row: SessionRow, *, now: float | None = None) -> str:
     return f"(untitled · {row.id[:8]})"
 
 
+def format_session_preview(row: SessionRow, *, max_len: int = 80) -> str:
+    """Dim "context" line rendered beneath the headline in the 3-line picker.
+
+    Resolution:
+
+    1. If a title is set AND first_user_message exists → show the
+       message preview. The title is the *name*; the preview gives the
+       reader the *what* without expanding the row.
+    2. If the first_user_message is what's already in line 1 (because
+       no title was set), fall through to the cwd hint so line 2 is
+       additive — never a duplicate of line 1.
+    3. Otherwise show the cwd path (truncated). Helps the user
+       distinguish "default" / "OpenComputer" sessions started from
+       different working directories.
+    4. Empty string when nothing useful exists. The picker still
+       reserves the line slot so row height stays uniform.
+
+    Mirrors Claude Code's `/resume` two-line entry body (headline +
+    context). The third line is the meta strip rendered by the picker
+    itself.
+    """
+    if row.title and row.first_user_message:
+        preview = _clean_label(row.first_user_message, max_len=max_len)
+        if preview:
+            return preview
+
+    if row.cwd:
+        cwd = row.cwd
+        if len(cwd) > max_len:
+            cwd = "…" + cwd[-(max_len - 1) :]
+        return cwd
+
+    return ""
+
+
 def compute_visible_window(
     rows: list[SessionRow],
     *,
@@ -353,18 +388,18 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
         if not state["filtered"]:
             return [("", "\n"), ("class:empty", "  no sessions match\n")]
 
-        # Compute the visible window from terminal height. Each row in the
-        # picker takes 2 lines (title + meta), and there are ~7 lines of
-        # chrome (header + 4 dividers + search + footer). We reserve 9
-        # lines for chrome + leading newline, then floor-divide remaining
-        # by 2 to get the visible row count.
+        # Compute the visible window from terminal height. Each row in
+        # the picker takes 3 lines (title + preview + meta) for full
+        # Claude-Code parity, and there are ~9 lines of chrome (header +
+        # 4 dividers + search + footer + margin). Floor-divide remaining
+        # by 3 to get the visible row count.
         try:
             from prompt_toolkit.application.current import get_app
 
             term_rows = get_app().output.get_size().rows
         except Exception:  # noqa: BLE001 — picker must render even without app
             term_rows = 24  # safe default
-        visible_count = max(1, (term_rows - 9) // 2)
+        visible_count = max(1, (term_rows - 9) // 3)
 
         visible_rows, scroll_offset = compute_visible_window(
             state["filtered"],
@@ -380,6 +415,7 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
             is_confirming = is_sel and state["mode"] == "confirm-delete"
             arrow = "❯ " if is_sel else "  "
             title = format_session_label(row)
+            preview = format_session_preview(row)
             meta = (
                 f"{format_time_ago(row.started_at)}  ·  "
                 f"{row.message_count} message{'s' if row.message_count != 1 else ''}  ·  "
@@ -387,7 +423,11 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
             )
             arrow_cls = "class:row.cursor" if is_sel else "class:row.cursor.dim"
             title_cls = "class:row.title.selected" if is_sel else "class:row.title"
+            preview_cls = (
+                "class:row.preview.selected" if is_sel else "class:row.preview"
+            )
             meta_cls = "class:meta.selected" if is_sel else "class:meta"
+            # Line 1: cursor + title (bold) — or confirm-delete prompt
             out.append(("", "  "))  # left padding
             out.append((arrow_cls, arrow))
             if is_confirming:
@@ -399,7 +439,12 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
                 )
             else:
                 out.append((title_cls, f"{title}\n"))
-            out.append(("", "      "))  # meta indent
+            # Line 2: preview context (dim) — always present so row
+            # height stays uniform. Empty preview becomes a blank line.
+            out.append(("", "      "))
+            out.append((preview_cls, f"{preview}\n"))
+            # Line 3: meta strip (dimmer)
+            out.append(("", "      "))
             out.append((meta_cls, f"{meta}\n"))
 
         # Visual indicator that more rows exist below/above the window —
@@ -483,6 +528,11 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
             "row.cursor.dim": "#3a3a3a",
             "row.title": "#a8a8a8",
             "row.title.selected": "bold #61afef",
+            # Preview is the "context" line — dimmer than the title but
+            # readable. Selected row brightens to match the title's
+            # accent so the eye groups the 3 lines as one entry.
+            "row.preview": "#6c6c6c",
+            "row.preview.selected": "#a8a8a8",
             "row.confirm.delete": "bold #ff5f5f",
             "meta": "#5f5f5f",
             "meta.selected": "#9e9e9e",

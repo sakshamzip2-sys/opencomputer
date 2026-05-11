@@ -38,11 +38,87 @@ _TITLE_MODEL = "claude-haiku-4-5"
 #: is generous headroom for any tokenizer.
 _TITLE_MAX_TOKENS = 50
 
-_TITLE_PROMPT = (
-    "Generate a short, descriptive title (3-7 words) for a conversation that starts with the "
-    "following exchange. The title should capture the main topic or intent. "
-    "Return ONLY the title text, nothing else. No quotes, no punctuation at the end, no prefixes."
+_TITLE_PROMPT = """You generate session titles for a personal AI agent's conversation log.
+
+Given an excerpt of a conversation (a <user> turn and an <assistant> turn), output ONLY a 3-7 word title that names what the conversation is about. The title is a label for a list view — like a filename.
+
+STRICT RULES:
+- Output the title text alone. No quotes, no trailing period, no preamble ("Title:", "Here is", "Sure,").
+- The title describes the TOPIC, not the participants. NEVER respond as the assistant. NEVER write "I appreciate", "I'm Claude", "I cannot", "Sure", "Hello", or any first-person sentence — that is conversation content, not a title.
+- Do not include newlines or markdown.
+- If the topic is unclear or the conversation is empty/greeting-only, output exactly: Untitled.
+
+Examples:
+<user>Can you help me debug this SQL query?</user>
+<assistant>Sure, share the query.</assistant>
+Output: SQL query debugging
+
+<user>What's the weather like in Tokyo?</user>
+<assistant>I cannot check live weather.</assistant>
+Output: Weather inquiry Tokyo
+
+<user>Hi</user>
+<assistant>Hello! How can I help?</assistant>
+Output: Untitled
+
+<user>Walk me through how the OAuth flow works</user>
+<assistant>Sure, let's start with the authorization request.</assistant>
+Output: OAuth flow walkthrough"""
+
+
+#: Patterns that mean the LLM ignored the prompt and responded AS the
+#: assistant instead of generating a title. Cheap pre-cleanup gate so
+#: the bad title never reaches the DB. Compared case-insensitively
+#: against the cleaned, lowercased title.
+_BAD_TITLE_PREFIXES = (
+    "i appreciate",
+    "i'm claude",
+    "i am claude",
+    "i'm sorry",
+    "i cannot",
+    "i can't",
+    "i don't",
+    "sure,",
+    "sure!",
+    "hello!",
+    "hello,",
+    "hey there",
+    "thanks for",
+    "let me ",
+    "here is ",
+    "here's ",
+    "ok.",
+    "ok,",
+    "okay.",
+    "okay,",
+    "great!",
+    "great,",
 )
+
+
+def _looks_like_response_not_title(candidate: str) -> bool:
+    """True when ``candidate`` looks like the LLM continued the conversation
+    instead of generating a title.
+
+    Catches the failure mode where the titling LLM sees the excerpt and
+    replies AS the assistant — producing strings like
+    ``"I appreciate you testing my behavior, but I need to be direct…"``
+    that are conversation content, not titles.
+
+    Length capping is intentionally handled separately by the caller
+    (titles up to 80 chars are clamped, not rejected); this function
+    is the "is this a title at all?" gate.
+    """
+    if not candidate:
+        return True
+    lower = candidate.lower().lstrip()
+    if any(lower.startswith(p) for p in _BAD_TITLE_PREFIXES):
+        return True
+    if "\n" in candidate:
+        # Real titles are single-line. The auto-titler's confused
+        # output usually breaks lines (numbered lists, paragraphs).
+        return True
+    return False
 
 
 def _resolve_cheap_provider() -> Any:
@@ -121,18 +197,28 @@ def generate_title(
 ) -> str | None:
     """Generate a session title from the first exchange.
 
-    Returns the title string or ``None`` on failure.
+    Returns the title string or ``None`` on failure (network error,
+    LLM ignored the prompt and responded as the assistant, etc.). The
+    ``None`` return is by design — the caller (:func:`auto_title_session`)
+    treats it as "leave title empty, the picker will fall back to the
+    first user-message preview".
     """
     # Truncate long messages to keep the request small.
     user_snippet = user_message[:500] if user_message else ""
     assistant_snippet = assistant_response[:500] if assistant_response else ""
 
+    # Wrap content in XML tags so the titling LLM treats them as DATA
+    # rather than prompt continuation. The trailing "Output:" anchors
+    # the response to the title slot, matching the few-shot examples
+    # in :data:`_TITLE_PROMPT`.
+    conversation = (
+        f"<user>{user_snippet}</user>\n"
+        f"<assistant>{assistant_snippet}</assistant>\n"
+        f"Output:"
+    )
     messages = [
         {"role": "system", "content": _TITLE_PROMPT},
-        {
-            "role": "user",
-            "content": f"User: {user_snippet}\n\nAssistant: {assistant_snippet}",
-        },
+        {"role": "user", "content": conversation},
     ]
 
     try:
@@ -143,11 +229,28 @@ def generate_title(
             timeout=timeout,
         )
         title = (response.choices[0].message.content or "").strip()
-        # Clean up: remove quotes, trailing punctuation, prefixes like "Title: ".
+        # Clean up: remove quotes, trailing punctuation, prefixes.
         title = title.strip('"\'')
-        if title.lower().startswith("title:"):
-            title = title[6:].strip()
-        # Enforce reasonable length.
+        for prefix in ("Title:", "Output:", "title:", "output:"):
+            if title.startswith(prefix):
+                title = title[len(prefix) :].strip()
+        # Strip trailing period (real titles don't end with one).
+        title = title.rstrip(".")
+        # Validator: catch the "LLM responded AS the assistant" failure
+        # mode and discard. Returning None tells the caller to leave
+        # the title empty — the picker's first-user-message fallback
+        # will still give a meaningful headline.
+        if _looks_like_response_not_title(title):
+            logger.debug(
+                "Title generation rejected (looks like assistant response): %r",
+                title[:80],
+            )
+            return None
+        # "Untitled" is the explicit signal from the prompt that the
+        # topic was unclear. Treat it as no-title so the fallback fires.
+        if title.lower() == "untitled":
+            return None
+        # Enforce reasonable length cap (validator already caps at 60).
         if len(title) > 80:
             title = title[:77] + "..."
         return title if title else None
