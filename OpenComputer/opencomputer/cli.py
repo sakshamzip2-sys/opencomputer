@@ -1681,9 +1681,25 @@ def _run_chat_session(
 
     mcp_mgr = MCPManager(tool_registry=registry)
 
-    # Wire the delegate factory so the model can spawn subagents
+    # Wire the delegate factory so the model can spawn subagents.
+    #
+    # 2026-05-11 — closures bind ``loop`` (the parent AgentLoop instance)
+    # rather than the frozen-at-session-start ``cfg`` / ``provider``
+    # variables. Reason: ``/model <id>`` and ``/provider <name>`` swaps
+    # rebind ``loop.config`` and ``loop.provider`` via
+    # ``dataclasses.replace`` / direct assignment, but they do NOT update
+    # the local ``cfg`` / ``provider`` variables in this function's
+    # scope. Closing over ``cfg`` directly would mean every Delegate
+    # spawn and every ``/background`` job after a swap inherited the
+    # OLD model — the exact "hardcoded somewhere" bug Saksham hit. By
+    # reading ``loop.config`` / ``loop.provider`` at lambda call time
+    # the spawn picks up the live state.
     DelegateTool.set_factory(
-        lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+        lambda: AgentLoop(
+            provider=loop.provider,
+            config=loop.config,
+            compaction_disabled=no_compact,
+        )
     )
     DelegateTool.set_runtime(runtime)
 
@@ -1699,7 +1715,11 @@ def _run_chat_session(
 
     _bg_registry = _bg_get_default_registry()
     _bg_registry.set_factory(
-        lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+        lambda: AgentLoop(
+            provider=loop.provider,
+            config=loop.config,
+            compaction_disabled=no_compact,
+        )
     )
 
     # Push-on-completion for the CLI: print a Rich panel when a background
@@ -2683,6 +2703,16 @@ def _run_chat_session(
                 on_image_attach=_on_image_attach,
                 on_reasoning_dispatch=_on_reasoning_dispatch,
                 on_sources_dispatch=_on_sources_dispatch,
+                # Live (model, provider) getter — closes over the running
+                # AgentLoop so ``/model`` and ``/provider`` no-arg reads
+                # reflect the CURRENT state after any number of mid-session
+                # swaps. Without this the no-args display reads ``cfg`` (the
+                # frozen session-start snapshot) and drifts every swap.
+                # 2026-05-11 — fixes Saksham's "/model doesn't work" report.
+                get_active_model_info=lambda: (
+                    getattr(loop.config.model, "model", "?") or "?",
+                    getattr(loop.config.model, "provider", "?") or "?",
+                ),
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:
@@ -2957,7 +2987,15 @@ def _run_oneshot_turn(
 
     provider = _resolve_provider(cfg.model.provider)
     loop = _AgentLoop(provider=provider, config=cfg)
-    _DelegateTool.set_factory(lambda: _AgentLoop(provider=provider, config=cfg))
+    # 2026-05-11 — bind ``loop`` so post-swap state (if some future
+    # plugin / hook mutates ``loop.config`` / ``loop.provider`` mid-
+    # oneshot) propagates to delegated subagents. Even though oneshot
+    # has no interactive ``/model`` swap, defense-in-depth means every
+    # factory reads live state. Matches the chat-session pattern at
+    # cli.py:1685.
+    _DelegateTool.set_factory(
+        lambda: _AgentLoop(provider=loop.provider, config=loop.config)
+    )
 
     # Wire the social-traces subscriber so post-task distill+submit
     # fires when this profile has the plugin enabled. Mirrors the
@@ -3698,14 +3736,22 @@ def wire(
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
-    DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+    # 2026-05-11 — bind ``loop`` (not the captured ``cfg``/``provider``
+    # locals) so any mid-flight mutation to the wire server's loop
+    # (e.g. a future wire-protocol /model handler) is honored by
+    # delegated subagents. Pattern matches cli.py:1685.
+    DelegateTool.set_factory(
+        lambda: AgentLoop(provider=loop.provider, config=loop.config)
+    )
 
     # Wire /background slash factory (parity with chat path).
     from opencomputer.agent.background_jobs import (
         get_default_registry as _bg_wire_registry,
     )
 
-    _bg_wire_registry().set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+    _bg_wire_registry().set_factory(
+        lambda: AgentLoop(provider=loop.provider, config=loop.config)
+    )
 
     server = WireServer(loop=loop, host=host, port=port)
     console.print(f"[bold cyan]OpenComputer wire server[/bold cyan] — ws://{host}:{port}")
@@ -4542,6 +4588,9 @@ app.add_typer(tui_app, name="tui")
 # 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
 from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
 
+# 2026-05-11 — `oc evolution` CLI (skill-evolution + dreaming-v2 tuning).
+from opencomputer.cli_evolution import evolution_app  # noqa: E402
+
 # 2026-05-09 — v1.1 plan-3 M10.4: per-channel routing dry-run CLI.
 from opencomputer.cli_routing import routing_app  # noqa: E402
 
@@ -4553,6 +4602,8 @@ app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
 app.add_typer(rules_app, name="rules")
 app.add_typer(routing_app, name="routing")
+# 2026-05-11 — evolution loop tuning + status surface.
+app.add_typer(evolution_app, name="evolution")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(

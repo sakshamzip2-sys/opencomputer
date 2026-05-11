@@ -170,3 +170,36 @@ def test_handlers_dict_contains_provider():
 
     assert "provider" in _HANDLERS
     assert _HANDLERS["provider"] is _handle_provider
+
+
+def test_handle_provider_no_args_reads_live_getter():
+    """Regression: 2026-05-11 — ``/provider`` (no args) must read the
+    LIVE provider from ``ctx.get_active_model_info`` rather than the
+    frozen session-start ``ctx.config`` snapshot. After a successful
+    cross-provider ``/model anthropic/claude-opus-4-7`` swap the
+    displayed provider must reflect the new one."""
+    from rich.console import Console
+
+    stale_cfg = MagicMock()
+    stale_cfg.model.provider = "openai"  # old, pre-swap
+
+    captured: list[str] = []
+
+    class _Recording(Console):
+        def print(self, *args: object, **_kw: object) -> None:  # type: ignore[override]
+            captured.append(" ".join(str(a) for a in args))
+
+    ctx = SlashContext(
+        console=_Recording(),
+        session_id="t",
+        config=stale_cfg,
+        on_clear=lambda: None,
+        get_cost_summary=lambda: {"in": 0, "out": 0},
+        get_session_list=lambda: [],
+        get_active_model_info=lambda: ("claude-opus-4-7", "anthropic"),
+    )
+    _handle_provider(ctx, [])
+    assert len(captured) == 1
+    # Live getter wins — "anthropic", not the stale "openai".
+    assert "anthropic" in captured[0]
+    assert "openai" not in captured[0]

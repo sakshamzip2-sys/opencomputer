@@ -146,6 +146,18 @@ class SlashContext:
     #: time. Default ``lambda: False`` keeps callers that don't care
     #: about race-guarding agnostic.
     is_running_agent: Callable[[], bool] = lambda: False
+    #: ``(model, provider)`` getter for the live AgentLoop's active model.
+    #: The no-args branches of ``/model`` and ``/provider`` use this so
+    #: post-swap reads are FRESH — reading ``ctx.config.model`` directly
+    #: returns the frozen session-start snapshot, which drifts every
+    #: time the user runs ``/model <id>``. Production wiring in
+    #: ``cli.py::_run_chat_session`` closes over the live ``loop``:
+    #: ``lambda: (loop.config.model.model, loop.config.model.provider)``.
+    #: Default returns ``("", "")`` as a sentinel; the consuming
+    #: handler falls back to ``ctx.config`` in that case so test
+    #: fixtures that don't wire the getter still render a meaningful
+    #: value rather than literal empty strings.
+    get_active_model_info: Callable[[], tuple[str, str]] = lambda: ("", "")
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -232,10 +244,52 @@ def _handle_cost(ctx: SlashContext, args: list[str]) -> SlashResult:
 _NATIVE_VENDOR_PREFIXES = {"anthropic", "openai", "bedrock", "openrouter"}
 
 
+def _read_active_model_info(ctx: SlashContext) -> tuple[str, str]:
+    """Resolve the live ``(model, provider)`` for read-only displays.
+
+    Priority order:
+
+    1. ``ctx.get_active_model_info()`` — production wiring closes this
+       over the running AgentLoop, so every read reflects the latest
+       ``/model`` / ``/provider`` swap.
+    2. ``ctx.config.model`` — frozen session-start snapshot. Used only
+       when (1) is unwired (test fixtures, ACP one-shot contexts).
+       Returns ``"?"`` if even the config is missing.
+
+    Never raises. Adversarial getter implementations (returning
+    non-tuple, non-string, or wrong-arity values) degrade to the
+    config fallback rather than crashing the slash render.
+    """
+    try:
+        info = ctx.get_active_model_info()
+    except Exception as e:  # noqa: BLE001 — never wedge a /model render
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "get_active_model_info raised; falling back to ctx.config: %r", e
+        )
+        info = None
+    if (
+        isinstance(info, tuple)
+        and len(info) >= 2
+        and isinstance(info[0], str)
+        and isinstance(info[1], str)
+        and info[0]
+    ):
+        return (info[0], info[1])
+    # Fallback to the (potentially stale) session-start snapshot.
+    cfg = getattr(ctx, "config", None)
+    model_cfg = getattr(cfg, "model", None)
+    m_raw = getattr(model_cfg, "model", "?") if model_cfg is not None else "?"
+    p_raw = getattr(model_cfg, "provider", "?") if model_cfg is not None else "?"
+    m = m_raw if isinstance(m_raw, str) and m_raw else "?"
+    p = p_raw if isinstance(p_raw, str) and p_raw else "?"
+    return (m, p)
+
+
 def _handle_provider(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/provider [<name>]`` — show or swap the active provider (Sub-project D)."""
     if not args:
-        p = getattr(ctx.config.model, "provider", "?")
+        _, p = _read_active_model_info(ctx)
         ctx.console.print(f"[bold]active provider[/bold]  {p}")
         return SlashResult(handled=True)
     new_provider = args[0].strip()
@@ -249,8 +303,14 @@ def _handle_provider(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 def _handle_model(ctx: SlashContext, args: list[str]) -> SlashResult:
     if not args:
-        m = getattr(ctx.config.model, "model", "?")
-        p = getattr(ctx.config.model, "provider", "?")
+        # Pull FRESH (model, provider) from the live AgentLoop via the
+        # getter so post-swap reads reflect the current state. The
+        # legacy ``ctx.config.model.model`` read is captured at session
+        # start and goes stale the moment the user runs ``/model <id>``
+        # — that drift is what made ``/model`` (no args) report the OLD
+        # id after a successful swap, fueling the "swap silently fails"
+        # bug Saksham reported on 2026-05-11.
+        m, p = _read_active_model_info(ctx)
         ctx.console.print(f"[bold]active model[/bold]  {m}  ({p})")
         return SlashResult(handled=True)
     # Mid-session swap (Sub-project C of model-agnosticism plan).
@@ -841,10 +901,26 @@ def _handle_reload_mcp(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_debug(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/debug`` — print a sanitized diagnostic dump to console."""
+    """``/debug`` — print a sanitized diagnostic dump to console.
+
+    Pulls the LIVE (model, provider) via the standard getter so post-
+    ``/model`` swap dumps show the actual running state rather than the
+    on-disk YAML default. Crucial for bug reports — without this a user
+    debugging a swap issue would see the OLD model in /debug and
+    misattribute the bug to the swap silently failing.
+    """
     from opencomputer.cli_ui.debug_dump import build_debug_dump
 
-    ctx.console.print(build_debug_dump())
+    live_info = _read_active_model_info(ctx)
+    # Only forward when the getter actually returned something useful.
+    # ``_read_active_model_info`` may return ``("?", "?")`` via the
+    # fallback path when both getter AND ctx.config are unavailable;
+    # in that case the dump should use its own load_config() rather
+    # than display literal "?" rows.
+    if live_info[0] and live_info[0] != "?":
+        ctx.console.print(build_debug_dump(live_active_model_info=live_info))
+    else:
+        ctx.console.print(build_debug_dump())
     return SlashResult(handled=True)
 
 
@@ -859,15 +935,28 @@ def _handle_compress(ctx: SlashContext, args: list[str]) -> SlashResult:
         ctx.console.print(f"[yellow]{reason}[/yellow]")
         return SlashResult(handled=True)
     if before == after:
-        ctx.console.print(
-            "[dim]No compression — context not large enough or no eligible "
-            "messages to summarise yet.[/dim]"
-        )
+        # The /compress handler is "queued" semantics — compaction runs
+        # on the next user turn, so before==after is the canonical "no
+        # work done yet" reply. Surface the reason verbatim so the user
+        # sees ``queued — compaction will run on next user turn``.
+        ctx.console.print(f"[dim]{reason}[/dim]")
         return SlashResult(handled=True)
-    ctx.console.print(
-        f"[green]✓[/green] Compressed: {before} → {after} messages "
-        f"({before - after} folded into summary)."
+    # 2026-05-11 — PI-style summary card. before/after are MESSAGE
+    # counts; the /compress callback doesn't surface token data
+    # (compaction runs asynchronously on the next turn), so pass
+    # None for the tokens kwargs to omit the row rather than show a
+    # misleading "0 → 0". Plain truth: messages compacted, tokens
+    # row will appear in the auto-emit card once it ships.
+    from opencomputer.cli_ui.summary_cards import render_compaction_card
+
+    card = render_compaction_card(
+        messages_before=before,
+        messages_after=after,
+        tokens_before=None,
+        tokens_after=None,
+        reason="manual",
     )
+    ctx.console.print(card)
     return SlashResult(handled=True)
 
 
@@ -875,11 +964,25 @@ def _handle_compress(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_config(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/config`` — show key fields of the active Config."""
+    """``/config`` — show key fields of the active Config.
+
+    The ``model`` and ``provider`` rows are read via the live getter
+    (``ctx.get_active_model_info``) so they reflect any mid-session
+    ``/model`` / ``/provider`` swaps. The other rows (cheap_model,
+    max_tokens, temperature, paths) are not yet swappable mid-session
+    and stay sourced from ``ctx.config``. If you add a mid-session
+    swap for any of those, plumb it through the getter pattern too
+    or this row will drift the same way ``model`` did pre-fix
+    (2026-05-11).
+    """
     cfg = ctx.config
     lines = ["## Active config\n"]
+    # Read the live, post-swap (model, provider) tuple. Falls back to
+    # the frozen ctx.config snapshot when the getter isn't wired
+    # (test fixtures / ACP), per `_read_active_model_info` contract.
+    live_model, live_provider = _read_active_model_info(ctx)
     try:
-        lines.append(f"  model:       {cfg.model.provider} / {cfg.model.model}")
+        lines.append(f"  model:       {live_provider} / {live_model}")
         lines.append(f"  cheap model: {cfg.model.cheap_model or '(disabled)'}")
         lines.append(f"  max tokens:  {cfg.model.max_tokens}")
         lines.append(f"  temperature: {cfg.model.temperature}")
