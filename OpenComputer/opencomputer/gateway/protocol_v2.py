@@ -38,6 +38,7 @@ from opencomputer.gateway.protocol import (
     EVENT_EVOLUTION_TUNING_CHANGED,
     EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
+    EVENT_STREAM_RETRY,
     EVENT_TOOL_CALL,
     EVENT_TOOL_RESULT,
     EVENT_TURN_BEGIN,
@@ -422,6 +423,35 @@ class MemoryWritePayload(_StrictModel):
     dropped_paragraphs: int = 0  # paragraphs dropped by compaction (0 if none)
 
 
+class StreamRetryPayload(_StrictModel):
+    """Server → client event during pre-first-byte streaming retry.
+
+    Surfaces :class:`opencomputer.agent.stream_retry.RetryStatus` over
+    the wire so WS clients (TUI / IDE / dashboard) can render the same
+    transient yellow banner the CLI renderer shows
+    ("upstream overloaded — retry 2/4 in 1.3s") instead of staring at
+    a frozen spinner.
+
+    Field semantics mirror :class:`opencomputer.agent.stream_retry.RetryStatus`
+    plus a wire-only ``request_id`` so clients tracking multiple
+    concurrent turns can route the banner to the correct pane.
+
+    Fires twice in a typical recovery:
+      * once after attempt N fails (``exhausted=False``, ``delay_seconds`` > 0);
+      * if all attempts exhaust, once more (``exhausted=True``,
+        ``delay_seconds=0``) immediately before the wrapper re-raises.
+    """
+
+    request_id: str
+    attempt: int
+    next_attempt: int
+    max_attempts: int
+    delay_seconds: float
+    error_kind: str  # "overloaded" | "bad_gateway" | "timeout" | ...
+    error_message: str  # truncated str(exc), ≤ 200 chars
+    exhausted: bool
+
+
 # Map event name → payload schema.
 EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_TURN_BEGIN: TurnBeginPayload,
@@ -433,6 +463,7 @@ EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_PERMISSION_REQUEST: PermissionRequestPayload,
     EVENT_MEMORY_WRITE: MemoryWritePayload,
     EVENT_EVOLUTION_TUNING_CHANGED: EvolutionTuningChangedPayload,
+    EVENT_STREAM_RETRY: StreamRetryPayload,
 }
 
 
@@ -466,6 +497,7 @@ __all__ = [
     "EVENT_PERMISSION_REQUEST",
     "EVENT_MEMORY_WRITE",
     "EVENT_EVOLUTION_TUNING_CHANGED",
+    "EVENT_STREAM_RETRY",
     # v2 method schemas
     "HelloParams",
     "HelloResult",
@@ -498,5 +530,6 @@ __all__ = [
     "ErrorPayload",
     "MemoryWritePayload",
     "EvolutionTuningChangedPayload",
+    "StreamRetryPayload",
     "EVENT_SCHEMAS",
 ]

@@ -35,6 +35,7 @@ from opencomputer.gateway.protocol import (
     EVENT_EVOLUTION_TUNING_CHANGED,
     EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
+    EVENT_STREAM_RETRY,
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
@@ -327,6 +328,7 @@ class WireServer:
                         EVENT_PERMISSION_REQUEST,
                         EVENT_MEMORY_WRITE,
                         EVENT_EVOLUTION_TUNING_CHANGED,
+                        EVENT_STREAM_RETRY,
                     ],
                     "gap_warning": gap_warning,
                     "server_last_event_seq": server_last_seq,
@@ -590,12 +592,47 @@ class WireServer:
 
         from plugin_sdk.profile_context import set_profile
 
+        # 2026-05-11 — surface pre-first-byte retry status to WS clients.
+        # Mirrors the CLI renderer's yellow retry panel: TUI / IDE /
+        # dashboard clients see a real-time "retry 2/4 in 1.3s" banner
+        # during the recovery window instead of a frozen spinner. The
+        # AgentLoop wrapper retries regardless of whether a callback is
+        # provided; this just makes the recovery visible.
+        async def _emit_retry(status):
+            try:
+                await self._send_event(
+                    ws,
+                    EVENT_STREAM_RETRY,
+                    {
+                        "request_id": req.id,
+                        "attempt": status.attempt,
+                        "next_attempt": status.next_attempt,
+                        "max_attempts": status.max_attempts,
+                        "delay_seconds": status.delay_seconds,
+                        "error_kind": status.error_kind,
+                        "error_message": status.error_message,
+                        "exhausted": status.exhausted,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — UI bridge mustn't wedge retry
+                pass
+
+        def _on_retry_status(status):
+            # Sync callback (per the stream_retry contract) hops to the
+            # event loop. Bare ``create_task`` is fine — we're already
+            # inside the WS loop here.
+            try:
+                asyncio.create_task(_emit_retry(status))
+            except Exception:  # noqa: BLE001 — fail-open: retry continues
+                pass
+
         try:
             with set_profile(profile_home):
                 result = await loop.run_conversation(
                     user_message=user_message,
                     session_id=session_id,
                     stream_callback=lambda t: asyncio.create_task(_on_chunk(t)),
+                    retry_callback=_on_retry_status,
                 )
         except Exception as e:  # noqa: BLE001
             await self._send_event(

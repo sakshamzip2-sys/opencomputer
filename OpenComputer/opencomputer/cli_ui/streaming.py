@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from opencomputer.cli_ui.reasoning_store import ReasoningStore
     from opencomputer.cli_ui.sources import _HitLike
 
+from opencomputer.agent.stream_retry import RetryStatus
 from opencomputer.cli_ui.reasoning_store import ToolAction
 from opencomputer.cli_ui.sources import (
     SourcesRegistry,
@@ -228,6 +229,14 @@ class StreamingRenderer:
         # prose rewrite pass in finalize. Renders as the Sources block
         # between markdown body and footer when non-empty.
         self._sources = SourcesRegistry()
+        # 2026-05-11 — pre-first-byte retry status surface (driven by
+        # opencomputer.agent.stream_retry via the retry_callback chain).
+        # When non-None, a transient line renders just above the spinner
+        # like "Anthropic overloaded — retry 2/4 in 1.3s". Cleared when
+        # the next attempt starts emitting tokens (on_chunk /
+        # on_thinking_chunk) or at finalize.
+        self._retry_status: RetryStatus | None = None
+        self._retry_status_started_at: float = 0.0
 
     # ─── lifecycle ────────────────────────────────────────────────
 
@@ -281,6 +290,11 @@ class StreamingRenderer:
         if not self._stream_started:
             self._stream_started = True
             self._header_shown = True
+        # First real content from the (possibly retried) attempt — clear
+        # any lingering pre-first-byte retry status so the panel doesn't
+        # stick around once we're successfully streaming.
+        if self._retry_status is not None:
+            self._retry_status = None
         self._buffer.append(text)
         self._refresh()
 
@@ -296,8 +310,34 @@ class StreamingRenderer:
             return
         if not self._thinking_buffer:
             self._thinking_started_at = time.monotonic()
+        # Thinking deltas count as "the attempt is now producing output";
+        # clear the pre-first-byte retry status now that we're past it.
+        if self._retry_status is not None:
+            self._retry_status = None
         self._thinking_buffer.append(text)
         self._refresh()
+
+    def on_retry_status(self, status: RetryStatus) -> None:
+        """Display a transient pre-first-byte retry banner.
+
+        Called by :func:`opencomputer.agent.stream_retry.stream_with_retry`
+        between attempts (and on exhaustion) so the user can see *why*
+        the response is delayed instead of staring at a frozen spinner.
+
+        Best-effort: any rendering error logs at DEBUG and the agent
+        loop continues — the retry happens regardless of whether the UI
+        managed to display this notice.
+        """
+        try:
+            self._retry_status = status
+            self._retry_status_started_at = time.monotonic()
+            self._refresh()
+        except Exception as exc:  # noqa: BLE001 — UI bridge mustn't wedge retry
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "on_retry_status failed: %s", exc
+            )
 
     def on_tool_start(
         self,
@@ -481,6 +521,10 @@ class StreamingRenderer:
         summary line for tool-driven exchanges (e.g. weather query →
         WebFetch → "Reported NYC weather").
         """
+        # Clear any lingering pre-first-byte retry status so it doesn't
+        # leak into the post-turn summary. Whether the retry succeeded
+        # or exhausted, the banner has done its job by now.
+        self._retry_status = None
         # ─── Decide what this turn contained ──────────────────────────
         thinking_str = (reasoning or "").strip()
         has_thinking = bool(thinking_str)
@@ -820,6 +864,13 @@ class StreamingRenderer:
                 Spinner("dots", text=Text(spinner_label, style="dim"))
             )
 
+        # 2026-05-11 — pre-first-byte retry banner. Renders just below
+        # the spinner so the eye doesn't have to jump; cleared when the
+        # next attempt successfully streams (on_chunk /
+        # on_thinking_chunk) or at finalize.
+        if self._retry_status is not None:
+            renderables.append(_render_retry_panel(self._retry_status))
+
         # Tool-status panel below the stream — only when at least one
         # tool has started this turn.
         if self._tool_calls:
@@ -888,6 +939,61 @@ def _render_tool_row(row: _ToolCallRow) -> Text:
     line.append(row.args_preview, style="white")
     line.append(f"  {timing}", style="dim")
     return line
+
+
+_RETRY_KIND_HUMAN: dict[str, str] = {
+    "overloaded": "upstream overloaded",
+    "service_unavailable": "service unavailable",
+    "bad_gateway": "bad gateway",
+    "gateway_timeout": "gateway timeout",
+    "internal_error": "upstream 500",
+    "connection": "connection failure",
+    "timeout": "timeout",
+    "tls": "TLS error",
+    "transient": "transient error",
+}
+
+
+def _render_retry_panel(status: RetryStatus) -> Panel:
+    """Compact yellow-bordered panel showing pre-first-byte retry state.
+
+    Renders one of:
+
+    * ``upstream overloaded — retry 2/4 in 1.3s``
+    * ``upstream overloaded — exhausted after 4 attempts``
+
+    Bordered with the active skin's ``response_border`` color when
+    available so different terminal skins keep the visual tone
+    consistent.
+    """
+    label = _RETRY_KIND_HUMAN.get(status.error_kind, status.error_kind)
+    if status.exhausted:
+        body = Text(
+            f"{label} — exhausted after {status.max_attempts} attempt"
+            f"{'s' if status.max_attempts != 1 else ''}",
+            style="yellow",
+        )
+        title_text = "retry exhausted"
+    else:
+        body = Text()
+        body.append(label, style="yellow")
+        body.append(" — retry ", style="dim")
+        body.append(
+            f"{status.next_attempt}/{status.max_attempts}",
+            style="bold yellow",
+        )
+        body.append(" in ", style="dim")
+        body.append(f"{status.delay_seconds:.1f}s", style="bold yellow")
+        title_text = "retry"
+    if status.error_message:
+        body.append("\n", style="dim")
+        body.append(status.error_message, style="dim")
+    return Panel(
+        body,
+        title=Text(title_text, style="dim yellow"),
+        border_style=_skin_color("response_border", "yellow"),
+        padding=(0, 1),
+    )
 
 
 __all__ = [

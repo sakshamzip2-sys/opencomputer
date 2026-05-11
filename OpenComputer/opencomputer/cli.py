@@ -1986,6 +1986,7 @@ def _run_chat_session(
                 thinking_callback=_build_thinking_callback(
                     renderer.on_thinking_chunk
                 ),
+                retry_callback=renderer.on_retry_status,
                 images=images,
             )
             elapsed = _time.monotonic() - t_start
@@ -2031,12 +2032,35 @@ def _run_chat_session(
             if text:
                 thinking_chunks.append(text)
 
+        # Plain-mode retry notice: one stderr line per retry attempt so
+        # piped sessions still know why a request is taking longer than
+        # usual. Stays on stderr so stdout-piping (e.g. `oc chat |
+        # grep`) is unaffected.
+        def _plain_retry_status(status):
+            import sys
+            try:
+                if status.exhausted:
+                    sys.stderr.write(
+                        f"[retry] {status.error_kind} — exhausted after "
+                        f"{status.max_attempts} attempts\n"
+                    )
+                else:
+                    sys.stderr.write(
+                        f"[retry] {status.error_kind} — attempt "
+                        f"{status.next_attempt}/{status.max_attempts} "
+                        f"in {status.delay_seconds:.1f}s\n"
+                    )
+                sys.stderr.flush()
+            except Exception:  # noqa: BLE001 — never wedge the agent on stderr
+                pass
+
         result = await loop.run_conversation(
             user_message=user_input,
             session_id=session_id,
             runtime=runtime,
             stream_callback=on_chunk,
             thinking_callback=_capture_thinking,
+            retry_callback=_plain_retry_status,
             images=images,
         )
         # Tier 2.B — terminal bell on turn complete (if /bell on).

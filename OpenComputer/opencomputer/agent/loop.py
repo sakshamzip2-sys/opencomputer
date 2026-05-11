@@ -1128,6 +1128,7 @@ class AgentLoop:
         system_prompt_override: str | None = None,
         initial_messages: list[Message] | None = None,
         images: list[str] | None = None,
+        retry_callback=None,
     ) -> ConversationResult:
         """Run the agent loop until the model stops calling tools.
 
@@ -2447,6 +2448,7 @@ class AgentLoop:
                     injected_system=injected_volatile,
                     stream_callback=stream_callback,
                     thinking_callback=thinking_callback,
+                    retry_callback=retry_callback,
                     model=model_for_turn,
                     session_id=sid,
                 )
@@ -2499,6 +2501,7 @@ class AgentLoop:
                                 injected_system=injected,
                                 stream_callback=stream_callback,
                                 thinking_callback=thinking_callback,
+                                retry_callback=retry_callback,
                                 model=model_for_turn,
                                 session_id=sid,
                             )
@@ -2530,6 +2533,7 @@ class AgentLoop:
                             injected_system=injected,
                             stream_callback=stream_callback,
                             thinking_callback=thinking_callback,
+                            retry_callback=retry_callback,
                             model=model_for_turn,
                             session_id=sid,
                         )
@@ -2559,6 +2563,7 @@ class AgentLoop:
                                 injected_system=injected,
                                 stream_callback=stream_callback,
                                 thinking_callback=thinking_callback,
+                                retry_callback=retry_callback,
                                 model=model_for_turn,
                                 session_id=sid,
                                 max_tokens_override=lifted_mt,
@@ -2650,6 +2655,25 @@ class AgentLoop:
                     self._runtime.custom["session_tokens_out"] = (
                         int(_cur_out) if isinstance(_cur_out, int) else 0
                     ) + int(step.output_tokens or 0)
+                    # 2026-05-11: bridge per-turn input size + effective
+                    # compaction threshold onto ``runtime.custom`` for the
+                    # TUI status-line bar and the ``/context`` slash
+                    # command. Without this write the bar silently falls
+                    # back to cumulative ``session_tokens_in`` (a ~10x
+                    # inflation after ~10 turns) and ``/context`` displays
+                    # a hand-typed trigger constant that drifted 18
+                    # percentage points from the engine's actual default.
+                    self._runtime.custom["last_input_tokens"] = max(
+                        int(step.input_tokens or 0), 0
+                    )
+                    _engine_config = getattr(self.compaction, "config", None)
+                    _ratio = getattr(_engine_config, "threshold_ratio", None)
+                    if isinstance(_ratio, (int, float)) and not isinstance(
+                        _ratio, bool
+                    ):
+                        self._runtime.custom["compaction_threshold_ratio"] = (
+                            float(_ratio)
+                        )
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -2951,6 +2975,7 @@ class AgentLoop:
                             thinking_callback=thinking_callback,
                             tool_callback=tool_callback,
                             system_prompt_override=system_prompt_override,
+                            retry_callback=retry_callback,
                         )
                     self.db.end_session(sid)
                     # M4.4: clear any active skill tool filter on END_TURN so
@@ -4468,6 +4493,7 @@ class AgentLoop:
         injected_system: str = "",
         stream_callback=None,
         thinking_callback=None,
+        retry_callback=None,
         model: str | None = None,
         session_id: str = "",
         max_tokens_override: int | None = None,
@@ -4611,54 +4637,91 @@ class AgentLoop:
                 injected_system=injected_system,
                 session_id=session_id,
             )
-            stream_source = self.provider.stream_complete(
-                model=model_name,
-                messages=wire_messages,
-                system=system,
-                tools=tool_schemas,
-                max_tokens=max_tokens_override or self.config.model.max_tokens,
-                temperature=self.config.model.temperature,
-                **_split_kwargs,
-                **_extra_kwargs,
-            )
-            # Phase B (model-agnostic thinking): when the provider does
-            # NOT have native thinking for this model AND the user has
-            # effort > "none", wrap the stream so <think>...</think>
-            # tags emitted by the model in plain text deltas are
-            # transparently extracted and re-emitted as thinking_delta
-            # events. The matching system-prompt instruction is added
-            # by ThinkingInjector. Native-thinking providers skip this
-            # wrap entirely and use their existing thinking_delta path.
-            #
-            # Read flags directly from self._runtime.custom — they're
-            # internal plumbing, not something the provider needs to
-            # know about (so they're not in runtime_flags_from_custom's
-            # allowlist).
+            # Read once outside the factory so each retry uses identical
+            # routing; these flags don't change between attempts.
             _eff = str(_runtime_extras.get("reasoning_effort") or "medium").lower()
             _native = bool(
                 self._runtime.custom.get(
                     "_provider_supports_native_thinking", False
                 )
             )
-            if _eff != "none" and not _native:
-                from opencomputer.agent.thinking_parser import ThinkingTagsParser
-                stream_source = ThinkingTagsParser().wrap(stream_source)
-            # Wave 3 (2026-05-08) — wrap with the streaming-stall watchdog
-            # when the provider opts in via stale_timeout_seconds. Catches
-            # LLM-side hangs on alive HTTP connections (common on local
-            # model servers under memory pressure). The wrap is a no-op
-            # pass-through when stale_timeout_seconds is None.
             _stale_timeout = getattr(self.provider, "stale_timeout_seconds", None)
-            # Strict numeric check — test stubs that return MagicMock for
-            # arbitrary attribute access would otherwise tank here when
-            # asyncio.wait_for tries to compare MagicMock to int.
-            if isinstance(_stale_timeout, (int, float)) and _stale_timeout > 0:
-                from opencomputer.agent.stream_watchdog import stream_with_watchdog
-                stream_source = stream_with_watchdog(
-                    stream_source,
-                    stale_timeout_seconds=float(_stale_timeout),
-                    provider_name=getattr(self.provider, "name", "?"),
+
+            def _build_stream():
+                """Construct + wrap a fresh provider stream for one attempt.
+
+                Each invocation rebuilds the whole pipeline so retried
+                attempts get clean ThinkingTagsParser state and a fresh
+                stream_watchdog timer.  See
+                :mod:`opencomputer.agent.stream_retry` for the retry
+                wrapper that drives this factory.
+                """
+                src = self.provider.stream_complete(
+                    model=model_name,
+                    messages=wire_messages,
+                    system=system,
+                    tools=tool_schemas,
+                    max_tokens=max_tokens_override or self.config.model.max_tokens,
+                    temperature=self.config.model.temperature,
+                    **_split_kwargs,
+                    **_extra_kwargs,
                 )
+                # Phase B (model-agnostic thinking): when the provider
+                # does NOT have native thinking for this model AND the
+                # user has effort > "none", wrap the stream so
+                # <think>...</think> tags emitted by the model in plain
+                # text deltas are transparently extracted and re-emitted
+                # as thinking_delta events. Native-thinking providers
+                # skip this wrap and use their existing thinking_delta
+                # path.
+                if _eff != "none" and not _native:
+                    from opencomputer.agent.thinking_parser import ThinkingTagsParser
+                    src = ThinkingTagsParser().wrap(src)
+                # Wave 3 (2026-05-08) — wrap with the streaming-stall
+                # watchdog when the provider opts in via
+                # stale_timeout_seconds. Catches LLM-side hangs on
+                # alive HTTP connections. No-op pass-through when
+                # stale_timeout_seconds is None.
+                #
+                # Strict numeric check — test stubs returning MagicMock
+                # for arbitrary attribute access would otherwise tank
+                # here when asyncio.wait_for tries to compare it to int.
+                if isinstance(_stale_timeout, (int, float)) and _stale_timeout > 0:
+                    from opencomputer.agent.stream_watchdog import (
+                        stream_with_watchdog,
+                    )
+                    src = stream_with_watchdog(
+                        src,
+                        stale_timeout_seconds=float(_stale_timeout),
+                        provider_name=getattr(self.provider, "name", "?"),
+                    )
+                return src
+
+            # 2026-05-11 — wrap the streaming pipeline in the
+            # pre-first-byte retry shell. Anthropic 529 / 5xx upstream
+            # / connection blips that fail before the SSE stream opens
+            # are replayed transparently per
+            # :data:`opencomputer.agent.stream_retry.DEFAULT_POLICY`.
+            # Once any event has been forwarded to the caller the
+            # wrapper commits to that attempt — mid-stream failures
+            # propagate untouched (replay would duplicate output).
+            #
+            # We dereference ``DEFAULT_POLICY`` via the module each turn
+            # rather than binding it at import time so tests can
+            # monkey-patch the module attribute without re-importing
+            # this file.
+            #
+            # The retry callback forwards :class:`RetryStatus` events
+            # to whatever the run_conversation caller threaded in
+            # (CLI: StreamingRenderer.on_retry_status; daemon
+            # callers: typically None).
+            from opencomputer.agent import stream_retry as _stream_retry_mod
+
+            stream_source = _stream_retry_mod.stream_with_retry(
+                _build_stream,
+                policy=_stream_retry_mod.DEFAULT_POLICY,
+                retry_callback=retry_callback,
+            )
             # Phase 5 (2026-05-07) — partial-message recovery wiring (A4).
             # Accumulate the streamed text as it arrives so we can attempt
             # recovery if the stream is interrupted (network drop, gateway

@@ -104,6 +104,16 @@ EVENT_MEMORY_WRITE = "memory.write"
 # to all clients (the tuning state is per-process, not per-session).
 EVENT_EVOLUTION_TUNING_CHANGED = "evolution.tuning_changed"
 
+# 2026-05-11 — pre-first-byte transient-retry surface for streaming
+# turns. Mirrors the CLI renderer's yellow retry panel for any WS
+# client (TUI, IDE, dashboard). Keyed to the active turn's request_id
+# so a client tracking multiple sessions can route the toast to the
+# correct pane. Fires between attempts (exhausted=False) and on the
+# final attempt's failure (exhausted=True). Replay is per-session via
+# the existing _session_rings, so a brief disconnect doesn't drop the
+# status update.
+EVENT_STREAM_RETRY = "stream.retry"
+
 # Initial-state RPC companion to EVENT_EVOLUTION_TUNING_CHANGED — lets a
 # freshly-connecting client fetch the current tuning without waiting
 # for the next change event. Same shape as the broadcast payload.
@@ -134,4 +144,5 @@ __all__ = [
     "EVENT_PERMISSION_REQUEST",
     "EVENT_MEMORY_WRITE",
     "EVENT_EVOLUTION_TUNING_CHANGED",
+    "EVENT_STREAM_RETRY",
 ]
