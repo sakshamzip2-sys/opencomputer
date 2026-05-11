@@ -15,6 +15,7 @@ pass `site` when calling the provider but do not call record_llm_call themselves
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -22,6 +23,8 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+
+from opencomputer.observability.trace import get_trace_id
 
 LOG_ROTATE_MB = 100
 MAX_BAK_FILES = 5
@@ -68,6 +71,12 @@ class LLMCallEvent:
     # the JSONL log compact for the cost-only consumers.
     input_preview: str | None = None
     output_preview: str | None = None
+    # Per-turn trace correlation id. Auto-populated from the
+    # ``opencomputer.observability.trace`` contextvar when the
+    # caller doesn't supply one explicitly. ``None`` only when no
+    # turn-scope context is active (e.g. eval harness scoring a
+    # one-off completion outside an AgentLoop turn).
+    trace_id: str | None = None
 
 
 def _profile_home() -> Path:
@@ -105,7 +114,21 @@ def _maybe_rotate(path: Path) -> None:
 
 
 def record_llm_call(event: LLMCallEvent) -> None:
-    """Append one event to the JSONL log + fan out to subscribers."""
+    """Append one event to the JSONL log + fan out to subscribers.
+
+    Auto-fills ``trace_id`` from the
+    :mod:`opencomputer.observability.trace` contextvar when the caller
+    did not set one explicitly. This is the default path for providers
+    that don't yet know about per-turn trace correlation — they keep
+    constructing ``LLMCallEvent`` the legacy way and the sink rebinds
+    the missing field. Callers that pass an explicit non-None
+    ``trace_id`` are honoured verbatim.
+    """
+    if event.trace_id is None:
+        ambient = get_trace_id()
+        if ambient is not None:
+            event = dataclasses.replace(event, trace_id=ambient)
+
     path = _log_path()
     _maybe_rotate(path)
     with path.open("a") as f:

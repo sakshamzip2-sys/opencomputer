@@ -4602,8 +4602,11 @@ app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
 app.add_typer(rules_app, name="rules")
 app.add_typer(routing_app, name="routing")
-# 2026-05-11 — evolution loop tuning + status surface.
-app.add_typer(evolution_app, name="evolution")
+# 2026-05-11 — closed-loop threshold tuning surface. Distinct from the
+# existing ``oc evolution`` namespace (PR-1 trajectory/prompts/skills,
+# added in abbc1913) — this one specifically tunes skill-evolution +
+# dreaming-v2 thresholds based on the rolling user-decision window.
+app.add_typer(evolution_app, name="evolution-tuning")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(

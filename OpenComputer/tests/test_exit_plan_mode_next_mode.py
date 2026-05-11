@@ -219,6 +219,16 @@ class TestLoopApplyExitPlanProposal:
         class _Stub:
             _runtime = _replace(DEFAULT_RUNTIME_CONTEXT, plan_mode=True)
 
+            # ``_maybe_apply_exit_plan_proposal`` now calls
+            # ``self._maybe_auto_name_from_plan(proposal.plan)`` after a
+            # successful mode mutation (Phase F — "name session from plan
+            # content on accept"). The stub no-ops it so the test's
+            # narrow contract (runtime mutation) isn't blocked by an
+            # AttributeError. Lifted from the production helper's
+            # signature: takes a plan string, returns None.
+            def _maybe_auto_name_from_plan(self, plan_text: str) -> None:  # noqa: ARG002
+                return None
+
         from opencomputer.agent.loop import AgentLoop
 
         # Bind the helper to a stub instance — Python's bound-method

@@ -32,11 +32,13 @@ from opencomputer.agent.steer import default_registry as _steer_registry
 from opencomputer.gateway.protocol import (
     EVENT_ASSISTANT_MESSAGE,
     EVENT_ERROR,
+    EVENT_EVOLUTION_TUNING_CHANGED,
     EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
     METHOD_PERMISSION_RESPONSE,
@@ -145,6 +147,10 @@ class WireServer:
         # Subscription handle so ``stop()`` can cleanly unsubscribe and
         # avoid leaking subscribers across test/server lifecycles.
         self._memory_write_subscription: Any | None = None
+        # 2026-05-11 — evolution-tuning bus → wire bridge. Same pattern
+        # as memory_write_subscription; unsubscribed on stop() to avoid
+        # leaks across test/server lifecycles.
+        self._evolution_tuning_subscription: Any | None = None
 
     async def start(self) -> None:
         self._server = await websockets.serve(
@@ -168,6 +174,21 @@ class WireServer:
                 "wire: failed to subscribe to default_bus for memory.write; "
                 "TUI memory panel will not receive events"
             )
+
+        # 2026-05-11 — evolution-tuning bus → wire bridge.
+        try:
+            from opencomputer.ingestion.bus import default_bus as _bus_evo
+
+            self._evolution_tuning_subscription = _bus_evo.subscribe(
+                "evolution_tuning_changed",
+                self._on_evolution_tuning_bus_event,
+            )
+        except Exception:
+            logger.exception(
+                "wire: failed to subscribe to default_bus for "
+                "evolution.tuning_changed; dashboards won't receive tuning events"
+            )
+
         logger.info("wire: listening on ws://%s:%s", self.host, self.port)
 
     async def stop(self) -> None:
@@ -179,6 +200,14 @@ class WireServer:
             except Exception:
                 logger.exception("wire: memory_write unsubscribe failed (ignored)")
             self._memory_write_subscription = None
+        if self._evolution_tuning_subscription is not None:
+            try:
+                self._evolution_tuning_subscription.unsubscribe()
+            except Exception:
+                logger.exception(
+                    "wire: evolution_tuning unsubscribe failed (ignored)"
+                )
+            self._evolution_tuning_subscription = None
         self._loop_ref = None
         if self._server is not None:
             self._server.close()
@@ -288,6 +317,7 @@ class WireServer:
                         METHOD_SLASH_DISPATCH,
                         METHOD_PERMISSION_RESPONSE,
                         METHOD_MEMORY_STATUS,
+                        METHOD_EVOLUTION_STATUS,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -296,6 +326,7 @@ class WireServer:
                         EVENT_ERROR,
                         EVENT_PERMISSION_REQUEST,
                         EVENT_MEMORY_WRITE,
+                        EVENT_EVOLUTION_TUNING_CHANGED,
                     ],
                     "gap_warning": gap_warning,
                     "server_last_event_seq": server_last_seq,
@@ -499,6 +530,21 @@ class WireServer:
                 await self._send_response(
                     ws, req.id, False, error=f"memory.status: {exc}"
                 )
+        elif req.method == METHOD_EVOLUTION_STATUS:
+            # 2026-05-11 — self-evolution status snapshot. Initial-state
+            # RPC companion to EVENT_EVOLUTION_TUNING_CHANGED so a
+            # freshly-connecting client can render the tuning panel
+            # without waiting for the next change event.
+            try:
+                payload = self._collect_evolution_status()
+                await self._send_response(
+                    ws, req.id, True, payload=payload
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("evolution.status: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"evolution.status: {exc}"
+                )
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -668,6 +714,113 @@ class WireServer:
             logger.debug("wire bridge: loop closed before memory.write broadcast")
         except Exception:  # noqa: BLE001 — must not break the publisher
             logger.exception("wire bridge: failed to forward memory.write event")
+
+    # ─── 2026-05-11 bus→wire bridge (evolution.tuning_changed) ─────
+
+    def _on_evolution_tuning_bus_event(self, event: Any) -> None:
+        """Sync bus handler — schedule an evolution-tuning broadcast.
+
+        Same shape as :meth:`_on_memory_write_bus_event`: builds a
+        typed payload on the publisher thread, hops onto the
+        wire-server loop via ``run_coroutine_threadsafe`` for
+        per-client fanout. Per-client send errors are swallowed by
+        ``_broadcast_global`` so a stale ws never blocks a tuning
+        update from reaching others.
+
+        Failure-isolated: any exception is logged but never propagates
+        to the publisher — a wedged dashboard must not break the
+        orchestrator's tune path.
+        """
+        loop = self._loop_ref
+        if loop is None or loop.is_closed():
+            return
+        try:
+            payload = {
+                "confidence_threshold": int(
+                    getattr(event, "confidence_threshold", 70) or 0
+                ),
+                "dreaming_v2_score_threshold": float(
+                    getattr(event, "dreaming_v2_score_threshold", 0.65) or 0.0
+                ),
+                "dreaming_v2_min_recall": int(
+                    getattr(event, "dreaming_v2_min_recall", 2) or 0
+                ),
+                "decisions_observed": int(
+                    getattr(event, "decisions_observed", 0) or 0
+                ),
+                "changed": bool(getattr(event, "changed", False)),
+            }
+            if os.environ.get("OPENCOMPUTER_WIRE_DEBUG_EVENTS") == "1":
+                logger.debug(
+                    "wire bridge: broadcasting evolution.tuning_changed "
+                    "confidence=%d changed=%s clients=%d",
+                    payload["confidence_threshold"],
+                    payload["changed"],
+                    len(self._session_clients_all),
+                )
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_global(
+                    EVENT_EVOLUTION_TUNING_CHANGED, payload
+                ),
+                loop,
+            )
+        except RuntimeError:
+            logger.debug(
+                "wire bridge: loop closed before evolution.tuning_changed broadcast"
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "wire bridge: failed to forward evolution.tuning_changed event"
+            )
+
+    @staticmethod
+    def _collect_evolution_status() -> dict[str, Any]:
+        """Build the :data:`METHOD_EVOLUTION_STATUS` payload.
+
+        Reads the persisted ``evolution_tuning.json`` for the active
+        profile and returns the tuning state. Per-component
+        failure-isolated — missing dependency / missing file → returns
+        defaults, never raises out.
+        """
+        try:
+            from opencomputer.agent.config import _home
+            from opencomputer.agent.evolution_orchestrator import (
+                DEFAULT_TUNING,
+                load_tuning,
+            )
+
+            tuning = load_tuning(_home())
+            return {
+                "confidence_threshold": tuning.confidence_threshold,
+                "dreaming_v2_score_threshold": tuning.dreaming_v2_score_threshold,
+                "dreaming_v2_min_recall": tuning.dreaming_v2_min_recall,
+                "decisions_observed": tuning.decisions_observed,
+                "last_recompute_ts": tuning.last_recompute_ts,
+                "schema_version": tuning.schema_version,
+                "defaults": {
+                    "confidence_threshold": DEFAULT_TUNING.confidence_threshold,
+                    "dreaming_v2_score_threshold": DEFAULT_TUNING.dreaming_v2_score_threshold,
+                    "dreaming_v2_min_recall": DEFAULT_TUNING.dreaming_v2_min_recall,
+                },
+            }
+        except Exception:  # noqa: BLE001 — collector never raises
+            logger.warning(
+                "evolution.status: collector failed; returning defaults",
+                exc_info=True,
+            )
+            return {
+                "confidence_threshold": 70,
+                "dreaming_v2_score_threshold": 0.65,
+                "dreaming_v2_min_recall": 2,
+                "decisions_observed": 0,
+                "last_recompute_ts": 0.0,
+                "schema_version": 0,
+                "defaults": {
+                    "confidence_threshold": 70,
+                    "dreaming_v2_score_threshold": 0.65,
+                    "dreaming_v2_min_recall": 2,
+                },
+            }
 
     async def _broadcast_global(
         self, event_name: str, payload: dict[str, Any]

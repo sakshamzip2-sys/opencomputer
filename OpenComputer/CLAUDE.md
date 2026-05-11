@@ -375,6 +375,31 @@ dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Su
 
 ---
 
+### 4.4 Self-evolution closed loop (2026-05-11)
+
+**Status:** active default. Closes the four-island self-evolution gap documented in the 2026-05-11 brutal-honest review (skill-evolution machinery + dreaming v1/v2 + outcome-aware events all existed but were not connected).
+
+**What it does:**
+
+1. **Honcho `on_pre_compress`** — the prior TODO stub is replaced with a real `/v1/context-full` GET (2-attempt retry on 5xx / network). Returns a pinned `## Honcho user-model facts` block injected before compaction so peer-card content survives the summariser.
+2. **Honcho turn-completed handler** — the prior log-only stub is replaced with `conclude(observation_mode=inferred)` POST (2-attempt retry on 5xx / network). Every turn's signals land in Honcho's user-model as an inferred behavioral observation. Non-JSON-serializable signal values are repr-coerced before render.
+3. **Per-turn trace id** — `opencomputer.observability.trace` exposes a contextvar (`new_trace_id / set_trace_id / get_trace_id / reset_trace_id / trace_scope`). `AgentLoop.run_conversation` opens a scope at turn entry; `record_llm_call` auto-fills `LLMCallEvent.trace_id` from the contextvar when the caller doesn't supply one explicitly.
+4. **Langfuse parent span per turn** — `extensions.langfuse.plugin.open_turn_span` is a context manager called by `run_conversation` alongside `trace_scope`. All langfuse generations + tool spans created during the turn nest under one parent span via OTel context propagation. langfuse-inert mode is a no-op.
+5. **`SkillReviewDecisionEvent`** — new typed event in `plugin_sdk.ingestion`. Emitted by `oc skills accept / reject / review` on the default bus. Decision vocabulary: `accepted | rejected | edited | deferred`.
+6. **`EvolutionOrchestrator`** — `opencomputer/agent/evolution_orchestrator.py`. Subscribes to `skill_review_decision` + `turn_completed`. Maintains a rolling window of 20 decisions. Tunes `confidence_threshold` (skill-evo Stage-2) and `dreaming_v2_score_threshold` + `dreaming_v2_min_recall` on a hysteresis schedule (accept-rate <30% tightens, >80% loosens, dead band in between, min 10 decisions). Persists to `<profile_home>/skills/evolution_tuning.json` atomically with `fcntl.flock` on POSIX.
+7. **Gateway lifecycle wiring** — `Gateway._start_evolution_orchestrator` starts the orchestrator at daemon boot, stops at shutdown. CLI-mode users hit `EvolutionOrchestrator.get_or_start_orchestrator` lazy singleton (via `oc skills accept / reject / review` event-emission path) so standalone CLI sessions ALSO drive tuning.
+8. **`oc evolution-tuning` CLI** — `status` shows current tuning + decisions observed + last recompute, `tune` forces a manual recompute, `reset --yes` clears to defaults. Aggregate-only (privacy posture mirrors `oc skills evolution status`). Named `evolution-tuning` rather than `evolution` to avoid colliding with the existing trajectory/prompts/skills `oc evolution` namespace (PR-1).
+9. **Skill-evolution subscriber** — `_run_pipeline_inner` calls `load_tuning(_home())` and uses the result as the effective `confidence_threshold`, overriding the constructor default. Fall-back to ctor default on tuning-file read failure.
+10. **Provenance carries trace_id** — `skill_extractor` captures `get_trace_id()` at extraction time and stores it in `provenance.json`. `oc skills review` reads it back when emitting the decision event so the langfuse `score_trace` callback can post a decision score against the right server-side trace.
+
+**Persisted state:** `<profile_home>/skills/evolution_tuning.json` (schema v1; additive fields permitted, breaking changes bump version → reader falls back to defaults).
+
+**Failure isolation:** every wire degrades gracefully — Honcho down → fall back to none; langfuse inert → no scoring, tuning continues; orchestrator missing → decisions still flow on bus, no tune; bus event handler exception → logged + swallowed, never re-raised into the publisher.
+
+**Spec:** the 2026-05-11 in-chat brutal-honest review and the on-the-fly /brainstorm → /audit-design → /plan → /audit-plan workflow. No standalone spec doc (work was scoped tight enough that one would have been bureaucracy).
+
+---
+
 ## 5. What's NEXT — single source of truth
 
 > **This section is the authoritative phase map.** The omnibus plan `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` drove Sub-projects A–D to completion; two older plans (`delightful-sauteeing-sutherland.md`, `phase-12-ultraplan-spec.md`) are superseded — do not use them.

@@ -650,11 +650,26 @@ async def extract_skill_from_session(
     if not _is_useful_body(body):
         return None
 
+    # 2026-05-11 — capture per-pipeline trace id when one is active so
+    # ``oc skills review`` can later post a langfuse score against the
+    # judge+extract trace that produced this proposal. Empty string when
+    # no trace scope is active (legacy callers, tests without the
+    # observability module wired). Imported from ``plugin_sdk.trace``
+    # (the public-SDK primitive) so this extension stays inside the
+    # SDK boundary (no ``from opencomputer.*`` imports).
+    try:
+        from plugin_sdk.trace import get_trace_id as _sdk_get_trace_id
+
+        trace_id_val = _sdk_get_trace_id() or ""
+    except Exception:  # noqa: BLE001 — observability is best-effort
+        trace_id_val = ""
+
     provenance = {
         "session_id": session_id,
         "generated_at": generated_at,
         "confidence_score": confidence,
         "source_summary": session_summary[:500],
+        "trace_id": trace_id_val,
     }
 
     return ProposedSkill(

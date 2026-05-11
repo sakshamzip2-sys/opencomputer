@@ -1162,6 +1162,55 @@ class AgentLoop:
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
+
+        # 2026-05-11 — per-turn observability trace scope.
+        #
+        # Set the contextvar at the top of every TOP-LEVEL ``run_conversation``
+        # call so all LLM events, hook fires, and Honcho calls fired during
+        # this turn share one correlation id. Recursive calls (line ~2896 —
+        # delegate / pause/resume) inherit the parent trace by detecting an
+        # existing id and skipping a fresh scope. The reset is paired in the
+        # outermost ``finally`` near the bottom of this method.
+        from opencomputer.observability.trace import (
+            get_trace_id as _oc_get_trace_id,
+        )
+        from opencomputer.observability.trace import (
+            new_trace_id as _oc_new_trace_id,
+        )
+        from opencomputer.observability.trace import (
+            set_trace_id as _oc_set_trace_id,
+        )
+
+        _oc_trace_token = None
+        if _oc_get_trace_id() is None:
+            _oc_trace_token = _oc_set_trace_id(_oc_new_trace_id())
+        # Stash on the instance so non-event-emitting sites (e.g. CLI
+        # surfaces that want to print the trace id for langfuse linking)
+        # can pull it without re-reading the contextvar through another
+        # await chain.
+        self._current_trace_id = _oc_get_trace_id()
+
+        # 2026-05-11 — open a langfuse parent span for the turn iff
+        # langfuse is loaded. All child generations + tool spans created
+        # during this run_conversation invocation nest under the parent
+        # via langfuse v4's OTel context propagation. When langfuse is
+        # inert (env vars unset, host unreachable, SDK missing) this is
+        # a no-op and the contextmanager yields None.
+        _oc_lf_span_cm = None
+        try:
+            from extensions.langfuse.plugin import (
+                open_turn_span as _oc_open_turn_span,
+            )
+
+            _oc_lf_span_cm = _oc_open_turn_span(
+                session_id=sid,
+                oc_trace_id=self._current_trace_id or "",
+            )
+            # Enter the CM manually; the matching __exit__ happens in
+            # the outermost finally near the bottom of this method.
+            _oc_lf_span_cm.__enter__()
+        except Exception:  # noqa: BLE001 — observability never blocks the turn
+            _oc_lf_span_cm = None
         # CC §2 — emit INSTRUCTIONS_LOADED once for each instruction
         # file contributing to this session. Idempotent (the helper
         # tracks emitted sids); safe to call on every run_conversation
@@ -2308,12 +2357,42 @@ class AgentLoop:
                         force=_force_compact,
                     )
                     if result.did_compact:
+                        # 2026-05-11 — capture message counts BEFORE we
+                        # rebind ``messages = result.messages`` so the
+                        # in-chat summary card reflects the actual
+                        # before/after delta. Token counts aren't
+                        # surfaced by CompactionResult yet — pass None
+                        # so the card omits the row honestly.
+                        msg_before_count = len(messages)
                         messages = result.messages
+                        msg_after_count = len(messages)
                         # v18 (2026-05-10): bump per-session compaction
                         # counter for /context, /usage, oc usage, oc
                         # context surfacing. Best-effort — never wedges
                         # the loop. See _record_compaction docstring.
                         self._record_compaction()
+
+                        # 2026-05-11 — pi-style in-chat summary card.
+                        # Best-effort; the streaming renderer might not
+                        # be active (gateway / wire surface), in which
+                        # case the call returns silently.
+                        try:
+                            from opencomputer.cli_ui.streaming import (
+                                current_renderer as _current_renderer,
+                            )
+
+                            renderer = _current_renderer()
+                            if renderer is not None:
+                                renderer.emit_compaction_card(
+                                    messages_before=msg_before_count,
+                                    messages_after=msg_after_count,
+                                    tokens_before=None,
+                                    tokens_after=None,
+                                    reason=getattr(result, "reason", "") or "auto",
+                                )
+                        except Exception:  # noqa: BLE001 — UI bridge never wedges turn
+                            _log.debug("compaction card emit failed", exc_info=True)
+
                         # Round 2A P-1: AFTER_COMPACTION fires only when
                         # compaction actually ran (did_compact=True). The handler
                         # sees the post-compaction message list (synthetic
@@ -2470,7 +2549,7 @@ class AgentLoop:
                     and step.assistant_message.tool_calls
                 ):
                     current_mt = self.config.model.max_tokens
-                    lifted_mt = min(current_mt * 2, 64_000)
+                    lifted_mt = min(current_mt * 2, 128_000)
                     if lifted_mt > current_mt:
                         try:
                             step = await self._run_one_step(
@@ -3272,6 +3351,30 @@ class AgentLoop:
                 duration_seconds=time.monotonic() - _session_started_at,
                 had_errors=_session_had_errors,
             )
+            # 2026-05-11 — close the langfuse parent span FIRST so its
+            # ``end()`` runs while the trace contextvar is still set
+            # (defensive; the span's own metadata already captured the
+            # id at open time, but downstream filters may read the
+            # ambient contextvar inside ``end()``). Errors swallowed.
+            if _oc_lf_span_cm is not None:
+                try:
+                    _oc_lf_span_cm.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001 — never block teardown
+                    _log.debug(
+                        "langfuse turn span __exit__ failed", exc_info=True
+                    )
+
+            # Release the per-turn trace scope. Paired with the
+            # ``_oc_set_trace_id`` call near the top of this method.
+            # Only the call that opened the scope resets it; recursive /
+            # inherited calls left ``_oc_trace_token`` as None and skip.
+            if _oc_trace_token is not None:
+                from opencomputer.observability.trace import (
+                    reset_trace_id as _oc_reset_trace_id,
+                )
+
+                _oc_reset_trace_id(_oc_trace_token)
+                self._current_trace_id = None
 
     # ─── V2.C-T5 persona auto-classifier ───────────────────────────
 
