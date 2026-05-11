@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from opencomputer.gateway.protocol import (
     EVENT_ASSISTANT_MESSAGE,
     EVENT_ERROR,
+    EVENT_EVOLUTION_TUNING_CHANGED,
     EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
     EVENT_TOOL_CALL,
@@ -42,6 +43,7 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
     METHOD_PERMISSION_RESPONSE,
@@ -284,6 +286,42 @@ class MemoryStatusResult(_StrictModel):
     entries: tuple[MemoryStatusEntry, ...]
 
 
+# 2026-05-11 — self-evolution loop status RPC.
+
+
+class EvolutionStatusDefaults(_StrictModel):
+    """Module-level defaults bundled in :class:`EvolutionStatusResult`
+    so the client can render the tuning panel as deltas from defaults
+    without re-fetching the orchestrator's constants.
+    """
+
+    confidence_threshold: int
+    dreaming_v2_score_threshold: float
+    dreaming_v2_min_recall: int
+
+
+class EvolutionStatusParams(_StrictModel):
+    """No params — single global tuning state per profile."""
+
+
+class EvolutionStatusResult(_StrictModel):
+    """Snapshot of :class:`EvolutionOrchestrator` state.
+
+    Field semantics mirror
+    :class:`opencomputer.agent.evolution_orchestrator.EvolutionTuning`
+    plus a wire-only ``defaults`` block so the client can render
+    deltas without a second RPC.
+    """
+
+    confidence_threshold: int  # 50..95
+    dreaming_v2_score_threshold: float  # 0.40..0.90
+    dreaming_v2_min_recall: int  # 1..5
+    decisions_observed: int  # cumulative; survives across processes
+    last_recompute_ts: float  # unix seconds; 0.0 when never recomputed
+    schema_version: int  # persisted-file schema version (currently 2)
+    defaults: EvolutionStatusDefaults
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -297,6 +335,7 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_SLASH_DISPATCH: (SlashDispatchParams, SlashDispatchResult),
     METHOD_PERMISSION_RESPONSE: (PermissionResponseParams, PermissionResponseResult),
     METHOD_MEMORY_STATUS: (MemoryStatusParams, MemoryStatusResult),
+    METHOD_EVOLUTION_STATUS: (EvolutionStatusParams, EvolutionStatusResult),
 }
 
 
@@ -339,6 +378,23 @@ class ErrorPayload(_StrictModel):
     detail: str = ""
 
 
+class EvolutionTuningChangedPayload(_StrictModel):
+    """Server → client event on every :class:`EvolutionOrchestrator`
+    tuning recompute.
+
+    Same fields as :class:`EvolutionStatusResult` minus the persisted
+    metadata (no schema_version, no last_recompute_ts — those are
+    initial-state RPC concerns), plus a ``changed`` boolean so the
+    client can skip rendering no-op refreshes.
+    """
+
+    confidence_threshold: int
+    dreaming_v2_score_threshold: float
+    dreaming_v2_min_recall: int
+    decisions_observed: int
+    changed: bool
+
+
 class MemoryWritePayload(_StrictModel):
     """Server → client event when the agent writes to declarative memory.
 
@@ -376,6 +432,7 @@ EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_ERROR: ErrorPayload,
     EVENT_PERMISSION_REQUEST: PermissionRequestPayload,
     EVENT_MEMORY_WRITE: MemoryWritePayload,
+    EVENT_EVOLUTION_TUNING_CHANGED: EvolutionTuningChangedPayload,
 }
 
 
@@ -394,6 +451,7 @@ __all__ = [
     "METHOD_SLASH_DISPATCH",
     "METHOD_PERMISSION_RESPONSE",
     "METHOD_MEMORY_STATUS",
+    "METHOD_EVOLUTION_STATUS",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -407,6 +465,7 @@ __all__ = [
     "EVENT_ERROR",
     "EVENT_PERMISSION_REQUEST",
     "EVENT_MEMORY_WRITE",
+    "EVENT_EVOLUTION_TUNING_CHANGED",
     # v2 method schemas
     "HelloParams",
     "HelloResult",
@@ -426,6 +485,9 @@ __all__ = [
     "MemoryStatusParams",
     "MemoryStatusEntry",
     "MemoryStatusResult",
+    "EvolutionStatusParams",
+    "EvolutionStatusResult",
+    "EvolutionStatusDefaults",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",
@@ -435,5 +497,6 @@ __all__ = [
     "AssistantMessagePayload",
     "ErrorPayload",
     "MemoryWritePayload",
+    "EvolutionTuningChangedPayload",
     "EVENT_SCHEMAS",
 ]

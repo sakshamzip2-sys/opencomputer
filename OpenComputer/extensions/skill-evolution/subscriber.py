@@ -216,12 +216,78 @@ class EvolutionSubscriber:
 
         Each stage logs its outcome at INFO; failures log at WARNING.
         Logs include session_id only — never transcript content.
+
+        2026-05-11 — wraps the full pipeline in a trace_scope so the
+        judge + extractor LLM calls all share one OC trace id. The
+        skill_extractor stores that id in ``provenance.json`` and
+        ``oc skills review`` re-emits it on
+        :class:`SkillReviewDecisionEvent` so the langfuse scorer can
+        post the user's accept/reject as a score on the right trace.
         """
+        # Import from the public SDK so the extension stays inside the
+        # ``tests/test_plugin_extension_boundary.py`` rule (no
+        # ``from opencomputer.*`` imports inside ``extensions/``).
+        try:
+            from plugin_sdk.trace import trace_scope
+        except Exception:  # noqa: BLE001
+            trace_scope = None  # type: ignore[assignment]
+
+        if trace_scope is not None:
+            with trace_scope():
+                await self._run_pipeline_inner(event)
+        else:
+            await self._run_pipeline_inner(event)
+
+    async def _run_pipeline_inner(self, event: SessionEndEvent) -> None:
+        """The actual pipeline body. Kept separate so the trace scope
+        wrapping in :meth:`_run_pipeline` stays declarative."""
         session_id = getattr(event, "session_id", None) or ""
         try:
             profile_home = self._profile_home_factory()
             session_db = self._session_db_factory()
             existing_skills_dir = profile_home / "skills"
+
+            # 2026-05-11 — pick up tuned confidence threshold from the
+            # evolution orchestrator's persisted state. Falls back to
+            # the constructor default on any read failure so the
+            # subscriber works without an orchestrator running.
+            #
+            # Read the JSON file directly with stdlib rather than
+            # importing ``opencomputer.agent.evolution_orchestrator``,
+            # so this extension stays inside the SDK boundary rule
+            # (``tests/test_plugin_extension_boundary.py``). Schema is
+            # stable across schema_version 1 and 2; field name is
+            # ``confidence_threshold``; clamped to [50, 95] before use.
+            tuned_threshold = self._confidence_threshold
+            try:
+                tuning_path = (
+                    profile_home / "skills" / "evolution_tuning.json"
+                )
+                raw_state = tuning_path.read_text(encoding="utf-8")
+                state = json.loads(raw_state)
+                schema_version = int(state.get("schema_version", 0) or 0)
+                if 1 <= schema_version <= 2:
+                    raw_threshold = int(
+                        state.get(
+                            "confidence_threshold",
+                            self._confidence_threshold,
+                        )
+                        or self._confidence_threshold
+                    )
+                    # Clamp [50, 95] — orchestrator's published range.
+                    tuned_threshold = max(50, min(95, raw_threshold))
+            except (
+                OSError,
+                FileNotFoundError,
+                json.JSONDecodeError,
+                ValueError,
+                TypeError,
+            ):
+                # Missing / malformed file → constructor default.
+                _log.debug(
+                    "skill-evolution: tuning read failed; using ctor default",
+                    exc_info=True,
+                )
 
             # ── Stage 1: heuristic ───────────────────────────────────
             # Compute SessionMetrics from real SessionDB.get_messages()
@@ -266,14 +332,14 @@ class EvolutionSubscriber:
 
             confidence = int(getattr(judge, "confidence", 0) or 0)
             is_novel = bool(getattr(judge, "is_novel", False))
-            if confidence < self._confidence_threshold or not is_novel:
+            if confidence < tuned_threshold or not is_novel:
                 _log.info(
                     "skill-evolution: session=%s skipped — confidence=%d "
-                    "novel=%s threshold=%d",
+                    "novel=%s threshold=%d (tuned)",
                     session_id,
                     confidence,
                     is_novel,
-                    self._confidence_threshold,
+                    tuned_threshold,
                 )
                 return
 

@@ -335,6 +335,88 @@ def list_skills() -> None:
 # ── ``skills accept`` ─────────────────────────────────────────────────────
 
 
+def _read_candidate_provenance(profile_home: Path, name: str) -> dict:
+    """Best-effort provenance read for ``_proposed/<name>/provenance.json``.
+
+    Returns ``{}`` on any failure. Used by the review-decision emitter
+    to populate :class:`SkillReviewDecisionEvent` fields. Never raises.
+    """
+    prov_path = profile_home / "skills" / "_proposed" / name / "provenance.json"
+    try:
+        return json.loads(prov_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _emit_review_decision(
+    profile_home: Path,
+    name: str,
+    decision: str,
+    *,
+    provenance: dict | None = None,
+) -> None:
+    """Publish a :class:`SkillReviewDecisionEvent` on the default bus.
+
+    Reads provenance for the candidate at ``_proposed/<name>/`` (or uses
+    the supplied dict, for callers that read it earlier) to populate
+    ``origin_session_id``, ``confidence_at_proposal``, and ``trace_id``.
+
+    All failures are swallowed and logged at DEBUG — this is an
+    observability side-channel that must never break the user-visible
+    accept/reject path.
+    """
+    import logging
+
+    log = logging.getLogger("opencomputer.cli_skills")
+
+    try:
+        if provenance is None:
+            provenance = _read_candidate_provenance(profile_home, name)
+    except Exception:  # noqa: BLE001
+        provenance = {}
+
+    try:
+        from opencomputer.ingestion.bus import default_bus
+        from plugin_sdk.ingestion import SkillReviewDecisionEvent
+
+        # 2026-05-11 — ensure an orchestrator is alive in this process
+        # so the bus event has a subscriber. In gateway-daemon mode the
+        # orchestrator started at boot; in standalone-CLI mode this
+        # lazily creates a singleton. Failure is logged but never
+        # blocks accept/reject — the event still flows.
+        try:
+            from opencomputer.agent.evolution_orchestrator import (
+                get_or_start_orchestrator,
+            )
+
+            get_or_start_orchestrator(profile_home=profile_home)
+        except Exception:  # noqa: BLE001
+            log.debug(
+                "orchestrator singleton start failed", exc_info=True
+            )
+
+        evt = SkillReviewDecisionEvent(
+            session_id=str(provenance.get("session_id") or "")
+            or None,
+            source="cli_skills.review",
+            skill_name=name,
+            decision=decision,
+            origin_session_id=str(provenance.get("session_id") or ""),
+            trace_id=str(provenance.get("trace_id") or ""),
+            confidence_at_proposal=int(
+                provenance.get("confidence_score") or 0
+            ),
+        )
+        default_bus.publish(evt)
+    except Exception:  # noqa: BLE001 — never block accept/reject
+        log.debug(
+            "skill-review decision emit failed for %s (%s)",
+            name,
+            decision,
+            exc_info=True,
+        )
+
+
 @app.command("accept")
 def accept(
     name: str = typer.Argument(..., help="Proposed skill name to accept."),
@@ -344,6 +426,8 @@ def accept(
     from extensions.skill_evolution.candidate_store import accept_candidate
 
     profile_home = _profile_home()
+    # Read provenance BEFORE accept_candidate moves the directory out.
+    provenance = _read_candidate_provenance(profile_home, name)
     try:
         dest = accept_candidate(profile_home, name)
     except FileNotFoundError:
@@ -353,6 +437,9 @@ def accept(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from None
 
+    _emit_review_decision(
+        profile_home, name, "accepted", provenance=provenance
+    )
     typer.echo(f"accepted: {name} → {dest}")
 
 
@@ -368,9 +455,14 @@ def reject(
     from extensions.skill_evolution.candidate_store import reject_candidate
 
     profile_home = _profile_home()
+    # Read provenance BEFORE reject_candidate deletes the directory.
+    provenance = _read_candidate_provenance(profile_home, name)
     if not reject_candidate(profile_home, name):
         typer.echo(f"error: no proposed skill named {name!r}", err=True)
         raise typer.Exit(code=1)
+    _emit_review_decision(
+        profile_home, name, "rejected", provenance=provenance
+    )
     typer.echo(f"rejected: {name}")
 
 
@@ -415,6 +507,10 @@ def review() -> None:
         typer.echo("")
 
         # Prompt loop — re-prompt on bad input or after a `v` view.
+        # Read provenance once per candidate so accept/reject emit the
+        # right metadata even though accept_candidate moves the dir
+        # out from under us.
+        cand_provenance = _read_candidate_provenance(profile_home, cand.name)
         while True:
             choice = typer.prompt(
                 _REVIEW_PROMPT, default="s", show_default=False
@@ -422,17 +518,35 @@ def review() -> None:
             if choice in ("a", "accept"):
                 try:
                     dest = accept_candidate(profile_home, cand.name)
+                    _emit_review_decision(
+                        profile_home,
+                        cand.name,
+                        "accepted",
+                        provenance=cand_provenance,
+                    )
                     typer.echo(f"  accepted → {dest}")
                 except (FileExistsError, FileNotFoundError) as exc:
                     typer.echo(f"  error: {exc}")
                 break
             if choice in ("r", "reject"):
                 if reject_candidate(profile_home, cand.name):
+                    _emit_review_decision(
+                        profile_home,
+                        cand.name,
+                        "rejected",
+                        provenance=cand_provenance,
+                    )
                     typer.echo("  rejected.")
                 else:
                     typer.echo("  error: candidate not found (already removed?)")
                 break
             if choice in ("s", "skip"):
+                _emit_review_decision(
+                    profile_home,
+                    cand.name,
+                    "deferred",
+                    provenance=cand_provenance,
+                )
                 typer.echo("  skipped.")
                 break
             if choice in ("v", "view"):

@@ -97,6 +97,18 @@ EVENT_PERMISSION_REQUEST = "permission.request"
 # real time. No session_id keying — broadcast to all connected WS clients.
 EVENT_MEMORY_WRITE = "memory.write"
 
+# 2026-05-11 — self-evolution loop wire surface. Broadcasts every
+# EvolutionTuningChangedEvent so dashboards / TUI / IDE clients can
+# render a "tuning changed" toast or refresh a tuning panel without
+# polling the persisted JSON file. No session_id keying — broadcast
+# to all clients (the tuning state is per-process, not per-session).
+EVENT_EVOLUTION_TUNING_CHANGED = "evolution.tuning_changed"
+
+# Initial-state RPC companion to EVENT_EVOLUTION_TUNING_CHANGED — lets a
+# freshly-connecting client fetch the current tuning without waiting
+# for the next change event. Same shape as the broadcast payload.
+METHOD_EVOLUTION_STATUS = "evolution.status"
+
 
 __all__ = [
     "WireRequest",
@@ -112,6 +124,7 @@ __all__ = [
     "METHOD_SLASH_DISPATCH",
     "METHOD_PERMISSION_RESPONSE",
     "METHOD_MEMORY_STATUS",
+    "METHOD_EVOLUTION_STATUS",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",
@@ -120,4 +133,5 @@ __all__ = [
     "EVENT_ERROR",
     "EVENT_PERMISSION_REQUEST",
     "EVENT_MEMORY_WRITE",
+    "EVENT_EVOLUTION_TUNING_CHANGED",
 ]

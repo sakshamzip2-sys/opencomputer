@@ -12,6 +12,7 @@ Failure semantics (per plugin_sdk/memory.py contract):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -130,25 +131,185 @@ class HonchoSelfHostedProvider(MemoryProvider):
 
     def subscribe_to_outcome_events(self, bus):
         """Register a handler for ``TurnCompletedEvent`` on the typed
-        event bus. Honcho is always-on per profile (Sub-project A), so
-        we always want to observe outcome events the dispatch layer
-        publishes after each turn.
+        event bus.
 
-        v0: handler logs the event at INFO level so it shows up in the
-        per-session log stream. v0.5 will route to a structured Honcho
-        observation endpoint once the upstream supports it.
+        Honcho is always-on per profile (Sub-project A), so we always
+        want to observe outcome events the dispatch layer publishes
+        after each turn. The handler converts each ``TurnCompletedEvent``
+        into a Honcho ``conclude(observation_mode=inferred)`` call so
+        the upstream user-model accumulates real signal from every
+        turn, not just from explicit user statements.
+
+        2026-05-11 — replaced the v0 log-only handler with the real
+        ``/v1/conclude`` POST. Fire-and-forget via
+        :func:`opencomputer.hooks.runner.fire_and_forget` so a slow or
+        unreachable Honcho server cannot block bus fanout.
+
+        Failure semantics:
+
+        * HTTP failures, non-2xx responses, network errors, and JSON
+          decode errors are logged at WARNING but never raised — the
+          contract is that bus handlers never re-raise.
+        * If ``signals`` is empty (e.g. a turn that recorded no
+          outcome metrics), the handler skips the POST. There is
+          nothing useful to observe.
+        * If the HTTP client has been closed (shutdown race), the
+          handler logs at DEBUG and returns.
 
         Returns the :class:`Subscription` handle. Caller (or tests)
         invokes ``.unsubscribe()`` to tear down.
         """
+        # Inline fire-and-forget scheduling — schedule the conclude
+        # coroutine onto the running event loop if one is active, else
+        # close it cleanly (test env / sync caller). Equivalent to
+        # ``opencomputer.hooks.runner.fire_and_forget`` but avoids
+        # importing from ``opencomputer.*`` so this extension stays
+        # inside the SDK boundary rule
+        # (``tests/test_plugin_extension_boundary.py``).
+
+        def _fire(coro) -> None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop in this caller's context — drop the
+                # coroutine cleanly (close so the runtime doesn't
+                # complain about a never-awaited coroutine).
+                coro.close()
+                logger.debug(
+                    "honcho fire-and-forget dropped — no running loop"
+                )
+                return
+            task = loop.create_task(coro)
+            # Attach a no-op done-callback so the task isn't GC'd
+            # before it runs (asyncio's strong-reference rule).
+            task.add_done_callback(lambda _t: None)
+
+        async def _async_conclude(fact: str) -> None:
+            """POST /v1/conclude with 2-attempt retry on transient failures.
+
+            Retry policy (mirrors skill-evolution's judge call):
+
+            * Retryable: network errors (timeout, connect, read) and
+              5xx responses — attempt twice, then give up.
+            * Non-retryable: 4xx responses — log once and stop;
+              retrying won't help.
+            * Closed client: skip silently.
+
+            2 attempts max; failure after retries is logged at WARNING
+            with the last error. Honcho's conclude is the lossy
+            outcome-aware signal — a few dropped facts won't break
+            the user-model.
+            """
+            if getattr(self._client, "is_closed", False):
+                logger.debug(
+                    "honcho conclude skipped — client closed"
+                )
+                return
+
+            last_err: str = ""
+            for attempt in (1, 2):
+                try:
+                    resp = await self._client.post(
+                        "/v1/conclude",
+                        json={
+                            "workspace": self._config.workspace,
+                            "host_key": self._config.host_key,
+                            "peer": "user",
+                            "fact": fact,
+                            "observation_mode": "inferred",
+                        },
+                        timeout=5.0,
+                    )
+                except (
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                ) as exc:
+                    last_err = f"{type(exc).__name__}: {exc}"
+                    if attempt < 2:
+                        continue
+                    logger.warning(
+                        "honcho conclude failed after %d attempts: %s",
+                        attempt,
+                        last_err,
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    # Non-network exception — bug, don't retry.
+                    logger.warning(
+                        "honcho conclude non-retryable exception: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    return
+
+                if resp.status_code < 400:
+                    # Success.
+                    return
+
+                # Body trimmed to 200 chars — never echo a full server
+                # response into the log (may carry credentials in
+                # error messages from buggy upstreams).
+                body_excerpt = ""
+                try:
+                    body_excerpt = resp.text[:200]
+                except Exception:  # noqa: BLE001
+                    pass
+
+                if 500 <= resp.status_code < 600 and attempt < 2:
+                    # Retryable 5xx — try again.
+                    last_err = f"HTTP {resp.status_code}: {body_excerpt}"
+                    continue
+
+                logger.warning(
+                    "honcho conclude returned HTTP %d (attempt %d): %s",
+                    resp.status_code,
+                    attempt,
+                    body_excerpt,
+                )
+                return
+
         def _handler(evt) -> None:
             try:
+                signals = dict(getattr(evt, "signals", {}) or {})
+                session_id = str(getattr(evt, "session_id", "") or "")
+                turn_index = int(getattr(evt, "turn_index", 0) or 0)
+                # INFO line so operators (and existing wiring tests) can
+                # confirm the subscription fired even when signals is
+                # empty / Honcho is unreachable. Single line per event;
+                # kept deliberately small so high-throughput agents
+                # don't flood the log.
                 logger.info(
-                    "turn_completed session=%s turn=%d signals=%s",
-                    evt.session_id, evt.turn_index, dict(evt.signals),
+                    "honcho turn_completed received: session=%s turn=%d signals=%d",
+                    session_id,
+                    turn_index,
+                    len(signals),
                 )
-            except Exception as e:  # noqa: BLE001 — never re-raise from a bus handler
-                logger.warning("honcho outcome handler failed: %s", e)
+                if not signals:
+                    logger.debug(
+                        "honcho outcome handler — empty signals; skipping conclude"
+                    )
+                    return
+                # Render the fact text. Capped at 480 chars matching
+                # SessionDB summary cap so the upstream doesn't reject
+                # over-length facts. Signals are ordered for
+                # deterministic dedup downstream. Values are coerced
+                # to ``str()`` so non-JSON-serializable values (datetime,
+                # numpy scalars, custom objects) cannot break the
+                # downstream ``json.dumps`` in httpx.
+                signal_parts = [
+                    f"{_safe_str(k)}={_safe_str(v)}"
+                    for k, v in sorted(signals.items(), key=lambda kv: str(kv[0]))
+                ]
+                fact = (
+                    f"Turn {turn_index} (session {session_id[:8]}): "
+                    + ", ".join(signal_parts)
+                )
+                if len(fact) > 480:
+                    fact = fact[:479] + "…"
+
+                _fire(_async_conclude(fact))
+            except Exception as exc:  # noqa: BLE001 — bus handlers never re-raise
+                logger.warning("honcho outcome handler failed: %s", exc)
 
         return bus.subscribe("turn_completed", _handler)
 
@@ -413,14 +574,113 @@ class HonchoSelfHostedProvider(MemoryProvider):
         return text[:800]
 
     async def on_pre_compress(self, messages: list) -> str | None:
-        """T2.2: extract key facts that must survive compaction.
+        """T2.2: pull key facts from Honcho so they survive compaction.
 
-        TODO(PR-6 follow-up): wire to Honcho client.peek/query once the
-        Honcho HTTP API exposes a dedicated key-facts endpoint. For now
-        returns None (no-op) so compaction is unaffected while the wiring
-        layer lands.
+        Compaction is a chokepoint where context is discarded. This hook
+        is called by :class:`opencomputer.agent.compaction.CompactionEngine`
+        BEFORE summarisation runs; the returned text is injected as a
+        pinned system-prompt block in the compacted message stream so
+        the agent retains user-modeling facts the summariser would
+        otherwise smear or drop.
+
+        Implementation (2026-05-11): one synchronous ``/v1/context-full``
+        GET against the per-profile peer. The same endpoint as
+        :meth:`prefetch` and :meth:`system_prompt_block`, but consumed
+        at the compaction boundary specifically so the *full* peer card
+        + user representation is preserved (not just the per-turn slice
+        prefetch returns).
+
+        Failure modes (all return ``None`` so compaction proceeds
+        unaffected):
+
+        * HTTP client closed — race during agent shutdown.
+        * Network error / Honcho unreachable.
+        * Non-2xx response.
+        * Empty / non-string payload.
+        * Response text shorter than 16 chars — too little signal to
+          justify a pinned block.
+
+        The returned text is hard-capped at 2000 chars so the pinned
+        block cannot itself dominate the compaction budget; the caller
+        (compaction engine) may further trim.
         """
-        return None  # TODO(PR-6 follow-up): wire to Honcho client.peek/query
+        if getattr(self._client, "is_closed", False):
+            logger.debug(
+                "honcho on_pre_compress: client closed; returning None"
+            )
+            return None
+
+        # 2-attempt retry policy mirroring _async_conclude. Compaction
+        # already only runs every N turns; one slow Honcho retry is
+        # cheaper than letting the user-model context get lost on a
+        # transient 5xx / connect-timeout.
+        resp = None
+        last_err = ""
+        for attempt in (1, 2):
+            try:
+                resp = await self._client.get(
+                    "/v1/context-full",
+                    params={
+                        "workspace": self._config.workspace,
+                        "host_key": self._config.host_key,
+                        "peer": "user",
+                    },
+                    timeout=_DEFAULT_REQUEST_TIMEOUT_S,
+                )
+            except (
+                httpx.TimeoutException,
+                httpx.NetworkError,
+            ) as exc:
+                last_err = f"{type(exc).__name__}: {exc}"
+                resp = None
+                if attempt < 2:
+                    continue
+                logger.warning(
+                    "honcho on_pre_compress failed after %d attempts: %s",
+                    attempt,
+                    last_err,
+                )
+                return None
+            except Exception as exc:  # noqa: BLE001 — non-network bug, don't retry
+                logger.warning(
+                    "honcho on_pre_compress non-retryable exception: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                return None
+
+            if resp.status_code < 400:
+                break  # success
+            if 500 <= resp.status_code < 600 and attempt < 2:
+                last_err = f"HTTP {resp.status_code}"
+                continue
+            logger.warning(
+                "honcho on_pre_compress returned HTTP %d (attempt %d)",
+                resp.status_code,
+                attempt,
+            )
+            return None
+
+        if resp is None:
+            return None
+
+        try:
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001 — non-JSON response
+            logger.warning(
+                "honcho on_pre_compress JSON decode failed: %s", exc
+            )
+            return None
+
+        text = _as_text(payload)
+        if not isinstance(text, str) or len(text.strip()) < 16:
+            return None
+
+        truncated = text[:2000].strip()
+        return (
+            "## Honcho user-model facts (pinned across compaction)\n\n"
+            + truncated
+        )
 
     async def on_session_end(self, session_id: str) -> None:
         """T2.3: flush any pending Honcho writes when the session closes.
@@ -527,6 +787,21 @@ class HonchoSelfHostedProvider(MemoryProvider):
         )
         resp.raise_for_status()
         return _as_text(resp.json())
+
+
+def _safe_str(value: Any) -> str:
+    """Coerce ``value`` to a short str safe for fact rendering.
+
+    Non-string values are rendered via ``repr()`` truncated at 80
+    chars so a malicious / buggy producer can't slip an unbounded
+    object into the fact text. Empty string returned on any failure.
+    """
+    try:
+        if isinstance(value, str):
+            return value[:80]
+        return repr(value)[:80]
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _as_text(payload: Any) -> str:

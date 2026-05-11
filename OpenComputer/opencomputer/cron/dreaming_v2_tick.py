@@ -355,10 +355,54 @@ def build_production_dependencies(
         )
         provider = None
 
+    # 2026-05-11 — apply EvolutionOrchestrator's persisted tuning when
+    # present. The orchestrator subscribes to ``skill_review_decision``
+    # events and adjusts ``dreaming_v2_score_threshold`` +
+    # ``dreaming_v2_min_recall`` based on the rolling accept-rate window.
+    # Falls back to base Config defaults on any read failure so dreaming
+    # works without an orchestrator running.
+    score_threshold = cfg.memory.dreaming_v2_score_threshold
+    min_recall_count = cfg.memory.dreaming_v2_min_recall_count
+    try:
+        from opencomputer.agent.evolution_orchestrator import (
+            DEFAULT_TUNING,
+            load_tuning,
+        )
+
+        tuning = load_tuning(home)
+        # Only apply tuning values that have actually been moved off
+        # their defaults — preserves operator-overrides in config.yaml
+        # for the unchanged values. The orchestrator and base Config
+        # share the same defaults (0.65 / 2), so a no-op tune leaves
+        # both fields untouched.
+        if (
+            tuning.dreaming_v2_score_threshold
+            != DEFAULT_TUNING.dreaming_v2_score_threshold
+        ):
+            score_threshold = tuning.dreaming_v2_score_threshold
+        if (
+            tuning.dreaming_v2_min_recall
+            != DEFAULT_TUNING.dreaming_v2_min_recall
+        ):
+            min_recall_count = tuning.dreaming_v2_min_recall
+        logger.debug(
+            "dreaming_v2: applied tuning (score=%.2f, recall=%d) — "
+            "config defaults were (%.2f, %d)",
+            score_threshold,
+            min_recall_count,
+            cfg.memory.dreaming_v2_score_threshold,
+            cfg.memory.dreaming_v2_min_recall_count,
+        )
+    except Exception:  # noqa: BLE001 — tuning read is best-effort
+        logger.debug(
+            "dreaming_v2: tuning read failed; using config defaults",
+            exc_info=True,
+        )
+
     pipeline_cfg = DreamingV2Config(
         enabled=cfg.memory.dreaming_v2_enabled,
-        score_threshold=cfg.memory.dreaming_v2_score_threshold,
-        min_recall_count=cfg.memory.dreaming_v2_min_recall_count,
+        score_threshold=score_threshold,
+        min_recall_count=min_recall_count,
         diversity_threshold=cfg.memory.dreaming_v2_diversity_threshold,
         max_promotions_per_run=cfg.memory.dreaming_v2_max_promotions_per_run,
         dreams_md_max_bytes=cfg.memory.dreaming_v2_dreams_md_max_bytes,

@@ -368,6 +368,94 @@ class SessionEndEvent(SignalEvent):
 
 
 # ---------------------------------------------------------------------------
+# Evolution-loop signals (2026-05-11 — close the skill-evolution loop)
+# ---------------------------------------------------------------------------
+
+
+SkillReviewDecision = Literal["accepted", "rejected", "edited", "deferred"]
+
+
+@dataclass(frozen=True, slots=True)
+class EvolutionTuningChangedEvent(SignalEvent):
+    """Fires when :class:`EvolutionOrchestrator` recomputes thresholds.
+
+    Emitted on every successful ``recompute_tuning`` regardless of
+    whether the values actually changed (the consumer decides what to
+    do with no-op recomputes). Lets dashboards, the wire-protocol
+    bridge, and external observability platforms react to evolution
+    tuning shifts without polling the JSON file.
+
+    Privacy posture: carries only the numeric tuning state — no
+    decisions, no session ids, no skill names. Subscribers that need
+    the underlying decision history must read it from the persisted
+    state file directly.
+
+    Schema-stable: every field has a default so additions are
+    backwards compatible.
+    """
+
+    event_type: str = field(default="evolution_tuning_changed", init=False)
+    confidence_threshold: int = 70
+    dreaming_v2_score_threshold: float = 0.65
+    dreaming_v2_min_recall: int = 2
+    decisions_observed: int = 0
+    # ``True`` when the recompute changed at least one tunable value
+    # vs the prior persisted state; ``False`` when the recompute was
+    # a no-op (e.g. dead-band, undersized window). Consumers can use
+    # this to skip rendering "no change" notifications.
+    changed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SkillReviewDecisionEvent(SignalEvent):
+    """User made a decision about a proposed auto-evolved skill.
+
+    Emitted by ``oc skills review`` (and any future review surface, e.g.
+    a web UI button) every time a user decides what to do with a
+    staged candidate at ``<profile_home>/skills/_proposed/``. Closes
+    the evolution loop: the
+    :class:`opencomputer.agent.evolution_orchestrator.EvolutionOrchestrator`
+    subscribes to this stream and tunes the upstream
+    skill-evolution thresholds based on the rolling
+    accept-versus-reject ratio.
+
+    Decision vocabulary (extensible; subscribers should tolerate
+    unknown values gracefully):
+
+    * ``"accepted"`` — user accepted the proposal as-is and published it.
+    * ``"rejected"`` — user rejected the proposal; pulled from
+      ``_proposed/`` without keeping a copy.
+    * ``"edited"`` — user accepted but modified the SKILL.md text
+      before publishing; counts as a *partial* positive signal.
+    * ``"deferred"`` — user chose to revisit later; no learning
+      signal (orchestrator ignores).
+
+    Privacy posture: the skill body is NOT included on the event — the
+    persisted copy at ``<profile_home>/skills/_proposed/<name>/`` is
+    the source of truth. The event carries only metadata necessary to
+    correlate with the originating session trace and to tune
+    thresholds.
+    """
+
+    event_type: str = field(default="skill_review_decision", init=False)
+    skill_name: str = ""
+    decision: SkillReviewDecision = "deferred"
+    # The skill-evolution session that originally produced this
+    # candidate. Populated from ``provenance.json``; empty string when
+    # unknown (legacy proposals).
+    origin_session_id: str = ""
+    # Per-turn trace id captured at extraction time, if any. Lets the
+    # orchestrator (or downstream observability) post a langfuse score
+    # against the trace that produced this proposal. Empty when the
+    # candidate was extracted before trace_id propagation shipped.
+    trace_id: str = ""
+    # Stage-2 judge confidence at extraction time (0-100). Lets the
+    # orchestrator weight learning signals by the judge's own
+    # certainty.
+    confidence_at_proposal: int = 0
+
+
+# ---------------------------------------------------------------------------
 # Normalizers
 # ---------------------------------------------------------------------------
 
@@ -462,6 +550,10 @@ __all__ = [
     "AmbientSensorPauseEvent",
     # T1 of auto-skill-evolution plan (2026-04-27)
     "SessionEndEvent",
+    # 2026-05-11 — evolution-loop close-out
+    "EvolutionTuningChangedEvent",
+    "SkillReviewDecision",
+    "SkillReviewDecisionEvent",
     # normalizer
     "SignalNormalizer",
     "IdentityNormalizer",

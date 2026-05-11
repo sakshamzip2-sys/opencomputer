@@ -248,6 +248,12 @@ class Gateway:
         # Subscribes to ``session_end`` on the F2 bus and stages SKILL.md
         # candidates for user review. Opt-in via ``oc skills evolution on``.
         self._evolution_subscriber: Any | None = None
+        # 2026-05-11 — closed-loop tuner. Subscribes to
+        # ``skill_review_decision`` + ``turn_completed`` and adjusts
+        # skill-evolution + dreaming-v2 thresholds based on the rolling
+        # accept/reject ratio. Started unconditionally (no opt-in) — it
+        # has zero cost when no decisions arrive.
+        self._evolution_orchestrator: Any | None = None
         # Hermes channel-port (PR 2 Task 2.3 / amendment §A.5):
         # fatal-error supervisor. Ticks every 60s in ``start()`` to
         # check ``adapter.has_fatal_error()``; reconnects retryable
@@ -475,6 +481,12 @@ class Gateway:
         # Auto-skill-evolution subscriber. Same opt-in / failure-isolated
         # contract as the ambient daemon — never crashes gateway boot.
         await self._start_evolution_subscriber()
+
+        # Closed-loop tuner — subscribes to skill_review_decision +
+        # turn_completed and persists tuning state to
+        # ``<profile_home>/skills/evolution_tuning.json``. Failure
+        # isolated: a broken orchestrator never blocks gateway boot.
+        await self._start_evolution_orchestrator()
 
         # social-traces post-task subscriber (Phase 9 production
         # wiring). Resolves provider + cost guard same way
@@ -846,6 +858,65 @@ class Gateway:
                 "failed to start skill-evolution subscriber — gateway continues without it"
             )
 
+    async def _start_evolution_orchestrator(self) -> None:
+        """Start the :class:`EvolutionOrchestrator` for closed-loop tuning.
+
+        Subscribes to ``skill_review_decision`` (every user accept/reject
+        in ``oc skills review``) + ``turn_completed`` on the F2 typed
+        bus. Persists tuning state under
+        ``<profile_home>/skills/evolution_tuning.json`` after every
+        :data:`_MIN_DECISIONS_TO_TUNE` decisions and on manual
+        ``oc evolution tune`` invocations.
+
+        Wires the langfuse score callback iff the langfuse plugin is
+        loaded — when langfuse is inert, the callback is None and
+        scoring is a no-op. The orchestrator's tuning math is
+        independent of langfuse availability.
+
+        Failure isolated: any exception during startup logs and
+        returns without raising. The gateway must keep working even if
+        the orchestrator is broken or its profile dir is unwritable.
+        """
+        try:
+            from opencomputer.agent.config import _home
+            from opencomputer.agent.evolution_orchestrator import (
+                EvolutionOrchestrator,
+            )
+            from opencomputer.ingestion.bus import default_bus
+
+            # Optional langfuse scoring callback — resolved lazily so
+            # the orchestrator works whether langfuse is loaded or not.
+            score_fn = None
+            try:
+                from extensions.langfuse.plugin import (  # type: ignore[import-not-found]
+                    score_trace as _langfuse_score_trace,
+                )
+
+                score_fn = _langfuse_score_trace
+            except Exception:  # noqa: BLE001 — langfuse not loaded
+                logger.debug(
+                    "langfuse plugin not available — orchestrator runs without trace scoring"
+                )
+
+            profile_home = _home()
+            orchestrator = EvolutionOrchestrator(
+                bus=default_bus,
+                profile_home=profile_home,
+                langfuse_score_fn=score_fn,
+            )
+            orchestrator.start()
+            self._evolution_orchestrator = orchestrator
+            logger.info(
+                "evolution orchestrator started (profile=%s langfuse=%s)",
+                profile_home,
+                "on" if score_fn is not None else "off",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to start evolution orchestrator — "
+                "gateway continues without closed-loop tuning"
+            )
+
     async def _start_traces_subscriber(self) -> None:
         """Start the social-traces post-task subscriber iff the user opted in.
 
@@ -986,6 +1057,14 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 logger.exception("skill-evolution subscriber stop failed (ignored)")
             self._evolution_subscriber = None
+        if self._evolution_orchestrator is not None:
+            try:
+                self._evolution_orchestrator.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "evolution orchestrator stop failed (ignored)"
+                )
+            self._evolution_orchestrator = None
         # social-traces subscriber (Phase 9). Held by the plugin's
         # module-level singleton, not on Gateway directly, so we
         # call ``stop_subscriber`` on the plugin module rather than
