@@ -30,11 +30,27 @@ def db(tmp_path: Path) -> SessionDB:
 
 
 def _state_with(rows: list[SessionRow]) -> dict:
+    """Build picker state for unit tests.
+
+    The real picker initialises ``render_rows`` (a ``list[tuple[SessionRow,
+    int]]`` of (row, indent-depth) entries) when it renders the list.
+    The state-mutating helpers — ``_enter_confirm_delete`` /
+    ``_commit_confirm_delete`` — call ``_resolve_selected_row`` which
+    reads ``render_rows``. Without it those tests degrade to no-ops
+    (target is always ``None``) and assertions about post-delete state
+    silently never run. Provide a flat ``(row, 0)`` rendering so the
+    helpers exercise their real code path.
+
+    ``expanded_parents`` is also present so the rebuild step inside
+    ``_commit_confirm_delete`` has the empty-set default it expects.
+    """
     return {
         "query": "",
         "selected_idx": 0,
         "filtered": list(rows),
         "rows": list(rows),
+        "render_rows": [(r, 0) for r in rows],
+        "expanded_parents": set(),
         "mode": "navigate",
     }
 
