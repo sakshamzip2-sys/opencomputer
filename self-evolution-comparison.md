@@ -94,6 +94,20 @@ This v2 doc is the comprehensive version. Things I add over v1 are flagged **[NE
 
 ---
 
+## 0.1 v3 status update — Gap 2 + Gap 3 closed in code (2026-05-12, merge `a420656b`)
+
+Subsequent to the v3 senior-engineer-workflow pass (§0.0 above), Gap 2 + Gap 3 from `self-evolution-gaps-deep-dive.md` were also closed in the same merge:
+
+* **Gap 2 — skill-evolution silently disabling on malformed state.json.** Fixed in `extensions/skill-evolution/subscriber.py::_is_enabled`: every adversarial shape (empty file, malformed JSON, non-UTF-8 bytes, non-dict JSON, missing `enabled` key) now defaults to True with WARN-level logging. The ONLY remaining opt-out is explicit `{"enabled": false}` (or any explicit falsy value via bool()). Privacy preserved — explicit opt-out still works. 11 new state-resolution invariant tests in `tests/test_skill_evolution_default_on.py`. The v2 doc's claim that skill-evolution was "OFF on your machine" was reading the wrong toggle file in the first place (`evolution/enabled` is the trajectory flag; the skill-evolution flag is `skills/evolution_state.json`, which already said `{"enabled": true}`).
+
+* **Gap 3 — DREAMS.md re-scoring.** New CLI `oc memory dream-v2-rescore [--limit N] [--model NAME] [--promote-threshold X] [--apply]` implements the deep-dive doc's "diagnostic move": parse DREAMS.md, re-score each entry through a configurable provider (default = active dream-v2 model; override with `--model claude-sonnet-4-6` to surface Haiku undercredit), render a diff table, and with `--apply` atomically append promotion candidates to MEMORY.md via `MemoryManager.append_declarative()`. Privacy contract: re-scorer receives the SAME `raw_text` the original gate would have seen — not the parsed Q/A separately — so the rescore is behaviorally comparable to the gate. Default `--limit=50` cost cap. Provider-absent path exits 2 with a clear `oc auth` pointer instead of N AttributeErrors. New module `opencomputer/agent/dreams_rescore.py` + 22 unit tests + 2 CLI integration tests in `tests/test_dreams_rescore.py`.
+
+Operational impact verified on disk: `~/.opencomputer/cron/dreaming_v2_state.json["last_summary"]` now carries the new `unattributed` field (engine rationale-drift guard). `oc evolution dashboard` displays the disjoint HELD breakdown. `oc memory dream-v2-rescore --help` is wired and exits 0.
+
+What's **still** open: Gap 1 (B3 bus subscriber that writes TrajectoryEvent rows from real agent runs). Design verified — ~200 LOC subscriber + ~50 LOC storage helper + ~400 LOC tests + ~30 LOC lifecycle wiring. Bus, schema, reward function, CLI all already exist; the only missing piece is the producer. Not in this merge; sized for a fresh branch.
+
+---
+
 ## 1. The complete OC self-evolution surface (corrected + expanded)
 
 ### 1.1 Procedural memory — Skills (mature, in production)
