@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from opencomputer.dashboard._auth import require_session_token
@@ -480,23 +480,55 @@ async def get_memory() -> dict[str, Any]:
 
 @router.get("/config")
 async def get_config(_: None = Depends(require_session_token)) -> dict[str, Any]:
-    """Return the active OC config.
+    """Return the active OC config in hermes-agent-compatible shape.
 
     Bearer-gated because config can include sensitive paths and selected
-    provider state. Workspace's config tab shows the raw blob for
-    inspection; we forward what OC's own ``/api/v1/config`` handler
-    returns unmodified.
+    provider state.
+
+    Critically: we always include a ``mcp_servers`` key (built from the
+    enumerated MCP manager when available, empty array otherwise). The
+    workspace's ``probeMcpConfigKey()`` checks for this exact key to flip
+    the ``mcpFallback`` capability to "available" — without it, the
+    Workspace MCP tab degrades to "Not Available" even when the rest of
+    the MCP probe succeeds.
     """
     try:
         from opencomputer.dashboard.routes import config as _config
 
-        return await _config.get_config()
+        oc_cfg = await _config.get_config()
     except Exception as exc:  # noqa: BLE001
         logger.warning("hermes_aliases: config lookup failed: %s", exc)
         raise HTTPException(
             status_code=500,
             detail=f"config unavailable: {exc}",
         ) from exc
+
+    if not isinstance(oc_cfg, dict):
+        oc_cfg = {"raw": oc_cfg}
+
+    # Build the mcp_servers list defensively — failures here MUST NOT
+    # break /api/config (the user's settings UI depends on it).
+    mcp_servers: list[dict[str, Any]] = []
+    try:
+        mcp_payload = await list_mcp_servers()
+        for entry in mcp_payload.get("servers") or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                mcp_servers.append(
+                    {
+                        "name": str(entry["name"]),
+                        "type": str(entry.get("type") or "stdio"),
+                    }
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes_aliases: mcp_servers enumeration failed: %s", exc,
+        )
+
+    # Don't override an existing mcp_servers if OC's config ever surfaces
+    # one — but if absent (today's case), we synthesise it.
+    if "mcp_servers" not in oc_cfg:
+        oc_cfg = {**oc_cfg, "mcp_servers": mcp_servers}
+    return oc_cfg
 
 
 @router.patch("/config")
@@ -526,6 +558,32 @@ async def patch_config(
             status_code=500,
             detail=f"config patch failed: {exc}",
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# /api/status — hermes-agent dashboard liveness probe. Workspace's
+# probeDashboard() hits this and looks for ``body.version``; success here
+# is what flips workspace's ``dashboard`` capability to "available", which
+# in turn unlocks ``mcpFallback`` and the Conductor/Kanban tabs.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/status")
+async def hermes_status() -> dict[str, Any]:
+    """Dashboard liveness probe in hermes-agent shape.
+
+    Workspace looks for a non-empty ``version`` field; provide OC's own
+    version so a downstream consumer can tell apart different builds.
+    """
+    try:
+        from opencomputer import __version__ as _version
+    except Exception:  # noqa: BLE001
+        _version = "unknown"
+    return {
+        "status": "ok",
+        "version": _version,
+        "service": "opencomputer-dashboard",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +677,179 @@ async def session_chat(
         "model": model,
         "message": {"role": "assistant", "content": final_text},
     }
+
+
+# ---------------------------------------------------------------------------
+# /api/sessions/{id}/chat/stream — SSE streaming session chat. Workspace's
+# preferred path when ``enhancedChat`` capability is detected.
+# ---------------------------------------------------------------------------
+
+
+class SessionStreamBody(BaseModel):
+    """Workspace's streamChat payload."""
+
+    message: str | None = None
+    model: str | None = None
+    system_message: str | None = None
+    attachments: list[dict[str, Any]] | None = None
+
+
+def _hermes_sse_event(event_name: str, payload: dict[str, Any]) -> bytes:
+    """Encode one hermes-shape SSE event (named event + JSON data)."""
+    import json as _json
+
+    return (
+        f"event: {event_name}\n"
+        f"data: {_json.dumps(payload, default=str)}\n\n"
+    ).encode()
+
+
+@router.post("/sessions/{session_id}/chat/stream")
+async def session_chat_stream(
+    session_id: str,
+    body: SessionStreamBody,
+    request: Request,
+    _: None = Depends(require_session_token),
+) -> Any:
+    """Streaming session chat in hermes-agent SSE shape.
+
+    Events emitted (one per ``event: <name>`` block):
+
+    * ``message_start`` — once at stream open; ``{session_id, model}``
+    * ``content_delta``  — per text-delta from AgentLoop; ``{text}``
+    * ``message_complete`` — once after stream end; ``{text, stop_reason}``
+    * ``error`` — emitted in-band if AgentLoop raises; ``{message}``
+    * sentinel ``data: [DONE]`` line as the last frame
+
+    The probe POSTs to ``/api/sessions/__probe__/chat/stream`` with body
+    ``{}``; that triggers our validation 400 (no ``message``) which the
+    workspace's probe treats as "available" (status is not 404/403/405).
+    Real callers with valid bodies get the live stream.
+    """
+    import asyncio as _asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    if not session_id or not session_id.strip():
+        raise HTTPException(status_code=400, detail="empty session id")
+    message = (body.message or "").strip()
+    if not message:
+        # Probe path: body is `{}`. Reject with 400 — workspace's probe
+        # interprets that as "endpoint exists" (not 404/403/405) so the
+        # `enhancedChat` capability flips to available. Real callers see
+        # this as a useful validation error.
+        raise HTTPException(
+            status_code=400,
+            detail="message text is required",
+        )
+
+    # Resolve model: explicit > profile default. (Unlike /v1/chat/completions
+    # we don't accept `messages[]` here — the workspace's streamChat passes
+    # exactly one message; prior history comes from SessionDB via
+    # ``oc_session_id``.)
+    model = (body.model or "").strip()
+    if not model:
+        try:
+            from opencomputer.agent.config import default_config
+
+            cfg = default_config()
+            model = getattr(getattr(cfg, "model", None), "model", "") or ""
+        except Exception:  # noqa: BLE001
+            model = ""
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail="no model resolvable — pass `model` explicitly",
+        )
+
+    pump: _asyncio.Queue[bytes | None] = _asyncio.Queue(maxsize=2048)
+
+    def _on_delta(text: str) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        try:
+            pump.put_nowait(_hermes_sse_event("content_delta", {"text": text}))
+        except _asyncio.QueueFull:
+            logger.warning(
+                "hermes_aliases.session_chat_stream: SSE pump full; "
+                "dropping delta",
+            )
+
+    async def _runner() -> str | BaseException:
+        try:
+            from opencomputer.dashboard.routes import openai_compat as _oai
+
+            text = await _oai._run_agent_completion(  # noqa: SLF001
+                user_message=message,
+                history=[],
+                system_prompt=(body.system_message or None),
+                model=model,
+                oc_session_id=session_id,
+                stream_callback=_on_delta,
+            )
+            return text
+        except BaseException as exc:  # noqa: BLE001
+            return exc
+        finally:
+            await pump.put(None)  # sentinel
+
+    async def _gen() -> Any:
+        yield _hermes_sse_event(
+            "message_start",
+            {"session_id": session_id, "model": model},
+        )
+        task = _asyncio.create_task(_runner())
+        try:
+            while True:
+                try:
+                    if await request.is_disconnected():
+                        break
+                except Exception:  # noqa: BLE001
+                    # request.is_disconnected can raise during teardown;
+                    # treat as disconnected and exit cleanly.
+                    break
+                try:
+                    item = await _asyncio.wait_for(pump.get(), timeout=15.0)
+                except TimeoutError:
+                    yield b": keepalive\n\n"
+                    continue
+                if item is None:
+                    break
+                yield item
+
+            outcome = await task
+            if isinstance(outcome, BaseException):
+                yield _hermes_sse_event(
+                    "error",
+                    {"message": str(outcome) or outcome.__class__.__name__},
+                )
+                logger.error(
+                    "hermes_aliases.session_chat_stream failed sid=%s exc=%s",
+                    session_id, outcome,
+                )
+            else:
+                yield _hermes_sse_event(
+                    "message_complete",
+                    {"text": outcome, "stop_reason": "stop"},
+                )
+        finally:
+            yield b"data: [DONE]\n\n"
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001
+                    pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

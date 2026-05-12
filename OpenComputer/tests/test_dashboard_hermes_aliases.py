@@ -569,6 +569,85 @@ def test_session_chat_requires_message(auth_headers: dict[str, str]) -> None:
     assert resp.status_code == 400
 
 
+def test_status_returns_version() -> None:
+    """probeDashboard() needs ``{version: str}`` to flip dashboard capability."""
+    app = _build_app()
+    client = TestClient(app)
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body.get("version"), str)
+    assert body["version"]
+    assert body["status"] == "ok"
+
+
+def test_config_includes_mcp_servers_key(auth_headers: dict[str, str]) -> None:
+    """probeMcpConfigKey() expects ``mcp_servers`` in the body to flip mcpFallback."""
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+
+    async def _fake_cfg() -> dict[str, Any]:
+        return {"model": {"provider": "anthropic"}}
+
+    with patch(
+        "opencomputer.dashboard.routes.config.get_config",
+        new=AsyncMock(side_effect=_fake_cfg),
+    ):
+        resp = client.get("/api/config", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "mcp_servers" in body
+    assert isinstance(body["mcp_servers"], list)
+
+
+def test_chat_stream_rejects_empty_message(auth_headers: dict[str, str]) -> None:
+    """Probe POSTs body `{}` — we must return 400 (probe sees this as
+    ``available`` because the status is not 404/403/405)."""
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/sessions/abc/chat/stream",
+        headers=auth_headers,
+        json={},
+    )
+    assert resp.status_code == 400
+    assert resp.status_code not in (403, 404, 405), (
+        "workspace probeEnhancedChatStream would mark this missing"
+    )
+
+
+def test_chat_stream_emits_hermes_sse(auth_headers: dict[str, str]) -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+
+    async def _fake(*, user_message: str, stream_callback: Any = None, **_: Any) -> str:
+        assert user_message == "hi"
+        if stream_callback is not None:
+            stream_callback("hello ")
+            stream_callback("world")
+        return "hello world"
+
+    with patch(
+        "opencomputer.dashboard.routes.openai_compat._run_agent_completion",
+        new=_fake,
+    ):
+        with client.stream(
+            "POST",
+            "/api/sessions/abc/chat/stream",
+            headers=auth_headers,
+            json={"message": "hi", "model": "test"},
+        ) as resp:
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/event-stream")
+            text = "".join(part for part in resp.iter_text())
+
+    assert "event: message_start" in text
+    assert "event: content_delta" in text
+    assert "hello " in text and "world" in text
+    assert "event: message_complete" in text
+    assert "data: [DONE]" in text
+
+
 def test_session_chat_delegates_to_agent_loop(auth_headers: dict[str, str]) -> None:
     app = _build_app(with_token=True)
     client = TestClient(app)
