@@ -22,8 +22,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-logger = logging.getLogger("opencomputer.evolution.cli")
-
 from opencomputer.evolution.entrypoint import evolution_app
 from opencomputer.evolution.reflect import ReflectionEngine
 from opencomputer.evolution.storage import (
@@ -35,6 +33,7 @@ from opencomputer.evolution.storage import (
 )
 from opencomputer.evolution.synthesize import SkillSynthesizer
 
+logger = logging.getLogger("opencomputer.evolution.cli")
 console = Console()
 
 
