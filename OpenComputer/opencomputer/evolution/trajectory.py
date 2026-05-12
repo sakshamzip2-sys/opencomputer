@@ -307,7 +307,7 @@ def _on_session_end_event(event: Any) -> None:
         )
 
 
-def register_with_bus(bus: TypedEventBus | None = None) -> tuple[Subscription, Subscription]:
+def register_with_bus(bus: TypedEventBus | None = None) -> Subscription:
     """Subscribe both the tool_call accumulator and the session_end persister.
 
     Pre-B3 fix this only subscribed to ``tool_call`` — meaning
@@ -317,19 +317,20 @@ def register_with_bus(bus: TypedEventBus | None = None) -> tuple[Subscription, S
     of the evolution pipeline is complete: tool_call events build the
     open trajectory; SessionEndEvent closes + persists it.
 
-    If `bus` is None, uses `get_default_bus()`. Returns a tuple of
-    (tool_call_subscription, session_end_subscription) so callers can
-    unregister both. Idempotent in the sense that repeated calls add
-    repeated subscriptions — caller is responsible for tracking handles
-    to avoid duplicate handlers (matches the pre-B3 contract).
+    Returns the ``tool_call`` ``Subscription`` for backward compatibility
+    with pre-B3 callers (test fixtures + ``bootstrap_if_enabled``). The
+    ``session_end`` subscription is process-lifetime by design — the
+    bus is GC'd at process shutdown anyway and tests use per-test bus
+    instances. Callers that need explicit unsubscribe for session_end
+    can look up handlers via ``bus.subscribers("session_end")``.
     """
     if bus is None:
         from opencomputer.ingestion.bus import get_default_bus
 
         bus = get_default_bus()
     tool_sub = bus.subscribe("tool_call", _on_tool_call_event)
-    session_sub = bus.subscribe("session_end", _on_session_end_event)
-    return tool_sub, session_sub
+    bus.subscribe("session_end", _on_session_end_event)
+    return tool_sub
 
 
 def is_collection_enabled() -> bool:
@@ -350,13 +351,14 @@ def set_collection_enabled(enabled: bool) -> None:
         flag.unlink()
 
 
-def bootstrap_if_enabled() -> tuple[Subscription, Subscription] | None:
+def bootstrap_if_enabled() -> Subscription | None:
     """Auto-register the bus subscribers if the on-disk flag is set.
 
     Callers (e.g. AgentLoop initialization, opencomputer CLI startup) can invoke
-    this to opt into auto-collection. Returns the pair of Subscriptions
-    ``(tool_call_sub, session_end_sub)`` so the caller can cleanly unsubscribe
-    both on shutdown, or ``None`` if collection is disabled.
+    this to opt into auto-collection. Returns the ``tool_call`` Subscription
+    (matching the pre-B3 contract), or ``None`` if collection is disabled.
+    A ``session_end`` subscription is also created internally — see
+    ``register_with_bus`` for the design rationale.
     """
     if not is_collection_enabled():
         return None
