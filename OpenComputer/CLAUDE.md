@@ -400,6 +400,56 @@ dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Su
 
 ---
 
+### 4.5 `oc workspace` — hermes-workspace as a second browser surface (2026-05-12)
+
+**Status:** active default. Sibling to `oc webui` — leaves the existing webui untouched. `oc workspace` launches [hermes-workspace](https://github.com/outsourc-e/hermes-workspace) (MIT, Node SSR React app) pointed at OC's dashboard FastAPI as an OpenAI-compatible chat backend.
+
+**What it adds:**
+
+1. **OpenAI-compat HTTP shim** — `opencomputer/dashboard/routes/openai_compat.py` adds three routes to the existing dashboard FastAPI app (port 9119):
+   - `GET /v1/health` — public liveness probe
+   - `GET /v1/models` — OpenAI list shape over `cli_model_picker._grouped_models()`, deduped by model id
+   - `POST /v1/chat/completions` — Bearer-gated, streaming (SSE) + non-streaming, backed by `AgentLoop.run_conversation`. Stateless per request: the `messages[]` array drives `initial_messages`; the final user turn is `user_message`. Tool calls happen inside the loop but are not surfaced as OpenAI `tool_calls` deltas in v1 — only the terminal text response is streamed back. Body capped at 4 MiB; completion wall-clock cap 10 minutes; backpressure-safe SSE pump (drop deltas + tail marker rather than blocking the model thread).
+2. **`oc workspace` CLI** (`opencomputer/cli_workspace.py`):
+   - `oc workspace` (bare) / `oc workspace run` — discover hermes-workspace dir, check prereqs (node ≥ 22, pnpm ≥ 9), build if needed, spawn dashboard thread + Node subprocess, health-check both, open browser, block until Ctrl+C.
+   - `oc workspace build [--force]` — run `pnpm install` + `pnpm build`.
+   - `oc workspace doctor` — print prereq status + discovery + cache state.
+3. **Launcher package** (`opencomputer/workspace/`):
+   - `discovery.py` — explicit `--workspace-dir` → `$OC_WORKSPACE_DIR` → `<profile>/workspace/` → `~/.opencomputer/workspace/` → `/Users/saksham/Vscode/claude/sources/hermes-workspace/` dev-fallback. Explicit-then-invalid is a HARD ERROR, never silent fallback.
+   - `prerequisites.py` — `node --version` + `pnpm --version` with version-major gates and timeout.
+   - `builder.py` — cache hit when `dist/server/server.js` + `node_modules/.modules.yaml` are both present AND newer than `package.json`. Detects interrupted installs (presence of `node_modules/` without `.modules.yaml` = "half-baked, reinstall").
+   - `launcher.py` — `node server-entry.js` subprocess with enriched env (`HERMES_API_URL`, `HERMES_API_TOKEN`, `PORT`, `HOST`, `NODE_ENV`, `OPENCOMPUTER_HOME`). POSIX: `start_new_session=True` + process-group SIGTERM→5s→SIGKILL on shutdown. Health-check polls `http://host:port/` until non-5xx with exponential backoff capped at 2s.
+   - `lifecycle.py` — coordinates: start in-process `DashboardServer` thread, capture `app.state.session_token`, await `/api/health`, then `spawn_workspace`, then optionally `webbrowser.open`. Refuses to start when the dashboard port is in use (token is per-process; reuse needs disk persistence which is a follow-up).
+
+**Env vars:**
+
+| Var | Default | Purpose |
+|---|---|---|
+| `OC_WORKSPACE_DIR` | (unset; discovery) | Override workspace dir |
+| `HERMES_API_URL` | set by launcher | Workspace → dashboard URL |
+| `HERMES_API_TOKEN` | set by launcher | Bearer for `/v1/*` |
+| (set into subprocess) `HOST`, `PORT`, `NODE_ENV`, `OPENCOMPUTER_HOME` | as appropriate | Workspace runtime |
+
+**Failure modes (all surface loudly):**
+- node / pnpm missing or too old → `oc workspace doctor` shows MISSING; `run` exits 1 with install link
+- Workspace dir not found → list every searched path; suggest `git clone` target
+- Dashboard port in use → exit 1 with `--dashboard-port` hint (no token-discovery for shared dashboards in v1)
+- Node exits before health-check → `LaunchFailed` with the captured exit code
+- AgentLoop raises mid-stream → in-band SSE error chunk + `data: [DONE]`; HTTP stays 200 because the stream is already open
+- 4 MiB+ body → 413 OpenAI error envelope (`HTTP_413_CONTENT_TOO_LARGE` w/ legacy `HTTP_413_REQUEST_ENTITY_TOO_LARGE` fallback)
+- Empty / no-user-message / malformed JSON / missing `messages` → 400 OpenAI error envelope with structured `code`
+
+**Honest scope limits (documented in CLI startup banner):**
+- Sessions / Skills / MCP / Conductor / Swarm tabs in the workspace show "Not Available" — those endpoints (`/api/sessions/...`, `/api/skills/...`, `/api/conductor/...`) are hermes-agent-shape, OC exposes its own `/api/v1/...` shape. Mapping is a future PR.
+- Tool-call rendering: workspace will not show OC's `Edit`/`Bash`/etc. tool calls — only the terminal text response is streamed back. Translating OC tool blocks to OpenAI `tool_calls` deltas is a future PR.
+- Per-request AgentLoop construction (~1s cold) — high-concurrency users will feel it. Per-profile loop cache is a future PR (see comment in `_run_agent_completion`).
+
+**Spec:** `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-design.md` + workflow notes at `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-workflow-notes.md`.
+
+**Tests:** `tests/test_workspace_discovery.py`, `test_workspace_prerequisites.py`, `test_workspace_builder.py`, `test_workspace_launcher.py`, `test_cli_workspace.py`, `test_dashboard_openai_compat.py`. 72 tests; full green.
+
+---
+
 ## 5. What's NEXT — single source of truth
 
 > **This section is the authoritative phase map.** The omnibus plan `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` drove Sub-projects A–D to completion; two older plans (`delightful-sauteeing-sutherland.md`, `phase-12-ultraplan-spec.md`) are superseded — do not use them.

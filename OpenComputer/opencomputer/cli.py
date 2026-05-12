@@ -3950,6 +3950,16 @@ def webui(
     raise typer.Exit(code=result.returncode)
 
 
+# ``oc workspace`` — sibling browser surface to ``oc webui``. Launches
+# hermes-workspace (Node SSR) and points it at OC's dashboard FastAPI as
+# the OpenAI-compatible backend. Lives in its own module because the
+# launcher's surface area (discovery + prereqs + builder + lifecycle) is
+# too large to inline cleanly here.
+from opencomputer.cli_workspace import workspace_app  # noqa: E402
+
+app.add_typer(workspace_app, name="workspace")
+
+
 @app.command()
 def plugins() -> None:
     """List discovered plugins (metadata only — no activation).
