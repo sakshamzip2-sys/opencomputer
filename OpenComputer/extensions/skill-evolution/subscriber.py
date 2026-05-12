@@ -76,28 +76,72 @@ _HEARTBEAT_FILENAME = "evolution_heartbeat"
 
 
 def _is_enabled(profile_home: Path) -> bool:
-    """Read state file; default to enabled when file missing.
+    """Read state file; defensive-default-on across every adversarial shape.
 
-    2026-05-10 — flipped from default-off (opt-in) to default-on
-    (opt-out). A missing or unreadable state file now returns True so
-    fresh installs auto-collect trajectories. ``oc skills evolution off``
-    writes ``{"enabled": false}`` to opt out. Malformed JSON still
-    returns False — surface as a config error rather than silently
-    auto-collect under unknown state.
+    History
+    -------
+    * 2026-05-10 — flipped from default-off (opt-in) to default-on
+      (opt-out). Missing / unreadable file returned True; malformed
+      JSON returned False (silent disable on corruption).
+    * 2026-05-12 — Gap 2 fix from ``self-evolution-gaps-deep-dive.md``:
+      malformed / non-UTF-8 / non-dict shapes also default-on with
+      WARN logging. The ONLY remaining opt-out is explicit
+      ``{"enabled": false}`` (or any falsy explicit value via
+      bool() coercion).
+
+    Why the change matters
+    ----------------------
+    Silently disabling on corruption was the load-bearing surprise: a
+    touched-but-empty state file (zero-byte from an interrupted write,
+    a permission glitch mid-rewrite, or a hand-edit gone wrong) would
+    no-op the entire feature with no operator-visible signal. The
+    subscriber would heartbeat-on-event but never extract.
+
+    Defensive default means: when in doubt about user intent, run the
+    feature (consistent with the 2026-05-10 default-on flip), and log
+    WARN so the corruption surfaces. Privacy preserved — explicit
+    ``{"enabled": false}`` still opts out; no auto-data-collection
+    behind the user's back.
     """
     state_path = profile_home / "skills" / _STATE_FILENAME
     try:
         raw = state_path.read_text(encoding="utf-8")
     except (OSError, FileNotFoundError):
         return True
+    except UnicodeDecodeError:
+        _log.warning(
+            "skill-evolution: state.json at %s has non-UTF-8 bytes — "
+            "defaulting to enabled. Fix or remove the file to clear this warning.",
+            state_path,
+        )
+        return True
+    if not raw.strip():
+        # Zero-byte / whitespace-only file. Pre-fix this raised
+        # JSONDecodeError → silent False. Now: WARN + default-on.
+        _log.warning(
+            "skill-evolution: state.json at %s is empty — defaulting to enabled. "
+            "Write {\"enabled\": false} to opt out, or remove the file entirely.",
+            state_path,
+        )
+        return True
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         _log.warning(
-            "skill-evolution: malformed state.json at %s — treating as disabled",
+            "skill-evolution: state.json at %s is malformed JSON — defaulting to "
+            "enabled. Either fix the JSON, write {\"enabled\": false} to opt out, "
+            "or remove the file to use the default.",
             state_path,
         )
-        return False
+        return True
+    if not isinstance(data, dict):
+        _log.warning(
+            "skill-evolution: state.json at %s is %s (expected dict) — defaulting to "
+            "enabled. Rewrite as {\"enabled\": true|false}.",
+            state_path,
+            type(data).__name__,
+        )
+        return True
     return bool(data.get("enabled", True))
 
 
