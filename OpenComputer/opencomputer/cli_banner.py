@@ -65,9 +65,9 @@ _DIVIDER = _BORDER
 # Layout knobs.
 _WORDMARK_MIN_WIDTH = OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH + 2
 _PANEL_MIN_WIDTH = 70           # below this, drop the panel and just print plain text
-_TOOLS_MAX_TOOLSETS = 8         # show first N toolset rows
-_SKILLS_MAX_CATEGORIES = 8      # show first N skill-category rows
-_PER_GROUP_CHAR_BUDGET = 50     # truncate ``cat: a, b, c, ...`` if items >50 chars
+_TOOLS_MAX_TOOLSETS = 12        # show first N toolset rows
+_SKILLS_MAX_CATEGORIES = 20     # show first N skill-category rows (matches Hermes density)
+_PER_GROUP_CHAR_BUDGET = 60     # truncate ``cat: a, b, c, ...`` if items >N chars
 
 
 # --- Helpers -----------------------------------------------------------
@@ -227,6 +227,44 @@ def _format_group_line(group: str, items: list[str]) -> str:
     """One Rich-markup row: ``[dim DIM]group:[/] [TEXT]a, b, c, ...[/]``."""
     items_str = _truncate_items_list(sorted(items), _PER_GROUP_CHAR_BUDGET)
     return f"[dim {_DIM}]{group}:[/] [{_TEXT}]{items_str}[/]"
+
+
+def _categorize_skills_by_prefix(
+    grouped: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Re-bucket flat-layout skills by first-hyphen-segment prefix.
+
+    OC's ``get_available_skills()`` returns ``{"skills": [name, ...]}``
+    when the on-disk layout is flat (``~/.opencomputer/skills/<skill>/
+    SKILL.md`` — no category subdir). The splash needs the
+    Hermes-style multi-row look, so we derive categories from the
+    skill names themselves: ``apple-notes`` + ``apple-reminders``
+    bucket under ``apple``; ``github-auth`` + ``github-pr`` under
+    ``github``; unique single-skill prefixes fall into a ``general``
+    bucket so we don't render 79 rows of 1 skill each.
+
+    No-op when the input already has multiple groups (the caller has
+    a real category-aware layout).
+    """
+    if len(grouped) > 1:
+        return grouped
+    flat = [name for names in grouped.values() for name in names]
+    if not flat:
+        return grouped
+    by_prefix: dict[str, list[str]] = {}
+    for name in flat:
+        prefix = name.split("-", 1)[0] if "-" in name else "general"
+        by_prefix.setdefault(prefix, []).append(name)
+    multi: dict[str, list[str]] = {}
+    leftover: list[str] = []
+    for prefix, names in by_prefix.items():
+        if len(names) >= 2 and prefix != "general":
+            multi[prefix] = sorted(names)
+        else:
+            leftover.extend(names)
+    if leftover:
+        multi["general"] = sorted(leftover)
+    return dict(sorted(multi.items()))
 
 
 # --- Tip rotation (OC-flavored) ---------------------------------------
@@ -501,9 +539,13 @@ def _render_panel(
     from rich.table import Table
 
     left = _build_left_column(model, provider, cwd, session_id, session_label)
+    # Apply the prefix-derived recategorization to skills so a flat
+    # ``{"skills": [139 names]}`` registry shows as multiple rows
+    # (apple, github, opencomputer, …) instead of a single line.
+    skills_grouped = _categorize_skills_by_prefix(get_available_skills() or {})
     right = _build_right_column(
         get_available_tools() or {},
-        get_available_skills() or {},
+        skills_grouped,
         mcp_status=mcp_status,
     )
 

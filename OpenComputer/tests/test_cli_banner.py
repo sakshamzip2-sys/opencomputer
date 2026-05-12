@@ -242,32 +242,41 @@ def test_session_label_echoing_uuid_is_treated_as_no_label(monkeypatch):
     assert "…" in out
 
 
-def test_panel_renders_tools_section_with_top_8_toolsets(monkeypatch):
-    """Tools section: ``Available Tools`` header + up to 8 toolset rows,
-    each ``toolset: tool, tool, ...``. Overflow shown as ``(and N more
-    toolsets...)``.
+def test_panel_renders_tools_section_with_top_n_toolsets(monkeypatch):
+    """Tools section: ``Available Tools`` header + up to
+    ``_TOOLS_MAX_TOOLSETS`` toolset rows, each ``toolset: tool, tool,
+    ...``. Overflow shown as ``(and N more toolsets...)``.
     """
-    tools = {f"toolset_{i:02d}": [f"tool_{i}_a", f"tool_{i}_b"] for i in range(12)}
+    from opencomputer.cli_banner import _TOOLS_MAX_TOOLSETS
+
+    n_input = _TOOLS_MAX_TOOLSETS + 4
+    tools = {f"toolset_{i:02d}": [f"tool_{i}_a", f"tool_{i}_b"] for i in range(n_input)}
     out = _render(monkeypatch, width=140, tools=tools)
     assert "Available Tools" in out
     assert "toolset_00:" in out
-    assert "toolset_07:" in out  # 8th (index 7)
-    assert "toolset_08:" not in out  # 9th is collapsed
-    assert "(and 4 more toolsets...)" in out
+    # Last row shown is _TOOLS_MAX_TOOLSETS - 1 (0-indexed).
+    assert f"toolset_{_TOOLS_MAX_TOOLSETS - 1:02d}:" in out
+    # First collapsed row is _TOOLS_MAX_TOOLSETS.
+    assert f"toolset_{_TOOLS_MAX_TOOLSETS:02d}:" not in out
+    assert f"(and {n_input - _TOOLS_MAX_TOOLSETS} more toolsets...)" in out
 
 
-def test_panel_renders_skills_section_with_top_8_categories(monkeypatch):
-    """Skills section: ``Available Skills`` header + up to 8 category
-    rows. Overflow shown as ``(and N more categories...)``.
+def test_panel_renders_skills_section_with_top_n_categories(monkeypatch):
+    """Skills section: ``Available Skills`` header + up to
+    ``_SKILLS_MAX_CATEGORIES`` category rows. Overflow shown as
+    ``(and N more categories...)``.
     """
-    skills = {f"cat_{i:02d}": [f"skill_{i}"] for i in range(15)}
+    from opencomputer.cli_banner import _SKILLS_MAX_CATEGORIES
+
+    n_input = _SKILLS_MAX_CATEGORIES + 7
+    skills = {f"cat_{i:02d}": [f"skill_{i}"] for i in range(n_input)}
     out = _render(monkeypatch, width=140, skills=skills)
     assert "Available Singular Skills" not in out
     assert "Available Skills" in out
     assert "cat_00:" in out
-    assert "cat_07:" in out
-    assert "cat_08:" not in out  # collapsed
-    assert "(and 7 more categories...)" in out
+    assert f"cat_{_SKILLS_MAX_CATEGORIES - 1:02d}:" in out
+    assert f"cat_{_SKILLS_MAX_CATEGORIES:02d}:" not in out
+    assert f"(and {n_input - _SKILLS_MAX_CATEGORIES} more categories...)" in out
 
 
 def test_panel_renders_summary_line_with_real_counts(monkeypatch):
@@ -465,6 +474,57 @@ def test_panel_renders_at_full_width_with_real_data_shape(monkeypatch):
     assert "arxiv" in out
     assert "Welcome to OpenComputer!" in out
     assert "✦ Tip:" in out
+
+
+def test_categorize_skills_by_prefix_buckets_flat_input():
+    """Flat ``{"skills": [...]}`` registry (OC's default layout) gets
+    re-bucketed by first hyphen segment. Multi-skill prefixes become
+    their own categories; singletons collapse to ``general``.
+    """
+    from opencomputer.cli_banner import _categorize_skills_by_prefix
+
+    out = _categorize_skills_by_prefix({
+        "skills": [
+            "apple-notes", "apple-reminders",
+            "github-auth", "github-pr",
+            "loner-tool",     # singleton — falls into general
+            "another-tool",   # singleton — falls into general
+            "general-x",      # explicit "general" prefix collides
+        ]
+    })
+    assert "apple" in out
+    assert sorted(out["apple"]) == ["apple-notes", "apple-reminders"]
+    assert "github" in out
+    assert sorted(out["github"]) == ["github-auth", "github-pr"]
+    # Singleton prefixes + "general"-prefixed items collapse to "general".
+    assert "loner" not in out
+    assert "another" not in out
+    assert "general" in out
+    assert "loner-tool" in out["general"]
+    assert "another-tool" in out["general"]
+    assert "general-x" in out["general"]
+
+
+def test_categorize_skills_by_prefix_preserves_multi_group_input():
+    """A registry that already has multiple groups (real category-aware
+    layout) is returned unchanged — we only re-bucket flat inputs.
+    """
+    from opencomputer.cli_banner import _categorize_skills_by_prefix
+
+    incoming = {
+        "coding": ["edit-skill", "review-skill"],
+        "research": ["arxiv", "blogwatcher"],
+    }
+    out = _categorize_skills_by_prefix(incoming)
+    assert out == incoming
+
+
+def test_categorize_skills_by_prefix_empty_input():
+    """Empty registry → empty output, no crash."""
+    from opencomputer.cli_banner import _categorize_skills_by_prefix
+
+    assert _categorize_skills_by_prefix({}) == {}
+    assert _categorize_skills_by_prefix({"skills": []}) == {"skills": []}
 
 
 def test_long_toolset_items_truncated_per_row(monkeypatch):
