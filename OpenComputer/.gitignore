@@ -30,8 +30,17 @@ sdist/
 # Frontend build artifacts (produced by `cd ui-web && npm run build` /
 # `cd ui-tui && npm run build`). Excluded from git but force-included
 # in the wheel via pyproject.toml [tool.hatch.build.targets.wheel.force-include].
+#
+# The trailing-slash variants only match real directories. The
+# scripts/bootstrap_worktree.sh helper creates SYMLINKS at the same
+# paths so fresh git worktrees can run `uv tool install --editable .`
+# without first building the SPA / TUI; the non-trailing-slash variants
+# (added 2026-05-12) keep those symlinks out of `git status`.
 opencomputer/dashboard/static/spa/
+opencomputer/dashboard/static/spa
 opencomputer/ui-tui/dist/
+opencomputer/ui-tui/dist
+opencomputer/ui-tui
 ui-tui/dist/
 ui-tui/packages/*/dist/
 

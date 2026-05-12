@@ -222,3 +222,100 @@ def test_workspace_process_shutdown_idempotent() -> None:
     assert rc2 == 0
     # Second call must not re-invoke terminate/kill — proc.wait called once.
     assert proc.wait.call_count == 1
+
+
+def test_await_health_swallows_httpx_timeout_errors(fake_spec: LaunchSpec) -> None:
+    """Regression for 2026-05-12: an unhandled httpx.ReadTimeout escaped
+    _await_health, propagated through spawn_workspace's narrow
+    ``except LaunchFailed``, crashed the Python parent, and left the Node
+    subprocess orphaned. The fix broadened _await_health's except to all
+    Exception (so timeouts just retry) AND broadened spawn_workspace's
+    except to BaseException (so any unexpected failure still kills Node).
+
+    This test verifies the inner loop swallows httpx timeout exceptions
+    instead of propagating them.
+    """
+    import httpx
+
+    from opencomputer.workspace.launcher import LaunchFailed, _await_health
+
+    class _DummyProc:
+        pid = 999
+        returncode = None
+
+        def poll(self) -> None:
+            return None  # alive throughout
+
+    call_count = 0
+
+    class _AlwaysTimeoutClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> _AlwaysTimeoutClient:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def get(self, *args: Any, **kwargs: Any) -> None:
+            nonlocal call_count
+            call_count += 1
+            raise httpx.ReadTimeout("simulated read timeout")
+
+    with patch("httpx.Client", _AlwaysTimeoutClient):
+        # 1.5s gives the loop enough wall-clock to make 2-3 attempts but
+        # not so long that the test drags. We expect LaunchFailed at the
+        # end (not ReadTimeout propagating uncaught).
+        with pytest.raises(LaunchFailed, match=r"did not respond .* within 1s"):
+            _await_health(
+                fake_spec.host,
+                fake_spec.port,
+                timeout=1.0,
+                process=_DummyProc(),  # type: ignore[arg-type]
+            )
+    # At least one inner-loop iteration ran and caught the timeout.
+    assert call_count >= 1
+
+
+def test_spawn_workspace_kills_node_on_unexpected_exception(
+    fake_spec: LaunchSpec,
+) -> None:
+    """Regression for 2026-05-12: any exception during health check
+    (not just LaunchFailed) must kill the Node subprocess. Previously,
+    a non-LaunchFailed exception would escape with Node still running,
+    leaving an orphan."""
+    killed: list[int] = []
+
+    class _DummyProc:
+        pid = 12345
+        returncode = None
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            killed.append(15)
+
+        def kill(self) -> None:
+            killed.append(9)
+
+    def _await_unexpected(*_: Any, **__: Any) -> None:
+        raise RuntimeError("unexpected timeout-shaped exception")
+
+    with (
+        patch("subprocess.Popen", return_value=_DummyProc()),
+        patch("opencomputer.workspace.launcher._port_in_use", return_value=False),
+        patch("opencomputer.workspace.launcher._await_health", side_effect=_await_unexpected),
+        patch("os.getpgid", return_value=12345),
+        patch("os.killpg", side_effect=lambda pgid, sig: killed.append(sig)),
+        pytest.raises(RuntimeError, match="unexpected"),
+    ):
+        spawn_workspace(fake_spec)
+
+    # The broadened exception handler must have invoked process-group
+    # SIGTERM (signal.SIGTERM == 15) before re-raising.
+    assert 15 in killed, f"expected SIGTERM to be sent, got kills={killed}"

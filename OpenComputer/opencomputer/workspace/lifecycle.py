@@ -33,7 +33,6 @@ from typing import Any
 import httpx
 
 from opencomputer.workspace.launcher import (
-    LaunchFailed,
     LaunchSpec,
     WorkspaceProcess,
     spawn_workspace,
@@ -236,7 +235,14 @@ class WorkspaceLifecycle:
 
         try:
             self._start_workspace()
-        except (LaunchFailed, FileNotFoundError, RuntimeError):
+        except BaseException:
+            # Broad on purpose: any failure (LaunchFailed,
+            # FileNotFoundError, RuntimeError, KeyboardInterrupt, an
+            # unexpected exception) must stop the dashboard thread.
+            # Without this the dashboard would silently linger if a
+            # caller hit Ctrl-C during workspace boot. (2026-05-12 audit
+            # follow-up — paired with the launcher's broadened catch
+            # that now kills Node on every failure path.)
             self._stop_dashboard()
             raise
 

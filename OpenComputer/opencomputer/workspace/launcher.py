@@ -196,7 +196,15 @@ def _await_health(
     """Poll ``http://host:port/`` until it responds 200 or we time out.
 
     Raises :class:`LaunchFailed` if the subprocess exits before health
-    completes (caller surfaces stderr).
+    completes (caller surfaces stderr) OR if no response arrives within
+    ``timeout`` seconds.
+
+    Exception handling is INTENTIONALLY broad: any httpx-side error
+    (ConnectError / ReadError / TimeoutException family / etc.) means
+    "not ready yet, retry". Letting ``httpx.ReadTimeout`` or
+    ``httpx.ConnectTimeout`` escape would propagate uncaught into the
+    lifecycle's narrow exception handler and orphan the Node process —
+    the bug behind the 2026-05-12 "error: timed out" report.
     """
     deadline = time.monotonic() + timeout
     last_error: str = ""
@@ -209,14 +217,14 @@ def _await_health(
                 f"{process.returncode} before health-check completed"
             )
         try:
-            with httpx.Client(timeout=2.0) as client:
+            with httpx.Client(timeout=5.0) as client:
                 resp = client.get(probe_url, follow_redirects=False)
             if resp.status_code < 500:
                 # Any non-5xx means the server is up and routing.
                 # /  serves HTML; 200 expected but 301/302 also fine.
                 return
             last_error = f"HTTP {resp.status_code}"
-        except (httpx.ConnectError, httpx.ReadError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 — broad on purpose, see docstring
             last_error = str(exc) or exc.__class__.__name__
         time.sleep(poll_interval)
         # Back off a touch on long waits but cap at 2s to keep boot time tight.
@@ -304,8 +312,13 @@ def spawn_workspace(spec: LaunchSpec) -> WorkspaceProcess:
             timeout=spec.health_timeout_seconds,
             process=process,
         )
-    except LaunchFailed:
-        # Health failed — kill the child cleanly before raising.
+    except BaseException:
+        # ANY failure (LaunchFailed, KeyboardInterrupt, an unexpected
+        # exception from httpx, signal-driven cancellation) must kill the
+        # child cleanly — otherwise the node process is orphaned, holding
+        # the workspace port and presenting a dead UI. 2026-05-12 bug:
+        # an unhandled httpx.ReadTimeout escaped here and left node
+        # running on :3000 with the python parent dead.
         try:
             if os.name == "posix":
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
@@ -313,7 +326,14 @@ def spawn_workspace(spec: LaunchSpec) -> WorkspaceProcess:
                 process.terminate()
             process.wait(timeout=3.0)
         except Exception:  # noqa: BLE001
-            pass
+            try:
+                if os.name == "posix":
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=2.0)
+            except Exception:  # noqa: BLE001
+                pass
         raise
     return WorkspaceProcess(
         process=process, host=spec.host, port=spec.port,

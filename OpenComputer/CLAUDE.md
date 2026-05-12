@@ -449,7 +449,11 @@ dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Su
 
 **Spec:** `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-design.md` + workflow notes at `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-workflow-notes.md`.
 
-**Tests:** `tests/test_workspace_discovery.py`, `test_workspace_prerequisites.py`, `test_workspace_builder.py`, `test_workspace_launcher.py`, `test_cli_workspace.py`, `test_dashboard_openai_compat.py`. 72 tests; full green.
+**Tests:** `tests/test_workspace_discovery.py`, `test_workspace_prerequisites.py`, `test_workspace_builder.py`, `test_workspace_launcher.py`, `test_cli_workspace.py`, `test_dashboard_openai_compat.py`, `test_dashboard_health_alias.py`. 76 tests; full green.
+
+**Worktree bootstrap (2026-05-12).** `pyproject.toml` force-includes `opencomputer/ui-tui/dist/` and `opencomputer/dashboard/static/spa/` (gitignored build artifacts). A fresh `git worktree add` for this branch won't have those, so `uv tool install --editable .` would fail with `Forced include not found`. Fix: run `./scripts/bootstrap_worktree.sh` once after creating the worktree — it auto-discovers the sibling main checkout and symlinks the two dirs across. `.gitignore` covers the symlinks so they never show in `git status`.
+
+**Launcher resilience (2026-05-12).** `_await_health` catches every `Exception` (not just `httpx.ConnectError/ReadError/OSError`) so an `httpx.ReadTimeout` can't escape uncaught and orphan the Node subprocess. `spawn_workspace` catches `BaseException` so the SIGTERM-then-SIGKILL cleanup runs on any failure path (including KeyboardInterrupt and unexpected exceptions). `lifecycle._start_workspace` mirrors the broad-catch so the dashboard is always stopped on failure. Regression tests: `test_await_health_swallows_httpx_timeout_errors`, `test_spawn_workspace_kills_node_on_unexpected_exception`.
 
 ---
 
