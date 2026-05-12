@@ -78,6 +78,96 @@ def _save_state(state: dict[str, Any], path: Path | None = None) -> None:
     os.replace(tmp, p)
 
 
+# ─── run-summary serialization (M3 audit fallback) ─────────────────
+#
+# The doc compared OC vs Hermes-SE and observed 222 events processed yet
+# MEMORY.md was empty. Why? No persisted audit of gate decisions. We add
+# a *counts-only* summary to state.json — small, additive, no schema
+# migration. Per-candidate text never persists; only categorical
+# rationales are parsed for fail-class counts.
+#
+# Why parse rationales rather than introspect outcomes? Because two
+# different fail classes both produce HELD: score-too-low OR
+# recall-too-low. The rationale string is the only carrier of WHICH
+# gate(s) were decisive. The engine writes those strings
+# deterministically (``DreamingPipeline.run_once`` emits literal
+# ``score=…<…`` and ``recall=…<…`` substrings), so a regex over them is
+# safe.
+#
+# Disjoint vs aggregate counters: a HELD candidate where BOTH gates
+# failed has both substrings in its rationale. We split counts into
+# disjoint buckets (``score_only`` / ``recall_only`` / ``both_gates``)
+# so ``held == score_only + recall_only + both_gates`` is an invariant
+# the dashboard / user can rely on without scratching their head over
+# overlaps.
+
+_SCORE_FAIL_RE = re.compile(r"score=[\d.]+<")
+_RECALL_FAIL_RE = re.compile(r"recall=\d+<")
+
+
+def summarize_run_for_state(
+    summary: DreamRunSummary, *, run_ts_ns: int
+) -> dict[str, Any]:
+    """Map a ``DreamRunSummary`` to a JSON-safe counts dict.
+
+    Persisted as ``state["last_summary"]`` so ``oc evolution dashboard``
+    can show *why* nothing promoted without re-running the pipeline.
+    Privacy: never includes ``raw_text`` or ``rationale`` per-record —
+    only aggregate counts.
+
+    HELD-bucket counts are disjoint::
+
+        held == score_only + recall_only + both_gates + unattributed
+
+    so the dashboard does not need to explain overlap to the operator.
+    ``unattributed`` is always 0 under normal engine behavior; any
+    non-zero value is logged at WARNING by this function and indicates
+    the engine's rationale-string format has drifted.
+    """
+    score_only = 0
+    recall_only = 0
+    both_gates = 0
+    unattributed = 0
+    for r in summary.held:
+        sf = bool(_SCORE_FAIL_RE.search(r.rationale))
+        rf = bool(_RECALL_FAIL_RE.search(r.rationale))
+        if sf and rf:
+            both_gates += 1
+        elif sf:
+            score_only += 1
+        elif rf:
+            recall_only += 1
+        else:
+            # HELD with neither marker indicates the engine's rationale
+            # format has drifted from what this regex expects. Loud-fail
+            # per principal-engineer rule — count + warn so the operator
+            # sees the breakdown invariant violation rather than the
+            # mismatch hiding behind a silently-correct ``held`` total.
+            unattributed += 1
+    if unattributed:
+        logger.warning(
+            "dreaming_v2: %d held rationale(s) did not match either gate-fail "
+            "regex; disjoint breakdown will under-count by this number. "
+            "Engine rationale format may have changed — check "
+            "DreamingPipeline.run_once.",
+            unattributed,
+        )
+
+    return {
+        "promoted": len(summary.promoted),
+        "held": len(summary.held),
+        "dropped": len(summary.dropped),
+        "score_only": score_only,
+        "recall_only": recall_only,
+        "both_gates": both_gates,
+        "unattributed": unattributed,
+        "diversity_fail": len(summary.dropped),
+        "evaluated": int(summary.total_evaluated),
+        "catch_up_run": bool(summary.catch_up_run),
+        "run_ts_ns": int(run_ts_ns),
+    }
+
+
 # ─── candidate fetcher ────────────────────────────────────────────
 
 
@@ -515,7 +605,22 @@ async def run_dreaming_v2_async(
                     )
 
     state["processed_event_ids"] = sorted(already_processed)
-    state["last_run_ts_ns"] = int(_dt.datetime.now(tz=_dt.UTC).timestamp() * 1e9)
+    now_ns = int(_dt.datetime.now(tz=_dt.UTC).timestamp() * 1e9)
+    state["last_run_ts_ns"] = now_ns
+    # Audit fallback (M3): persist counts-only summary so the dashboard
+    # can show why the last run did/didn't promote. Wrapped in try so
+    # any future shape change to DreamRunSummary degrades cleanly —
+    # losing the audit display is strictly better than losing the run.
+    try:
+        state["last_summary"] = summarize_run_for_state(
+            summary, run_ts_ns=now_ns
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "dreaming_v2: failed to serialize last_summary: %s; "
+            "state still saved without it",
+            exc,
+        )
     _save_state(state, state_path)
 
     return summary
