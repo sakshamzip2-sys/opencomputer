@@ -220,6 +220,12 @@ def _render_text_fallback(console: Console, term_width: int) -> None:
     """Narrow-terminal fallback: render ``OPENCOMPUTER`` as bold text and
     drop the half-block art. Version cluster (if any) goes on a second
     line so we don't clip on very narrow terminals.
+
+    At pathologically narrow widths we have to drop pieces, not clip
+    them: ``v2026.5.10.post3 · e71380d`` truncated to ``v2026.5.10.po``
+    is a worse experience than ``v2026.5.10.post3`` alone. So we try the
+    full cluster first; if it doesn't fit, fall back to just ``v{ver}``;
+    if even that doesn't fit, drop the version entirely.
     """
     from rich.text import Text
 
@@ -228,14 +234,26 @@ def _render_text_fallback(console: Console, term_width: int) -> None:
     console.print(title, soft_wrap=False, no_wrap=True, overflow="ellipsis")
 
     version_visible, version_markup = _build_version_cluster()
-    if version_visible:
-        # Right-aligned when there's room, otherwise just print.
+    if not version_visible:
+        return
+    if len(version_visible) <= term_width:
+        # Full cluster fits — render it (right-aligned if room).
         ver = Text.from_markup(version_markup)
         pad = max(0, term_width - len(version_visible))
-        if pad > 0:
-            console.print(Text(" " * pad) + ver, no_wrap=True, overflow="ignore")
-        else:
-            console.print(ver, no_wrap=True, overflow="ignore")
+        console.print(
+            Text(" " * pad) + ver, no_wrap=True, overflow="ignore"
+        )
+        return
+    # Full cluster overflows. Try just ``v{ver}`` without the SHA.
+    short_label = f"v{__version__}"
+    if __version__ and len(short_label) <= term_width:
+        console.print(
+            f"[bold {_PRIMARY}]{short_label}[/]",
+            highlight=False, no_wrap=True, overflow="ignore",
+        )
+        return
+    # Even ``v{ver}`` overflows — drop the version line entirely rather
+    # than show a half-truncated string.
 
 
 def _render_footer(console: Console, term_width: int) -> None:

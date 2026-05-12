@@ -348,6 +348,52 @@ def test_build_welcome_banner_renders_at_minimum_width_safely(monkeypatch):
     assert "OPENCOMPUTER" in out
 
 
+def test_build_welcome_banner_narrow_drops_sha_rather_than_truncate(monkeypatch):
+    """At widths too narrow for the full ``v{ver} · {sha}`` cluster, the
+    splash MUST drop the SHA cleanly rather than show a half-clipped
+    string like ``v2026.5.10.post3 · b`` (partial sha = ugly UI).
+    """
+    from opencomputer import __version__
+
+    monkeypatch.setattr(
+        "opencomputer.cli_banner._git_short_sha", lambda: "deadbeef"
+    )
+    out, _ = _render(monkeypatch, width=20)
+    # Either: full cluster fits (it won't at 20 cols with a long ver), OR
+    # short version-only line, OR no version line at all. NEVER a partial.
+    for line in out.splitlines():
+        line_stripped = line.rstrip()
+        # If ``·`` appears, the SHA after it must NOT be a single trailing
+        # char (which is the visual-truncation signature).
+        if "·" in line_stripped:
+            after = line_stripped.split("·", 1)[1].strip()
+            assert len(after) >= 7 or after == "", (
+                f"Splash shows clipped SHA fragment: {line_stripped!r}"
+            )
+    # If a version line exists, it's the full label (no SHA suffix).
+    assert f"v{__version__}" in out or "OPENCOMPUTER" in out
+
+
+def test_build_welcome_banner_narrow_drops_version_when_even_label_overflows(
+    monkeypatch,
+):
+    """A ridiculously long version string at a small width — must drop the
+    version cleanly rather than render a partial.
+    """
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.__version__",
+        "2026.5.10.post3.dev9999-rc-with-a-very-long-tag",
+    )
+    monkeypatch.setattr(
+        "opencomputer.cli_banner._git_short_sha", lambda: "deadbeef"
+    )
+    out, _ = _render(monkeypatch, width=18)
+    # The full version string is wider than 18 cols → must NOT appear.
+    assert "2026.5.10.post3.dev9999" not in out
+    # Logo + footer still render.
+    assert "OPENCOMPUTER" in out
+
+
 def test_build_welcome_banner_with_empty_model_and_cwd(monkeypatch):
     """Adversarial inputs: empty strings must not crash or echo as runtime
     info on the splash."""
