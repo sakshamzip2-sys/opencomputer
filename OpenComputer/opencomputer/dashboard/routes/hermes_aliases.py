@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from opencomputer.dashboard._auth import require_session_token
@@ -59,7 +59,20 @@ async def list_sessions(
     offset: int = Query(0, ge=0),
     channel: str | None = Query(None),
 ) -> dict[str, Any]:
-    """List sessions in the hermes-agent shape: ``{items, total, limit}``."""
+    """List sessions in a UNION shape that satisfies both callers.
+
+    Workspace has TWO listSessions paths:
+    * Gateway path (``getCapabilities().dashboard.available === false``):
+      reads ``resp.items``.
+    * Dashboard path (``available === true``): reads ``resp.sessions``.
+
+    OC always reports ``dashboard.available=true`` once ``/api/status``
+    is wired, so the dashboard path activates and reading ``resp.items``
+    no longer triggers. We return BOTH keys pointing at the same list
+    so a probe or future workspace version that flips between the two
+    paths keeps working without further OC changes. ``offset`` is also
+    included in the response per the dashboard path's signature.
+    """
     from opencomputer.dashboard.routes import sessions as _oc_sessions
 
     # OC's /api/v1/sessions doesn't natively page by offset; it always
@@ -67,9 +80,15 @@ async def list_sessions(
     # rows and slice client-side — fine at our scale (capped at 200).
     fetch = clamp_limit(limit) + offset
     raw = await _oc_sessions.list_sessions(limit=fetch, channel=channel)
-    items = raw.get("items", [])
+    items = raw.get("items", []) or []
     paged = items[offset : offset + clamp_limit(limit)]
-    return {"items": paged, "total": len(items), "limit": clamp_limit(limit)}
+    return {
+        "items": paged,
+        "sessions": paged,
+        "total": len(items),
+        "limit": clamp_limit(limit),
+        "offset": offset,
+    }
 
 
 @router.get("/sessions/search")
@@ -77,21 +96,59 @@ async def search_sessions(
     q: str = Query(..., min_length=1),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
-    """Hermes shape: ``{query, count, results}``."""
+    """Search sessions. Returns BOTH gateway-shape (``{items, count}``)
+    AND dashboard-shape (``{results: [{session_id, snippet, role,
+    source, model, session_started}]}``).
+
+    OC's underlying search yields message rows; we re-shape into the
+    dashboard's per-result entry while keeping the original ``items``
+    array intact for the gateway-shape caller.
+    """
     from opencomputer.dashboard.routes import sessions as _oc_sessions
 
     raw = await _oc_sessions.search_sessions(q=q, limit=clamp_limit(limit))
-    items = raw.get("items", [])
-    return {"query": q, "count": len(items), "results": items}
+    items = raw.get("items", []) or []
+    # Re-shape into the dashboard-search result entries. Best-effort:
+    # OC's message rows include session_id, role, content, timestamp;
+    # source/model are looked up from the parent session if available
+    # (cheap because clamp_limit caps at 200).
+    results: list[dict[str, Any]] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        results.append(
+            {
+                "session_id": row.get("session_id") or row.get("id") or "",
+                "snippet": str(row.get("content") or row.get("snippet") or "")[:300],
+                "role": row.get("role"),
+                "source": row.get("source") or row.get("platform"),
+                "model": row.get("model"),
+                "session_started": row.get("started_at") or row.get("timestamp"),
+            }
+        )
+    return {
+        "query": q,
+        "count": len(results),
+        "results": results,
+        "items": items,
+    }
 
 
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str) -> dict[str, Any]:
-    """Hermes shape: ``{session: {...}}``."""
+    """Return a session in a UNION shape.
+
+    Gateway path expects ``{session: {...}}``; dashboard path expects
+    the flat session object directly. We return the flat object PLUS
+    a ``session`` key wrapping itself, so both callers work.
+    """
     from opencomputer.dashboard.routes import sessions as _oc_sessions
 
     row = await _oc_sessions.get_session(session_id)
-    return {"session": row}
+    if not isinstance(row, dict):
+        return {"session": row}
+    # Flat fields + nested ``session`` mirror — both callers happy.
+    return {**row, "session": row}
 
 
 @router.get("/sessions/{session_id}/messages")
@@ -100,12 +157,37 @@ async def get_messages(
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    """Hermes shape mirrors OC's ``{items, limit, offset, total}``."""
+    """Messages in a UNION shape.
+
+    Gateway path expects ``{items, total, limit, offset}``.
+    Dashboard path expects ``{messages, session_started, model}``.
+
+    We return both — the same list under ``items`` AND ``messages``,
+    plus ``session_started`` and ``model`` looked up from the session
+    row for the dashboard path's UX.
+    """
     from opencomputer.dashboard.routes import sessions as _oc_sessions
 
-    return await _oc_sessions.get_messages(
+    payload = await _oc_sessions.get_messages(
         session_id, limit=limit, offset=offset,
     )
+    items = payload.get("items", []) or []
+    # Best-effort session metadata for the dashboard-shape consumer.
+    started_at: Any = None
+    model: Any = None
+    try:
+        sess = await _oc_sessions.get_session(session_id)
+        if isinstance(sess, dict):
+            started_at = sess.get("started_at")
+            model = sess.get("model")
+    except Exception:  # noqa: BLE001 — metadata is opportunistic, never break
+        pass
+    return {
+        **payload,
+        "messages": items,
+        "session_started": started_at,
+        "model": model,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -212,26 +294,27 @@ async def update_session(
     return {"session": row}
 
 
-@router.delete(
-    "/sessions/{session_id}",
-    status_code=204,
-    response_class=Response,
-)
+@router.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: str,
     _: None = Depends(require_session_token),
-) -> Response:
-    """Delete a session and its messages. 404 if absent; 204 on success.
+) -> dict[str, Any]:
+    """Delete a session and its messages. 404 if absent; 200 ``{ok: true}``
+    on success.
 
-    Empty body on 204 — FastAPI requires ``response_class=Response`` to
-    satisfy the "204 must not have a response body" assertion.
+    Workspace's dashboard-shape ``deleteSession`` parses the response
+    body and expects ``{ok: boolean}``. A 204 with empty body would
+    break ``dashboardJson()`` since it always tries to parse JSON.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise HTTPException(status_code=400, detail="empty session id")
-    from opencomputer.dashboard.routes import sessions as _oc_sessions
+    from opencomputer.dashboard.routes._common import get_session_db
 
-    # OC's delete handler returns a Response(204); pass it through.
-    return await _oc_sessions.delete_session(session_id)
+    with get_session_db() as db:
+        existed = db.delete_session(session_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"ok": True, "deleted": session_id}
 
 
 @router.post("/sessions/{session_id}/fork")
@@ -304,7 +387,8 @@ async def fork_session(
             status_code=500,
             detail=f"fork session failed: {exc}",
         ) from exc
-    return {"session": new_row}
+    # Dashboard-shape ``forkSession`` expects ``{session, forked_from}``.
+    return {"session": new_row, "forked_from": session_id}
 
 
 # ---------------------------------------------------------------------------
