@@ -117,13 +117,17 @@ def summarize_run_for_state(
 
     HELD-bucket counts are disjoint::
 
-        held == score_only + recall_only + both_gates
+        held == score_only + recall_only + both_gates + unattributed
 
     so the dashboard does not need to explain overlap to the operator.
+    ``unattributed`` is always 0 under normal engine behavior; any
+    non-zero value is logged at WARNING by this function and indicates
+    the engine's rationale-string format has drifted.
     """
     score_only = 0
     recall_only = 0
     both_gates = 0
+    unattributed = 0
     for r in summary.held:
         sf = bool(_SCORE_FAIL_RE.search(r.rationale))
         rf = bool(_RECALL_FAIL_RE.search(r.rationale))
@@ -133,9 +137,21 @@ def summarize_run_for_state(
             score_only += 1
         elif rf:
             recall_only += 1
-        # Else: HELD with neither marker — shouldn't happen given engine
-        # behavior, but if it does we silently omit rather than fabricate
-        # a category. The held count still reflects it.
+        else:
+            # HELD with neither marker indicates the engine's rationale
+            # format has drifted from what this regex expects. Loud-fail
+            # per principal-engineer rule — count + warn so the operator
+            # sees the breakdown invariant violation rather than the
+            # mismatch hiding behind a silently-correct ``held`` total.
+            unattributed += 1
+    if unattributed:
+        logger.warning(
+            "dreaming_v2: %d held rationale(s) did not match either gate-fail "
+            "regex; disjoint breakdown will under-count by this number. "
+            "Engine rationale format may have changed — check "
+            "DreamingPipeline.run_once.",
+            unattributed,
+        )
 
     return {
         "promoted": len(summary.promoted),
@@ -144,6 +160,7 @@ def summarize_run_for_state(
         "score_only": score_only,
         "recall_only": recall_only,
         "both_gates": both_gates,
+        "unattributed": unattributed,
         "diversity_fail": len(summary.dropped),
         "evaluated": int(summary.total_evaluated),
         "catch_up_run": bool(summary.catch_up_run),

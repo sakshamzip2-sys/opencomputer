@@ -466,13 +466,54 @@ _HEARTBEAT_IDLE_SECS = 86400  # 24h — still alive but quiet
 
 
 def _collect_operational_rows() -> list[tuple[str, str]]:
-    """Build the Operational table rows. Each helper is fail-soft."""
-    return [
+    """Build the Operational table rows. Each helper is fail-soft.
+
+    A dedicated ``catch-up`` row is inserted only when the most recent
+    dreaming-v2 tick was a catch-up pass (after a missed cron interval).
+    Surfacing it as a discrete row guarantees visibility even on narrow
+    terminals where the value column of the ``dreaming-v2 last run`` row
+    might wrap or truncate.
+    """
+    rows: list[tuple[str, str]] = [
         ("skill-evolution", _skill_evolution_status()),
         ("proposed candidates", _proposed_count()),
         ("dreaming-v2 last run", _dreaming_v2_status()),
-        ("DREAMS.md", _dreams_md_status()),
     ]
+    catch_up = _dreaming_v2_catch_up_flag()
+    if catch_up is True:
+        rows.append(("dreaming-v2 catch-up", "[yellow]last tick was a catch-up pass[/yellow]"))
+    rows.append(("DREAMS.md", _dreams_md_status()))
+    return rows
+
+
+def _dreaming_v2_catch_up_flag() -> bool | None:
+    """Read just the ``catch_up_run`` flag from the persisted summary.
+
+    Returns ``True`` / ``False`` when the state file is readable and
+    well-shaped, ``None`` on any failure (missing file, malformed JSON,
+    unexpected types). Designed for caller logic that wants to render a
+    discrete row only on confirmed-true; ``None`` means "don't know,
+    don't surface the row."
+    """
+    import json
+
+    home = _try_profile_home()
+    if home is None:
+        return None
+    state_path = home / "cron" / "dreaming_v2_state.json"
+    try:
+        if not state_path.exists():
+            return None
+        raw = state_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ls = data.get("last_summary")
+    if not isinstance(ls, dict):
+        return None
+    return bool(ls.get("catch_up_run"))
 
 
 def _profile_home() -> Path:
@@ -614,6 +655,11 @@ def _dreaming_v2_status() -> str:
     if home is None:
         return f"{_DASHBOARD_FALLBACK} (profile unresolved)"
     state_path = home / "cron" / "dreaming_v2_state.json"
+    # Catch both filesystem errors (OSError → permission, missing, broken
+    # symlink, IO error) AND text-decode errors (UnicodeDecodeError, which
+    # subclasses ValueError, not OSError). A non-UTF-8 state file is a
+    # real adversarial-input case — without this widening the dashboard
+    # would crash on a corrupted state file.
     try:
         if not state_path.exists():
             return f"{_DASHBOARD_FALLBACK} (never run — run `oc memory dream-v2-now` to seed)"
@@ -625,6 +671,12 @@ def _dreaming_v2_status() -> str:
             exc_info=True,
         )
         return f"{_DASHBOARD_FALLBACK} (state unreadable)"
+    except UnicodeDecodeError:
+        logger.warning(
+            "evolution dashboard: state file has non-UTF-8 bytes at %s",
+            state_path,
+        )
+        return f"{_DASHBOARD_FALLBACK} (state encoding invalid)"
 
     try:
         data = json.loads(raw)
@@ -659,12 +711,20 @@ def _dreaming_v2_status() -> str:
         so = _safe_int(ls.get("score_only"))
         ro = _safe_int(ls.get("recall_only"))
         bg = _safe_int(ls.get("both_gates"))
+        un = _safe_int(ls.get("unattributed"))
         breakdown = f"score-only={so}, recall-only={ro}, both={bg}"
+        if un:
+            # Engine rationale-format drift — surface loudly so the
+            # operator sees it instead of trusting a silently-wrong sum.
+            breakdown += f", [red]unattributed={un}[/red]"
     else:
         sf = _safe_int(ls.get("score_fail"))
         rf = _safe_int(ls.get("recall_fail"))
         breakdown = f"score-fail={sf}, recall-fail={rf}"
     df = _safe_int(ls.get("diversity_fail"), default=dropped)
+    # NOTE: ``catch_up_run`` is surfaced in a *separate* row by
+    # ``_collect_operational_rows`` so it stays visible on narrow
+    # terminals; this row stays counts-focused.
     return (
         f"promoted={promoted}, held={held}, dropped={dropped} "
         f"[dim]({breakdown}, diversity-fail={df})[/dim]"

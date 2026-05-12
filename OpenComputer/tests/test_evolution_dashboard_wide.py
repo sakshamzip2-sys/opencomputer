@@ -437,3 +437,115 @@ def test_safe_int_handles_adversarial_values() -> None:
     assert _safe_int(["list"]) == 0
     assert _safe_int({"dict": 1}) == 0
     assert _safe_int(object()) == 0
+
+
+def test_dashboard_tolerates_last_summary_as_list(isolated_home: Path) -> None:
+    """Adversarial: last_summary is a JSON list, not dict. Must not crash."""
+    state_path = isolated_home / "cron" / "dreaming_v2_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "processed_event_ids": [],
+                "last_run_ts_ns": 0,
+                "last_summary": [1, 2, 3],
+            }
+        )
+    )
+
+    result = runner.invoke(evolution_app, ["dashboard"])
+    assert result.exit_code == 0
+    assert "Traceback" not in result.stdout
+    assert "last_summary shape unexpected" in result.stdout or "—" in result.stdout
+
+
+def test_dashboard_tolerates_non_utf8_state_json(isolated_home: Path) -> None:
+    """Adversarial: state.json contains non-UTF-8 bytes (e.g. latin-1 garbage).
+    Naive ``read_text(encoding='utf-8')`` would raise UnicodeDecodeError —
+    must be caught explicitly so the rest of the dashboard still renders.
+    """
+    state_path = isolated_home / "cron" / "dreaming_v2_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    # 0xFF is invalid as the start byte of any UTF-8 sequence.
+    state_path.write_bytes(b'{"processed_event_ids": []\xff}')
+
+    result = runner.invoke(evolution_app, ["dashboard"])
+    assert result.exit_code == 0
+    assert "Traceback" not in result.stdout
+
+
+def test_dashboard_renders_catch_up_run_when_true(isolated_home: Path) -> None:
+    """A catch-up tick (after a missed cron interval) must surface in the
+    dashboard so the operator can correlate odd batch sizes with outages.
+    """
+    state_path = isolated_home / "cron" / "dreaming_v2_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "processed_event_ids": [],
+                "last_run_ts_ns": 0,
+                "last_summary": {
+                    "promoted": 1,
+                    "held": 0,
+                    "dropped": 0,
+                    "score_only": 0,
+                    "recall_only": 0,
+                    "both_gates": 0,
+                    "unattributed": 0,
+                    "diversity_fail": 0,
+                    "evaluated": 1,
+                    "catch_up_run": True,
+                    "run_ts_ns": 0,
+                },
+            }
+        )
+    )
+
+    result = runner.invoke(evolution_app, ["dashboard"])
+    assert result.exit_code == 0
+    assert "catch-up" in result.stdout.lower()
+
+
+def test_summarize_run_warns_on_unattributed_held_rationale(
+    caplog,
+) -> None:
+    """If the engine's rationale format drifts (HELD with neither
+    ``score=…<…`` nor ``recall=…<…``), ``summarize_run_for_state`` must
+    WARN — never silently under-count the disjoint breakdown.
+    """
+    import logging
+
+    from opencomputer.cron.dreaming_v2_tick import summarize_run_for_state
+
+    cand = DreamCandidate(event_id="z", raw_text="", timestamp_ns=0)
+    summary = DreamRunSummary(
+        held=(
+            DreamGateResult(
+                candidate=cand,
+                outcome=DreamOutcome.HELD,
+                score=0.9,
+                recall_count=2,
+                diversity_score=0.4,
+                # Rationale string with no score=/recall= markers — drifted.
+                rationale="held: some new reason format",
+            ),
+        ),
+        total_evaluated=1,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="opencomputer.cron.dreaming_v2_tick"):
+        out = summarize_run_for_state(summary, run_ts_ns=0)
+
+    assert out["held"] == 1
+    assert out["score_only"] == 0
+    assert out["recall_only"] == 0
+    assert out["both_gates"] == 0
+    assert out["unattributed"] == 1
+    # Invariant still holds with unattributed bucket.
+    assert (
+        out["score_only"] + out["recall_only"] + out["both_gates"] + out["unattributed"]
+        == out["held"]
+    )
+    assert any("unattributed" in r.message.lower() or "did not match" in r.message
+               for r in caplog.records)
