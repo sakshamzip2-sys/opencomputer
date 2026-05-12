@@ -339,6 +339,15 @@ async def test_run_dreaming_v2_async_promotes_high_quality(
     state = _load_state(state_path)
     assert str(eid) in state["processed_event_ids"]
     assert state["last_run_ts_ns"] is not None
+    # M3 audit fallback — last_summary must be persisted with counts-only.
+    # Privacy: never includes per-candidate rationale strings, only ints.
+    ls = state["last_summary"]
+    assert ls["promoted"] == 1
+    assert ls["held"] == 0
+    assert ls["dropped"] == 0
+    assert ls["evaluated"] == 1
+    assert isinstance(ls["run_ts_ns"], int)
+    assert all(isinstance(v, (int, bool)) for k, v in ls.items())
 
 
 @pytest.mark.asyncio

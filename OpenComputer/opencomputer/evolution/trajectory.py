@@ -282,18 +282,55 @@ def _on_session_end(session_id: str) -> int | None:
         return None
 
 
-def register_with_bus(bus: TypedEventBus | None = None) -> Subscription:
-    """Subscribe `_on_tool_call_event` to the TypedEvent bus.
+def _on_session_end_event(event: Any) -> None:
+    """Bus handler that closes + persists an open trajectory on SessionEndEvent.
 
-    If `bus` is None, uses `get_default_bus()`. Returns the Subscription for later
-    unregistration. Idempotent — safe to call multiple times (multiple subscriptions
-    will fire — caller is responsible for deduping via the returned handle).
+    Wraps :func:`_on_session_end` (which takes a bare session_id string) so
+    it fits the bus contract (handlers receive event objects). NEVER raises
+    into bus fanout — exceptions are logged + swallowed per the bus's
+    exception-isolated fanout guarantee.
+
+    A SessionEndEvent with ``session_id=None`` is silently skipped (cannot
+    bucket anonymously). A SessionEndEvent for a session that has no open
+    trajectory is also a no-op (null != zero — the design distinction
+    between "no data" and "bad outcome": we don't fabricate an empty
+    record).
+    """
+    try:
+        sid = getattr(event, "session_id", None)
+        if not sid:
+            return
+        _on_session_end(sid)
+    except Exception:
+        logger.exception(
+            "evolution: session-end bus handler failed for event %r", event
+        )
+
+
+def register_with_bus(bus: TypedEventBus | None = None) -> Subscription:
+    """Subscribe both the tool_call accumulator and the session_end persister.
+
+    Pre-B3 fix this only subscribed to ``tool_call`` — meaning
+    ``_open_trajectories`` accumulated forever in memory and the
+    ``_on_session_end`` persister was orphaned (defined but never wired).
+    Now both subscriptions fire from the same call so the producer side
+    of the evolution pipeline is complete: tool_call events build the
+    open trajectory; SessionEndEvent closes + persists it.
+
+    Returns the ``tool_call`` ``Subscription`` for backward compatibility
+    with pre-B3 callers (test fixtures + ``bootstrap_if_enabled``). The
+    ``session_end`` subscription is process-lifetime by design — the
+    bus is GC'd at process shutdown anyway and tests use per-test bus
+    instances. Callers that need explicit unsubscribe for session_end
+    can look up handlers via ``bus.subscribers("session_end")``.
     """
     if bus is None:
         from opencomputer.ingestion.bus import get_default_bus
 
         bus = get_default_bus()
-    return bus.subscribe("tool_call", _on_tool_call_event)
+    tool_sub = bus.subscribe("tool_call", _on_tool_call_event)
+    bus.subscribe("session_end", _on_session_end_event)
+    return tool_sub
 
 
 def is_collection_enabled() -> bool:
@@ -315,10 +352,13 @@ def set_collection_enabled(enabled: bool) -> None:
 
 
 def bootstrap_if_enabled() -> Subscription | None:
-    """Auto-register the bus subscriber if the on-disk flag is set.
+    """Auto-register the bus subscribers if the on-disk flag is set.
 
     Callers (e.g. AgentLoop initialization, opencomputer CLI startup) can invoke
-    this to opt into auto-collection. Returns the Subscription, or None if not enabled.
+    this to opt into auto-collection. Returns the ``tool_call`` Subscription
+    (matching the pre-B3 contract), or ``None`` if collection is disabled.
+    A ``session_end`` subscription is also created internally — see
+    ``register_with_bus`` for the design rationale.
     """
     if not is_collection_enabled():
         return None

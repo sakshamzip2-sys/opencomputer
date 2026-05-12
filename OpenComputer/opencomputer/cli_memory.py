@@ -1366,3 +1366,221 @@ def memory_dream_v2(
         console.print("\n[bold yellow]Held in DREAMS.md:[/bold yellow]")
         for r in summary.held:
             console.print(f"  • [dim]{r.rationale}[/dim]")
+
+
+# ─── Gap 3 from self-evolution-gaps-deep-dive.md ────────────────────────
+# DREAMS.md re-scoring with a configurable model — surface entries the
+# original Haiku gate undercredited so the operator can decide whether
+# the score threshold is correctly conservative, underconfident, or
+# miscalibrated.
+
+
+@memory_app.command("dream-v2-rescore")
+def memory_dream_v2_rescore(
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        "-n",
+        help="Max DREAMS.md entries to re-score (cost cap; 1-500).",
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help=(
+            "Override the active provider's model for re-scoring "
+            "(e.g. claude-sonnet-4-6). Defaults to the dream-v2 model "
+            "configured in config.yaml — pass a stronger model here to "
+            "surface miscalibration of the original Haiku gate."
+        ),
+    ),
+    promote_threshold: float = typer.Option(
+        0.75,
+        "--promote-threshold",
+        help=(
+            "Rescore ≥ this value flags the entry as a promotion candidate. "
+            "Default 0.75 sits clearly above the score gate's default 0.65 "
+            "so only meaningful improvements surface."
+        ),
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help=(
+            "Write promotion candidates into MEMORY.md (atomic batch via "
+            "MemoryManager). Default off — first run shows the diff, "
+            "second run with --apply persists."
+        ),
+    ),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="text|json"
+    ),
+) -> None:
+    """Re-score DREAMS.md entries with a different (typically stronger) model.
+
+    The deep-dive doc's diagnostic move (Gap 3): the score gate is
+    Haiku-by-default. If the gate is undercredited on technical content,
+    DREAMS.md piles up with entries that "should" have promoted. This
+    command re-runs each entry through a configurable model and reports
+    where the new score disagrees with the old gate.
+
+    With ``--apply``, entries that clear ``--promote-threshold`` and have
+    a recoverable Q/A structure are appended to MEMORY.md in a single
+    atomic batch (MemoryManager owns the flock + .bak rotation).
+
+    NOTE: Re-scored entries are NOT removed from DREAMS.md — the file
+    is the dreaming-v2 holding pen and the cron tick manages eviction
+    via its byte-cap. Removing here would create racing-update hazards
+    with the cron tick.
+    """
+    import asyncio
+    import json as _json
+
+    from opencomputer.agent.config_store import load_config
+    from opencomputer.agent.dreams_rescore import (
+        parse_dreams_md,
+        render_promotion_candidates,
+        rescore_entries,
+    )
+    from opencomputer.cron.dreaming_v2_tick import (
+        _build_score_fn_from_provider,
+        build_production_dependencies,
+    )
+
+    limit = max(1, min(int(limit), 500))
+    promote_threshold = max(0.0, min(1.0, float(promote_threshold)))
+
+    cfg = load_config()
+    dreams_path = Path(cfg.memory.declarative_path).parent / "DREAMS.md"
+    if not dreams_path.exists():
+        console.print(
+            f"[yellow]No DREAMS.md found at[/yellow] [cyan]{dreams_path}[/cyan]. "
+            "Run [cyan]oc memory dream-v2[/cyan] first to populate the holding pen."
+        )
+        raise typer.Exit(code=0)
+
+    raw = dreams_path.read_text(encoding="utf-8", errors="replace")
+    entries = parse_dreams_md(raw, max_entries=limit)
+    if not entries:
+        console.print(
+            f"[dim]Parsed 0 entries from DREAMS.md ({dreams_path}) — nothing to re-score.[/dim]"
+        )
+        raise typer.Exit(code=0)
+
+    deps = build_production_dependencies()
+    if deps.provider is None:
+        console.print(
+            "[red]Cannot rescore:[/red] no provider plugin is installed. "
+            "The score function needs an LLM to call.\n\n"
+            "  → Run [cyan]oc auth[/cyan] to see provider options, then install one "
+            "([cyan]anthropic-provider[/cyan] / [cyan]openai-provider[/cyan] / etc.) "
+            "and set [cyan]model.provider[/cyan] in [cyan]~/.opencomputer/<profile>/config.yaml[/cyan]."
+        )
+        raise typer.Exit(code=2)
+    chosen_model = model or deps.model
+    score_fn = _build_score_fn_from_provider(deps.provider, model=chosen_model)
+
+    console.print(
+        f"[dim]Re-scoring[/dim] [cyan]{len(entries)}[/cyan] "
+        f"[dim]entries with model[/dim] [cyan]{chosen_model}[/cyan]"
+        f" [dim](promote threshold {promote_threshold:.2f}, "
+        f"apply={apply})[/dim]"
+    )
+
+    outcomes = asyncio.run(
+        rescore_entries(
+            entries,
+            score_fn=score_fn,
+            promote_threshold=promote_threshold,
+        )
+    )
+
+    if output == "json":
+        typer.echo(
+            _json.dumps(
+                {
+                    "model": chosen_model,
+                    "promote_threshold": promote_threshold,
+                    "applied": False,
+                    "outcomes": [
+                        {
+                            "date": o.entry.date,
+                            "tools": list(o.entry.tools),
+                            "question": o.entry.question,
+                            "answer": o.entry.answer,
+                            "new_score": o.new_score,
+                            "promoted_candidate": o.promoted_candidate,
+                            "error": o.error,
+                        }
+                        for o in outcomes
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    diff_table = Table(title=f"DREAMS.md rescore (model={chosen_model})")
+    diff_table.add_column("date", style="dim")
+    diff_table.add_column("Q (preview)")
+    diff_table.add_column("new score", justify="right")
+    diff_table.add_column("flag", style="bold")
+
+    successes = 0
+    errors = 0
+    promotion_count = 0
+    for o in outcomes:
+        if o.error:
+            errors += 1
+            flag = f"[red]ERR[/red] [dim]{o.error[:30]}[/dim]"
+        elif o.promoted_candidate:
+            successes += 1
+            promotion_count += 1
+            flag = "[green]promote[/green]"
+        else:
+            successes += 1
+            flag = "[dim]hold[/dim]"
+        score_str = f"{o.new_score:.2f}"
+        if o.new_score >= promote_threshold and not o.error:
+            score_str = f"[green]{score_str}[/green]"
+        diff_table.add_row(
+            o.entry.date or "—",
+            o.display_question,
+            score_str,
+            flag,
+        )
+
+    console.print(diff_table)
+    console.print(
+        f"\n[bold]Summary:[/bold] {successes}/{len(outcomes)} scored, "
+        f"{errors} errors, "
+        f"[green]{promotion_count}[/green] promotion candidate(s) at threshold {promote_threshold:.2f}"
+    )
+
+    if not apply:
+        if promotion_count:
+            console.print(
+                f"\n[dim]Re-run with[/dim] [cyan]--apply[/cyan] [dim]to write "
+                f"{promotion_count} entr{'y' if promotion_count == 1 else 'ies'} "
+                f"into MEMORY.md.[/dim]"
+            )
+        return
+
+    promotion_lines = render_promotion_candidates(outcomes)
+    if not promotion_lines:
+        console.print(
+            "[dim]No promotion candidates after rescore — MEMORY.md not modified.[/dim]"
+        )
+        return
+
+    # Atomic append via MemoryManager — owns cap-checking + .bak
+    # rotation + char-limit enforcement + index invalidation. Single
+    # append (not per-line) so the batch lands as one atomic write.
+    mgr = _manager()
+    block = "\n".join(promotion_lines) + "\n"
+    mgr.append_declarative(block)
+    console.print(
+        f"\n[green]✓[/green] Promoted {len(promotion_lines)} entr"
+        f"{'y' if len(promotion_lines) == 1 else 'ies'} into MEMORY.md "
+        f"([cyan]{mgr.declarative_path}[/cyan])."
+    )
