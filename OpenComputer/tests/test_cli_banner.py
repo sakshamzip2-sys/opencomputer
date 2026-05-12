@@ -615,7 +615,7 @@ def test_runtime_block_left_aligned_under_caduceus(monkeypatch):
 
     ansi_re = re.compile(r"\x1b\[[0-9;]*m")
     plain_lines = [ansi_re.sub("", line) for line in out.splitlines()]
-    model_lines = [l for l in plain_lines if "claude-opus-4-7" in l]
+    model_lines = [pl for pl in plain_lines if "claude-opus-4-7" in pl]
     assert model_lines, "model line missing from output"
 
     # The model line lives inside the panel's left column. Measure how

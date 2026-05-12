@@ -57,7 +57,11 @@ def test_list_sessions_returns_hermes_shape() -> None:
 
     assert resp.status_code == 200
     body = resp.json()
-    assert "items" in body and "total" in body and "limit" in body
+    # Union shape: gateway-path reads `items`, dashboard-path reads
+    # `sessions`. We return both pointing at the same list.
+    assert "items" in body and "sessions" in body
+    assert body["items"] == body["sessions"]
+    assert "total" in body and "limit" in body and "offset" in body
     assert len(body["items"]) == 2
     assert body["items"][0]["id"] == "s1"
 
@@ -100,24 +104,42 @@ def test_get_session_wraps_in_session_key() -> None:
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"session": {"id": "abc", "title": "Test"}}
+    # Union shape: flat fields (dashboard-path) + nested `session`
+    # mirror (gateway-path).
+    assert body["id"] == "abc"
+    assert body["title"] == "Test"
+    assert body["session"] == {"id": "abc", "title": "Test"}
 
 
 def test_get_messages_passes_through() -> None:
     app = _build_app()
     client = TestClient(app)
 
-    async def _fake(session_id: str, *, limit: int, offset: int) -> dict[str, Any]:
+    async def _fake_msgs(session_id: str, *, limit: int, offset: int) -> dict[str, Any]:
         return {"items": [{"id": 1, "content": "hi"}], "limit": limit, "offset": offset, "total": 1}
 
-    with patch(
-        "opencomputer.dashboard.routes.sessions.get_messages",
-        new=AsyncMock(side_effect=_fake),
+    async def _fake_sess(session_id: str) -> dict[str, Any]:
+        return {"id": session_id, "started_at": 100.0, "model": "claude-opus-4-7"}
+
+    with (
+        patch(
+            "opencomputer.dashboard.routes.sessions.get_messages",
+            new=AsyncMock(side_effect=_fake_msgs),
+        ),
+        patch(
+            "opencomputer.dashboard.routes.sessions.get_session",
+            new=AsyncMock(side_effect=_fake_sess),
+        ),
     ):
         resp = client.get("/api/sessions/abc/messages?limit=5&offset=0")
 
     assert resp.status_code == 200
-    assert resp.json()["items"][0]["content"] == "hi"
+    body = resp.json()
+    assert body["items"][0]["content"] == "hi"
+    # Union shape: dashboard-path reads `messages`.
+    assert body["messages"] == body["items"]
+    assert body["session_started"] == 100.0
+    assert body["model"] == "claude-opus-4-7"
 
 
 def test_search_sessions_returns_hermes_shape() -> None:
@@ -135,7 +157,13 @@ def test_search_sessions_returns_hermes_shape() -> None:
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"query": "foo", "count": 1, "results": [{"id": "s9"}]}
+    # Union shape: gateway-path historically read flat `items`,
+    # dashboard-path reads `results` with `{session_id, snippet, role,
+    # source, model, session_started}`. We provide both.
+    assert body["query"] == "foo"
+    assert body["count"] == 1
+    assert "results" in body and "items" in body
+    assert body["results"][0]["session_id"] == "s9"
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +465,88 @@ def test_delete_session_requires_auth() -> None:
     client = TestClient(app)
     resp = client.delete("/api/sessions/abc")
     assert resp.status_code == 401
+
+
+def test_delete_session_returns_ok_json(auth_headers: dict[str, str]) -> None:
+    """Workspace's dashboard-shape parses delete response as JSON — we
+    return ``{ok: true}`` 200, NOT 204 empty body."""
+    class _DB:
+        def delete_session(self, sid: str) -> bool:
+            return True
+
+        def __enter__(self) -> _DB:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            pass
+
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        return_value=_DB(),
+    ):
+        resp = client.delete("/api/sessions/abc", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_fork_session_response_includes_forked_from(
+    auth_headers: dict[str, str],
+) -> None:
+    """Workspace's dashboard-shape forkSession expects ``{session, forked_from}``."""
+    import sqlite3 as _sqlite
+
+    class _DB:
+        def __init__(self) -> None:
+            self.conn = _sqlite.connect(":memory:", check_same_thread=False)
+            self.conn.row_factory = _sqlite.Row
+            self.conn.execute(
+                "CREATE TABLE sessions(id TEXT PRIMARY KEY, platform TEXT, title TEXT)"
+            )
+            self.conn.execute(
+                "CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT, "
+                "tool_calls TEXT, name TEXT, timestamp REAL)"
+            )
+            self.conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?)",
+                ("src", "webui", "source title"),
+            )
+
+        def get_session(self, sid: str) -> dict[str, Any] | None:
+            row = self.conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            return dict(row) if row else None
+
+        def create_session(self, *, session_id: str, platform: str, title: str | None) -> None:
+            self.conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?)",
+                (session_id, platform, title),
+            )
+
+        def _connect(self) -> _sqlite.Connection:
+            return self.conn
+
+        def __enter__(self) -> _DB:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            pass
+
+    fake = _DB()
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        return_value=fake,
+    ):
+        resp = client.post("/api/sessions/src/fork", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "session" in body
+    assert body["forked_from"] == "src"
 
 
 def test_fork_session_404_when_source_missing(auth_headers: dict[str, str]) -> None:
