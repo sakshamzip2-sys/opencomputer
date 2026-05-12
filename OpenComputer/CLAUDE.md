@@ -420,6 +420,66 @@ dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Su
 
 ---
 
+### 4.6 `oc workspace` — hermes-workspace as a second browser surface (2026-05-12)
+
+**Status:** active default. Sibling to `oc webui` — leaves the existing webui untouched. `oc workspace` launches [hermes-workspace](https://github.com/outsourc-e/hermes-workspace) (MIT, Node SSR React app) pointed at OC's dashboard FastAPI as an OpenAI-compatible chat backend.
+
+**What it adds:**
+
+1. **OpenAI-compat HTTP shim** — `opencomputer/dashboard/routes/openai_compat.py` adds three routes to the existing dashboard FastAPI app (port 9119):
+   - `GET /v1/health` — public liveness probe
+   - `GET /v1/models` — OpenAI list shape over `cli_model_picker._grouped_models()`, deduped by model id
+   - `POST /v1/chat/completions` — Bearer-gated, streaming (SSE) + non-streaming, backed by `AgentLoop.run_conversation`. Stateless per request: the `messages[]` array drives `initial_messages`; the final user turn is `user_message`. Tool calls happen inside the loop but are not surfaced as OpenAI `tool_calls` deltas in v1 — only the terminal text response is streamed back. Body capped at 4 MiB; completion wall-clock cap 10 minutes; backpressure-safe SSE pump.
+2. **Hermes-shape `/api/*` parity aliases** — `opencomputer/dashboard/routes/hermes_aliases.py` mirrors workspace's expected dashboard surface by delegating to OC's existing `/api/v1/*` handlers and re-shaping the responses:
+   - `GET /api/sessions{,...}` → `{items, total, limit}` / `{session}` / messages page
+   - `GET /api/skills` + `/api/skills/categories` → `{skills}` / `{categories}`
+   - `GET /api/jobs` → `{jobs}` (cron registry)
+   - `GET /api/config` → OC config (Bearer-gated)
+   - `GET /api/mcp` → `{servers}` (coerced from `MCPManager`)
+   - On downstream failure: 200 with `{<key>: [], error: <str>}` rather than a 5xx — workspace's capability probe treats 5xx as "missing", so degraded paths still report as "available" with the error surfaced in-band.
+3. **`/health` alias** — bare `/health` (no `/v1/`) added in `dashboard/server.py` so the workspace's gateway-liveness probe finds OC.
+4. **`oc workspace` CLI** (`opencomputer/cli_workspace.py`):
+   - `oc workspace` (bare) / `oc workspace run` — discover hermes-workspace dir, check prereqs (node ≥ 22, pnpm ≥ 9), build if needed, spawn dashboard thread + Node subprocess, health-check both, open browser, block until Ctrl+C.
+   - `oc workspace build [--force]` — run `pnpm install` + `pnpm build`.
+   - `oc workspace doctor` — print prereq status + discovery + cache state.
+5. **Launcher package** (`opencomputer/workspace/`):
+   - `discovery.py` — explicit `--workspace-dir` → `$OC_WORKSPACE_DIR` → `<profile>/workspace/` → `~/.opencomputer/workspace/` → `/Users/saksham/Vscode/claude/sources/hermes-workspace/` dev-fallback. Explicit-then-invalid is a HARD ERROR, never silent fallback.
+   - `prerequisites.py` — `node --version` + `pnpm --version` with version-major gates and timeout.
+   - `builder.py` — cache hit when `dist/server/server.js` + `node_modules/.modules.yaml` are both present AND newer than `package.json`. Detects interrupted installs.
+   - `launcher.py` — `node server-entry.js` subprocess with enriched env. POSIX: `start_new_session=True` + process-group SIGTERM→5s→SIGKILL on shutdown. `_await_health` catches every `Exception` (including `httpx.ReadTimeout`) so timeouts can't escape uncaught and orphan Node. `spawn_workspace` catches `BaseException` so cleanup runs on every failure path.
+   - `lifecycle.py` — coordinates dashboard thread + workspace subprocess. Refuses to start when dashboard port is in use.
+
+**Env vars set into the Node subprocess:**
+
+| Var | Purpose |
+|---|---|
+| `HERMES_API_URL` | Gateway URL (chat completions, models) |
+| `HERMES_DASHBOARD_URL` | Dashboard URL (sessions, skills, jobs). Same as `HERMES_API_URL` because OC serves both surfaces on one FastAPI app. |
+| `HERMES_API_TOKEN` | Bearer token for `/v1/*` |
+| `CLAUDE_DASHBOARD_TOKEN` / `CLAUDE_API_TOKEN` | Mirror of `HERMES_API_TOKEN` for the workspace's gateway-capabilities layer (per upstream #124 migration). |
+| `OC_WORKSPACE_DIR` | Discovery override (operator-set; not set by launcher) |
+| `HOST`, `PORT`, `NODE_ENV`, `OPENCOMPUTER_HOME` | Workspace runtime |
+
+**Workspace capability state after the fixes** (`oc workspace` log):
+```
+mode=portable core=[health, chatCompletions, models, streaming]
+enhanced=[sessions, skills, memory, config, jobs, mcp]
+missing=[enhancedChat, mcpFallback, dashboard]
+```
+
+The 3 still-missing surfaces have justified reasons documented in PR #597:
+- `enhancedChat` is hermes-agent's session-bound POST stream (`/api/sessions/{id}/chat/stream`); OC uses stateless `/v1/chat/completions`.
+- `mcpFallback` depends on the dashboard exposing `config.mcp_servers`; future PR.
+- `dashboard` is a separate `probeDashboard()` endpoint distinct from the `/api/*` tree; future PR.
+
+**Worktree bootstrap (2026-05-12).** `pyproject.toml` force-includes `opencomputer/ui-tui/dist/` and `opencomputer/dashboard/static/spa/` (gitignored build artifacts). A fresh `git worktree add` won't have those, so `uv tool install --editable .` would fail with `Forced include not found`. Fix: run `./scripts/bootstrap_worktree.sh` once after creating the worktree — it auto-discovers the sibling main checkout and symlinks the two dirs across. `.gitignore` covers the symlinks.
+
+**Spec:** `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-design.md` + workflow notes at `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-workflow-notes.md`.
+
+**Tests:** `test_workspace_discovery.py`, `test_workspace_prerequisites.py`, `test_workspace_builder.py`, `test_workspace_launcher.py`, `test_cli_workspace.py`, `test_dashboard_openai_compat.py`, `test_dashboard_health_alias.py`, `test_dashboard_hermes_aliases.py`. 92 tests; full suite 15,114 passed.
+
+---
+
 ## 5. What's NEXT — single source of truth
 
 ### Current stance — v1.0 candidate, dogfood gate next

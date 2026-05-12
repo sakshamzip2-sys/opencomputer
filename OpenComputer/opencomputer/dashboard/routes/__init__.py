@@ -20,10 +20,12 @@ from opencomputer.dashboard.routes import (  # noqa: F401  (re-exports)
     dashboard_meta,
     env,
     events,
+    hermes_aliases,
     logs,
     memory,
     models,
     oc_update,
+    openai_compat,
     plugins,
     profiles,
     providers_oauth,
@@ -55,6 +57,8 @@ ALL_ROUTERS: list[APIRouter] = [
     actions.router,
     events.router,
     memory.router,
+    openai_compat.router,
+    hermes_aliases.router,
 ]
 
 __all__ = ["ALL_ROUTERS"]

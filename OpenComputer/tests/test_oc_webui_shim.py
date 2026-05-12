@@ -28,6 +28,21 @@ import pytest
 # Make the oc-webui shim importable.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _OC_WEBUI = _REPO_ROOT / "oc-webui"
+
+# 2026-05-12: ``oc-webui/`` is gitignored (embedded git repo — its own
+# upstream-fork state lives there). A fresh CI checkout does not contain
+# it, so collection used to abort the whole pytest run with an
+# ImportError before any test was discovered. Gracefully skip the entire
+# module when the shim package is unavailable — this matches the spirit
+# of the test (it's a shim test; skip when shim isn't present).
+if not (_OC_WEBUI / "_oc_shim").exists() and not (_OC_WEBUI / "_oc_shim.py").exists():
+    pytest.skip(
+        f"oc-webui/_oc_shim not present at {_OC_WEBUI} — "
+        "clone outsourc-e/hermes-webui (or its OC fork) into that path "
+        "to enable this test suite.",
+        allow_module_level=True,
+    )
+
 sys.path.insert(0, str(_OC_WEBUI))
 
 from _oc_shim import install as _install_shim  # noqa: E402
