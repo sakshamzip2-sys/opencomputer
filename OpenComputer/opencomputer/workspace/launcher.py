@@ -159,9 +159,24 @@ def _build_env(spec: LaunchSpec) -> dict[str, str]:
     env["PORT"] = str(spec.port)
     env["HOST"] = spec.host
     env["NODE_ENV"] = env.get("NODE_ENV", "production")
+    # The workspace separates "gateway" (chat completions, OpenAI compat)
+    # from "dashboard" (sessions, skills, jobs, MCP) and probes BOTH
+    # independently at startup. In OC's world both surfaces live on the
+    # same FastAPI app, so we point both URLs at the same place. Without
+    # the dashboard URL the workspace defaults to its upstream's 9119,
+    # which on an OC-only install is unbound and yields a noisy
+    # "dashboard unavailable" banner.
     env["HERMES_API_URL"] = spec.dashboard_url
+    env["HERMES_DASHBOARD_URL"] = spec.dashboard_url
     if spec.dashboard_token:
         env["HERMES_API_TOKEN"] = spec.dashboard_token
+        # Mirror as CLAUDE_DASHBOARD_TOKEN — that's the env var the
+        # workspace's gateway-capabilities layer reads for the dashboard
+        # Bearer header (see workspace's #124 migration). Without this,
+        # the dashboard probe falls back to the legacy HTML-scrape token
+        # flow and prints a deprecation warning every boot.
+        env["CLAUDE_DASHBOARD_TOKEN"] = spec.dashboard_token
+        env["CLAUDE_API_TOKEN"] = spec.dashboard_token
     # Surface the active profile for any Node-side helpers that want it.
     env["OPENCOMPUTER_HOME"] = str(spec.profile_home)
     env["OC_PROFILE_HOME"] = str(spec.profile_home)

@@ -157,6 +157,17 @@ def _build_app(
     async def health() -> dict:
         return {"ok": True, "wire_url": wire_url}
 
+    # --- /health (gateway-shape alias, 2026-05-12) ---------------------
+    # Hermes-workspace's gateway-capabilities probe (`oc workspace`'s
+    # Node-side capability discovery) hits the bare ``/health`` path, not
+    # ``/api/health`` or ``/v1/health``. Without this alias the workspace
+    # would render the dashboard as "disconnected" even though OC is
+    # serving every other endpoint. Same payload as ``/api/health`` so
+    # any tooling already keyed on its shape keeps working.
+    @app.get("/health")
+    async def health_alias() -> dict:
+        return {"ok": True, "wire_url": wire_url, "status": "ok"}
+
     # --- SPA shell + Wave 6.D-α static pages ---------------------------
     def _render_html(path: Path) -> Response:
         if not path.exists():

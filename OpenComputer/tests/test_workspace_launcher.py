@@ -55,7 +55,17 @@ def test_build_env_sets_all_required_vars(fake_spec: LaunchSpec) -> None:
     assert env["PORT"] == str(fake_spec.port)
     assert env["HOST"] == fake_spec.host
     assert env["HERMES_API_URL"] == fake_spec.dashboard_url
+    # Bug B (2026-05-12): the workspace probes BOTH gateway and dashboard
+    # URLs independently. Without HERMES_DASHBOARD_URL it defaults to the
+    # upstream hermes-agent's :9119, which on an OC-only install is
+    # unbound and yields a "dashboard unavailable" banner.
+    assert env["HERMES_DASHBOARD_URL"] == fake_spec.dashboard_url
     assert env["HERMES_API_TOKEN"] == "test-token"
+    # Bug B (2026-05-12): the workspace gateway-capabilities layer reads
+    # CLAUDE_DASHBOARD_TOKEN for the dashboard Bearer header. Without
+    # this it falls back to a deprecated HTML-scrape flow.
+    assert env["CLAUDE_DASHBOARD_TOKEN"] == "test-token"
+    assert env["CLAUDE_API_TOKEN"] == "test-token"
     assert env["OPENCOMPUTER_HOME"] == str(fake_spec.profile_home)
     assert env["NODE_ENV"] in ("production", "development")
 
@@ -72,6 +82,11 @@ def test_build_env_omits_token_when_none(fake_spec: LaunchSpec) -> None:
     )
     env = _build_env(spec)
     assert "HERMES_API_TOKEN" not in env
+    assert "CLAUDE_DASHBOARD_TOKEN" not in env
+    assert "CLAUDE_API_TOKEN" not in env
+    # Dashboard URL is still set even when token is unset (the workspace
+    # can probe an unauthenticated dashboard for public endpoints).
+    assert env["HERMES_DASHBOARD_URL"] == fake_spec.dashboard_url
 
 
 def test_build_env_does_not_inject_token_into_argv(fake_spec: LaunchSpec) -> None:

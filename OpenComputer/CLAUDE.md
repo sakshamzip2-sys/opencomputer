@@ -426,8 +426,11 @@ dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Su
 | Var | Default | Purpose |
 |---|---|---|
 | `OC_WORKSPACE_DIR` | (unset; discovery) | Override workspace dir |
-| `HERMES_API_URL` | set by launcher | Workspace → dashboard URL |
-| `HERMES_API_TOKEN` | set by launcher | Bearer for `/v1/*` |
+| `HERMES_API_URL` | set by launcher | Workspace → gateway URL (chat completions, models) |
+| `HERMES_DASHBOARD_URL` | set by launcher | Workspace → dashboard URL (sessions, skills, jobs). In OC's world this points at the same FastAPI as `HERMES_API_URL` (sibling routers on one app). |
+| `HERMES_API_TOKEN` | set by launcher | Bearer token for `/v1/*` |
+| `CLAUDE_DASHBOARD_TOKEN` / `CLAUDE_API_TOKEN` | set by launcher | Mirror of `HERMES_API_TOKEN` for the workspace's gateway-capabilities layer (per upstream #124 migration) — without this it falls back to a deprecated HTML-scrape token flow. |
+| `/health` route (no `/v1/` prefix) | added 2026-05-12 | Gateway-shape liveness alias the workspace's capabilities probe expects |
 | (set into subprocess) `HOST`, `PORT`, `NODE_ENV`, `OPENCOMPUTER_HOME` | as appropriate | Workspace runtime |
 
 **Failure modes (all surface loudly):**
