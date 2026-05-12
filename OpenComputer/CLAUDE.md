@@ -1,8 +1,8 @@
 # OpenComputer — Session Context for Claude Code
 
-This file is auto-loaded at session start. It is the **single comprehensive brief** a new Claude session needs to resume work on OpenComputer without re-explaining anything.
+Single-file brief a fresh Claude session needs to resume work on OpenComputer.
 
-Last updated: 2026-05-08 (browser-harness is the default browser layer; opencli-bridge added as a complementary plugin shipping 100+ deterministic site adapters + auto-loaded chrome.debugger extension; legacy browser-control plugin is dormant — files retained, register() short-circuits without registering tools; reactivate via OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1)
+Last updated: 2026-05-11 (self-evolution closed loop merged; v1.0 candidate awaiting dogfood gate).
 
 ---
 
@@ -180,22 +180,7 @@ All committed + pushed to `main`. Current main sha: `5c62a12` (2026-04-24).
 
 | Phase | PR / Commit | What |
 |---|---|---|
-| 0 | `0d512cb` | Project scaffold — folder structure, pyproject, smoke tests |
-| 1 | `8d96aff` | Core: agent loop, SQLite+FTS5, 3 tools, Anthropic provider |
-| 1.5 | `11209c9` | skill_manage, Grep, Glob, delegate, hook engine, plugin discovery |
-| 2 | `4252f17` | Gateway + Telegram (first real plugin) |
-| 2.1 | `c280dc6` | Bearer auth + x-api-key strip for Claude Router proxy |
-| 3 | `eb22d46` | OpenAI provider plugin + plugin-registry provider resolution |
-| 3.1 | `441690d`, `be42ff8` | Anthropic moved to plugin + config command + loader cache fix |
-| 4 | `37642be` | MCP integration + bundled skills path |
-| 5 | `684226a` | Generic-ify — setup wizard, doctor, clean README |
-| 6a | `c739c4a` | Injection + compaction engines + RuntimeContext threading |
-| 6b | `bfa1ada` | coding-harness plugin — Edit, MultiEdit, TodoWrite, bg processes, plan mode |
-| 7 | `96b1b7d` | Real streaming in both providers + Telegram typing heartbeat |
-| 8 | `e9240da` | Discord channel plugin |
-| 9 | `d5802c8` | WebSocket wire server + RPC protocol dispatch |
-| 10a | `01a8f9c` | CI/CD (GitHub Actions) + ruff configuration + codebase cleanup |
-| 10b | `2858815` | PyPI release automation + v0.1.0 prep |
+| 0-10b | `0d512cb`..`2858815` | Scaffold through v0.1.0: agent loop, SessionDB+FTS5, plugin system, Telegram/Discord channels, Anthropic+OpenAI providers, MCP, coding-harness, gateway/wire, streaming, CI/CD, PyPI prep. `git log` for detail. |
 | 10e | PR #2 / `00379e1` | WebFetch + WebSearch tools (2026-04-23) |
 | 10f.K–N | PRs #13 / #15 / #16 | Honcho memory overlay — plugin skeleton, wizard step, host key per profile |
 | 11a | PR #3 | Inventory / parity tracker |
@@ -272,12 +257,7 @@ Plus one OC-specific addition planned (extension-daemon for managed-Chrome relia
 opencomputer chat   # browser-harness handles browser tools by default
 ```
 
-**Reverting to legacy browser-control:**
-```bash
-export OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1
-opencomputer chat   # adapter-runner uses browser-control's BrowserActions (Playwright)
-```
-This is an emergency escape hatch only. The legacy plugin's `register()` short-circuits without setting this env var, so its tools stay invisible to the LLM. Setting it BOTH re-enables the legacy plugin's tool registration AND switches `adapter-runner` back to it.
+**Legacy escape hatch:** `OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1` re-enables the dormant `browser-control` plugin and routes `adapter-runner` back to it. Emergency only.
 
 **Persistent browser profile (OpenClaw-style, default since 2026-05-08):** `plugin.py` sets `AGENT_BROWSER_PROFILE=<oc_profile_home>/browser-profile/` at register time so agent-browser's Chromium uses a fixed user-data-dir per OC profile. Cookies, logins, extensions, and history persist across runs. Each `-p <name>` OC profile gets its own isolated browser profile. Users who export `AGENT_BROWSER_PROFILE` themselves before launch are left alone. Without this, agent-browser would default to an ephemeral `/var/folders/.../T/agent-browser-chrome-<uuid>/` dir per process — fresh dir on every daemon restart, all cookies lost.
 
@@ -288,8 +268,6 @@ This is an emergency escape hatch only. The legacy plugin's `register()` short-c
 - `check_website_access` returns None (no per-profile website allow/deny policy yet).
 - agent-browser's persistent profile dir is separate from the user's real system Chrome (Google Chrome.app). User logins from system Chrome are NOT shared. For sites needing auth, log in once via agent-browser's headed Chromium and the cookies stick to that OC-profile-scoped dir thereafter.
 - The Nous-managed-tool-gateway path was removed from `browser_providers/browser_use.py` (irrelevant to OC). Documented in `VENDORED.md` "Divergences" section.
-
-**To deprecate legacy browser-control:** validate browser-harness against LearnX/Luma/Swiggy adapters end-to-end (requires LLM budget + initial agent-browser auth setup), then promote `OPENCOMPUTER_USE_BROWSER_HARNESS=1` to default. After that, delete `extensions/browser-control/` and drop the `playwright` Python dep.
 
 ---
 
@@ -400,9 +378,49 @@ dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Su
 
 ---
 
-## 5. What's NEXT — single source of truth
+### 4.5 Evolution dashboard visibility + Gap 2 + Gap 3 + B3 (2026-05-12)
 
-> **This section is the authoritative phase map.** The omnibus plan `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` drove Sub-projects A–D to completion; two older plans (`delightful-sauteeing-sutherland.md`, `phase-12-ultraplan-spec.md`) are superseded — do not use them.
+**Status:** active default. Closes four gaps from `self-evolution-comparison.md` / `self-evolution-gaps-deep-dive.md` in two merge commits: `a420656b` (dashboard + Gap 2 + Gap 3) and `3b60cc14` (B3).
+
+| Surface | What changed |
+|---|---|
+| `oc evolution dashboard` | New "Operational" table: skill-evolution heartbeat freshness, `_proposed/` candidate count, dreaming-v2 last-run breakdown with disjoint HELD buckets (`score_only` / `recall_only` / `both_gates` / `unattributed`), DREAMS.md size vs cap, optional catch-up row when last tick was a missed-cron recovery. |
+| `summarize_run_for_state()` in `cron/dreaming_v2_tick.py` | Pure function; persists per-tick counts to `<profile>/cron/dreaming_v2_state.json["last_summary"]` after every run. Invariant: `held == score_only + recall_only + both_gates + unattributed`. `unattributed > 0` triggers WARN log + red render — engine rationale-format drift never silently undercounts. |
+| `extensions/skill-evolution/subscriber.py::_is_enabled` | Defensive default-on. Missing / empty / malformed JSON / non-UTF-8 / non-dict shapes all return True with WARN logging. Only explicit `{"enabled": false}` opts out. Privacy preserved. |
+| `oc memory dream-v2-rescore` | New CLI; parses DREAMS.md, re-scores entries with configurable `--model`, renders diff table; with `--apply --promote-threshold N.NN` atomically appends promotion candidates to MEMORY.md via `MemoryManager.append_declarative()`. Provider-absent path exits 2 with `oc auth` pointer. Default `--limit=50` cost cap. |
+| `register_with_bus()` in `evolution/trajectory.py` | Now subscribes to BOTH `tool_call` and `session_end`. The previously orphaned `_on_session_end` persister is wired via new `_on_session_end_event` adapter. Return type changed `Subscription` → `tuple[Subscription, Subscription]` so callers unsubscribe both on shutdown. |
+
+**Privacy contracts preserved end-to-end:**
+- `last_summary` is counts only — never per-candidate text or rationale strings.
+- `_on_session_end_event` reads `event.session_id` only; the TrajectoryEvent metadata 200-char privacy cap is enforced by `TrajectoryEvent.__post_init__` at construction.
+- `dream-v2-rescore` feeds each entry's exact `raw_text` (same surface the original gate saw); does not pass Q/A separately.
+- The full `oc auth` early-exit prevents N AttributeErrors leaking provider state.
+
+**Adversarial-input coverage** (test count by surface):
+- `tests/test_evolution_dashboard_wide.py` — 21 tests (happy, empty, 7 adversarial, invariant, catch-up render)
+- `tests/test_skill_evolution_default_on.py` — 11 tests (every state-file shape)
+- `tests/test_dreams_rescore.py` — 24 tests (parser shapes, rescorer, threshold, callback isolation, CLI integration)
+- `tests/test_b3_trajectory_subscriber_session_end.py` — 7 tests (wiring, persistence, isolation, subscriber-failure-doesn't-poison-bus, sync + async paths)
+- 1 added E2E assertion in `tests/test_dreaming_v2_tick.py` confirming `last_summary` lands through the production code path.
+
+**Operational impact verified on disk:**
+- `~/.opencomputer/cron/dreaming_v2_state.json["last_summary"]` populated with `unattributed: 0`
+- `oc evolution dashboard` renders the Operational table on real profile
+- `oc memory dream-v2-rescore --help` is wired; full path exits cleanly when provider is absent
+
+**Status from each gap closed:**
+- Gap 1 (B3 trajectory auto-collection): **CLOSED** — was misdiagnosed as ~200 LOC subscriber. Actual fix: 56 LOC wiring.
+- Gap 2 (skill-evolution silent-disable on malformed state.json): **CLOSED**
+- Gap 3 (DREAMS.md re-scoring): **CLOSED**
+- Gaps 4–7 deliberately deferred (hardware / architectural / by design / partial mitigation via Gap 3).
+
+**Full pytest:** 15,076 passed, 0 failed, 30 skipped, 6 xfailed in 5:27 (post-merge baseline); B3 added 7 more — re-run pending. **Ruff:** clean across `opencomputer/`, `plugin_sdk/`, `extensions/`, `tests/`.
+
+**Spec:** `self-evolution-comparison.md` v3 + `self-evolution-gaps-deep-dive.md` status section. Senior-Engineer-Workflow phases ran end-to-end (/brainstorm → /audit-design → /plan → /audit-plan → /execute + /tdd → /review → /retro).
+
+---
+
+## 5. What's NEXT — single source of truth
 
 ### Current stance — v1.0 candidate, dogfood gate next
 
@@ -438,18 +456,6 @@ Before expanding beyond v1.0, use OpenComputer daily for 2 weeks. Feature priori
 ### Parked by design (Tier 3 — big scope, don't start without explicit go-ahead)
 
 - **Sub-project F — User Intelligence System.** 10-phase roadmap at `~/.claude/plans/there-are-many-pending-tranquil-fern.md` (F1 consent layer → F10 plural-representation ensemble). Explicitly parked until post-v1.0.
-
-### Latent tech debt (Tier 4 — cheap cleanup when convenient)
-
-- `profile.yaml` write lacks `flock` — concurrent plugin-enable calls silently last-write-wins (~1 hr).
-- Strict `load_profile_config` vs lenient plugin enable/disable YAML handlers — two parse paths to unify (~1-2 hr).
-- AgentCache utility shipped in Phase 12a as a class + tests but never wired into production caller (~half day if pursued).
-- Per-profile `.env` loading for Phase 14.F credential isolation (~1 day).
-- E7 — keyword-match demand detection on `UserPromptSubmit` hook (natural-language intent scanner so demand signals fire even when the model never calls the missing tool; ~1-2 days).
-
-### Won't do (Tier 5 — parked forever)
-
-Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory compression, 6 remote terminal backends, skills marketplace, full i18n. Reopen only if a concrete use case appears.
 
 ---
 
@@ -619,10 +625,3 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
 
 ---
 
-## 10. One-line session restart prompt
-
-If you're a fresh Claude Code session, the user typically opens with something like:
-
-> "Continue OpenComputer from where we left off. Read CLAUDE.md §5 first, then pick up the next task in the omnibus plan (Sub-project A / B / C / D)."
-
-That's enough context to start coding.
