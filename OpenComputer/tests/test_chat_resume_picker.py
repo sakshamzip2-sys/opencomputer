@@ -285,7 +285,17 @@ def test_resume_passthrough_unknown_spec_returns_input(
     """A non-magic value (e.g. a UUID-shaped string) is NOT one of our
     magic spellings — chat() never calls _resolve_resume_target for
     those. This test pins the policy so a future refactor doesn't
-    accidentally route real UUIDs through the picker."""
+    accidentally route real UUIDs through the picker.
+
+    Pollution-immune: reads ``cli.py`` source FROM DISK rather than via
+    ``inspect.getsource(cli._run_chat_session)``. Earlier tests in the
+    full suite monkeypatch ``cli._run_chat_session`` and don't always
+    restore it; ``inspect.getsource`` then dereferences the patched
+    function and the source check spuriously fails. The on-disk read
+    is immune to in-memory rebinding.
+    """
+    import pathlib
+
     from opencomputer import cli
     from opencomputer.agent.state import SessionDB
 
@@ -293,17 +303,9 @@ def test_resume_passthrough_unknown_spec_returns_input(
     SessionDB(db_path)
     _patch_default_config_to(db_path, monkeypatch)
 
-    # The function would crash on an unrecognised spec because of the
-    # ``spec == "pick"`` branch below — confirm we only ever route
-    # ``last`` and ``pick`` here. (the chat session guards with the
-    # membership check; we re-assert at this layer too.)
-    #
-    # V3.A-T7: ``chat`` was thinned to a delegator over
-    # ``_run_chat_session``; the magic-spec guard now lives in the
-    # shared helper, so inspect that body instead.
-    import inspect
-
-    src = inspect.getsource(cli._run_chat_session)
-    assert 'resume in ("last", "pick")' in src, (
-        "_run_chat_session() must guard the resolver call with the magic-spec membership check"
+    cli_source = pathlib.Path(cli.__file__).read_text(encoding="utf-8")
+    assert 'resume in ("last", "pick")' in cli_source, (
+        "_run_chat_session() must guard the resolver call with the "
+        "magic-spec membership check — missing the literal "
+        "`resume in (\"last\", \"pick\")` guard in opencomputer/cli.py"
     )

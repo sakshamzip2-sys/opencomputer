@@ -559,6 +559,32 @@ def test_panel_omits_mcp_section_when_none(monkeypatch):
     assert " MCP " not in out
 
 
+def test_panel_renders_mcp_configured_state(monkeypatch):
+    """Banner-time: MCP servers DECLARED in config but not yet
+    connected render as ``configured`` (neutral color, no tool count,
+    no error). The summary line surfaces the count so users see the
+    section is populated even pre-connection.
+    """
+    mcp = [
+        {"name": "filesystem", "transport": "stdio", "connection_state": "configured"},
+        {
+            "name": "search",
+            "transport": "https://api.example.com/mcp",
+            "connection_state": "configured",
+        },
+    ]
+    out = _render(monkeypatch, width=140, mcp_status=mcp)
+    # Section + entries render.
+    assert "MCP Servers" in out
+    assert "filesystem" in out
+    assert "search" in out
+    assert "configured" in out
+    # Summary surfaces the count.
+    assert "2 MCP" in out
+    # No red error states.
+    assert "disconnected" not in out
+
+
 def test_panel_renders_profile_line_when_non_default(monkeypatch):
     """A non-default active profile surfaces in the left column under
     the caduceus as ``Profile: {name}``.
