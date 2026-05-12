@@ -1,9 +1,10 @@
-"""ASCII art constants for the welcome banner.
+"""ASCII art constants for the OpenComputer welcome banner.
 
-Visual register modeled after hermes-agent's banner.py (HERMES-AGENT
-art) — independently re-drawn (no glyphs copied). Original logo uses
-figlet 'slant' font; the active banner uses ``OPENCOMPUTER_BLOCK_LOGO``
-(ANSI-Shadow figlet, stacked OPEN/COMPUTER) for a chunkier presence.
+``OPENCOMPUTER_BLOCK_LOGO`` is the 71-col × 3-row half-block wordmark
+rendered by the active splash (``cli_banner.build_welcome_banner``).
+``OPENCOMPUTER_LOGO`` and ``SIDE_GLYPH`` are kept for backwards compat
+with external consumers and test fixtures; the active splash does not
+render them.
 """
 from __future__ import annotations
 

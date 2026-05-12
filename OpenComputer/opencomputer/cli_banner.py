@@ -1,10 +1,17 @@
-"""OpenComputer welcome banner.
+"""OpenComputer welcome banner — OC-style minimal splash.
 
-Visual + structure modeled after hermes-agent's banner.py.
-Independently re-implemented on rich (no code copied).
+The 2026-05-12 redesign replaces the previous "Option D HUD" splash
+(mascot + 4-column runtime grid + tool/skill chip rows) with the
+OpenCode-style minimal layout: ``OPENCOMPUTER`` half-block wordmark with
+version pulled to the right, then a single footer row pointing at the
+slash commands users need. Runtime state (model / provider / cwd /
+session) lives in the statusline and the ``oc status`` slash command,
+not on the splash. See
+``docs/superpowers/specs/2026-05-12-oc-splash-replace-hermes-design.md``.
 
-Public API:
-  - build_welcome_banner(console, model, cwd, *, session_id, home) -> None
+Public API (kept stable across the migration):
+  - build_welcome_banner(console, model, cwd, *, provider=None,
+      session_id=None, session_label=None, home=None) -> None
   - format_banner_version_label() -> str
   - get_available_skills() -> dict[str, list[str]]
   - get_available_tools() -> dict[str, list[str]]
@@ -16,6 +23,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opencomputer import __version__
+from opencomputer.cli_banner_art import (
+    OPENCOMPUTER_BLOCK_LOGO,
+    OPENCOMPUTER_LOGO_FALLBACK,
+)
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -26,6 +37,23 @@ __all__ = [
     "get_available_skills",
     "get_available_tools",
 ]
+
+
+# --- Palette -----------------------------------------------------------
+# Tokens mirror the previous splash so that downstream theme tooling that
+# inspects ``cli_banner._PRIMARY`` / ``_FG`` / ``_MUTED`` keeps working.
+_PRIMARY = "#FF3D8A"
+_FG = "#E8E2D4"
+_MUTED = "#7A7367"
+_BORDER = "#4A463D"
+# Back-compat aliases (kept so external ``from opencomputer.cli_banner
+# import _ROSE_TEXT`` doesn't break).
+_ROSE_TEXT = _PRIMARY
+_ROSE_ACCENT = "#C2185B"
+_DIVIDER = _BORDER
+
+
+# --- Helpers -----------------------------------------------------------
 
 
 def _git_short_sha() -> str | None:
@@ -44,7 +72,9 @@ def _git_short_sha() -> str | None:
 
 
 def format_banner_version_label() -> str:
-    """`OpenComputer v0.1.0 · sha`."""
+    """``OpenComputer v{ver}`` or ``OpenComputer v{ver} · {sha}``."""
+    if not __version__:
+        return "OpenComputer"
     sha = _git_short_sha()
     if sha:
         return f"OpenComputer v{__version__} · {sha}"
@@ -52,10 +82,7 @@ def format_banner_version_label() -> str:
 
 
 def _skill_search_paths() -> list[Path]:
-    """Return ordered list of dirs to walk for SKILL.md files.
-
-    Highest-priority first (so path 0 wins on duplicate names).
-    """
+    """Return ordered list of dirs to walk for SKILL.md files."""
     import os
 
     paths: list[Path] = []
@@ -73,10 +100,10 @@ def _skill_search_paths() -> list[Path]:
 
 
 def get_available_skills() -> dict[str, list[str]]:
-    """Walk skill search paths; return {group: sorted-skill-names}.
+    """Walk skill search paths; return ``{group: sorted_skill_names}``.
 
-    Group is the parent-of-SKILL.md directory's parent (one level up).
-    Layout assumed: ``<root>/<group>/<skill>/SKILL.md``.
+    Group is the parent-of-SKILL.md directory's parent. Layout assumed:
+    ``<root>/<group>/<skill>/SKILL.md``.
     """
     seen_per_group: dict[str, set[str]] = {}
     for root in _skill_search_paths():
@@ -91,14 +118,12 @@ def get_available_skills() -> dict[str, list[str]]:
 
 
 def _tool_registry_snapshot() -> dict[str, str]:
-    """Return mapping of tool_name -> plugin_name.
+    """Return ``{tool_name: plugin_name}`` mapping.
 
-    Reads from opencomputer.tools.registry's module-level `registry`
-    singleton. Since BaseTool instances don't carry a plugin_id field,
-    we derive the group from the tool's module path:
-      - opencomputer.tools.* → "core"
-      - extensions.<plugin>.* → "<plugin>"
-      - other → "other"
+    Derives plugin-of-origin from the tool's module path:
+      - ``opencomputer.tools.*`` → ``"core"``
+      - ``extensions.<plugin>.*`` → ``"<plugin>"``
+      - other → ``"other"``
     """
     from opencomputer.tools.registry import registry
 
@@ -120,11 +145,12 @@ def _tool_registry_snapshot() -> dict[str, str]:
 
 
 def get_available_tools() -> dict[str, list[str]]:
-    """Group registered tools by plugin-of-origin. Empty dict if registry
-    isn't reachable (e.g., before plugin discovery has run)."""
+    """Group registered tools by plugin-of-origin. Empty dict if the
+    registry isn't reachable (e.g., before plugin discovery has run).
+    """
     try:
         snapshot = _tool_registry_snapshot()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — registry init is best-effort
         return {}
     grouped: dict[str, list[str]] = {}
     for tool_name, plugin in snapshot.items():
@@ -132,64 +158,130 @@ def get_available_tools() -> dict[str, list[str]]:
     return {p: sorted(names) for p, names in sorted(grouped.items())}
 
 
-_TIPS: tuple[str, ...] = (
-    "Tip: `OPENCOMPUTER_EPHEMERAL_SYSTEM_PROMPT` injects a system prompt "
-    "that's never persisted to history.",
-    "Tip: Type `/help` for the slash-command list.",
-    "Tip: Press Ctrl+C in chat to cancel the current turn cleanly.",
-    "Tip: `oc -p <profile>` runs with a different active profile.",
-    "Tip: `oc setup` re-runs the wizard — keeps your existing config "
-    "by default.",
-    "Tip: `/snapshot export` archives your session for later replay.",
-)
+# --- Splash internals --------------------------------------------------
 
 
-def _truncate_csv(items: list[str], max_chars: int) -> str:
-    """Return comma-separated items, truncated with `…` if over limit."""
-    joined = ", ".join(items)
-    if len(joined) <= max_chars:
-        return joined
-    out: list[str] = []
-    used = 0
-    ellipsis = ", …"
-    budget = max_chars - len(ellipsis)
-    for it in items:
-        addition = (", " if out else "") + it
-        if used + len(addition) > budget:
-            break
-        out.append(it)
-        used += len(addition)
-    return ", ".join(out) + ellipsis
+# 71-col × 3-row half-block ``OPENCOMPUTER`` wordmark from ``cli_banner_art``.
+_BLOCK_LOGO_ROWS = tuple(OPENCOMPUTER_BLOCK_LOGO.rstrip("\n").splitlines())
+_BLOCK_LOGO_WIDTH = max((len(r) for r in _BLOCK_LOGO_ROWS), default=0)
+# A version cluster of ``v0.1.0 · 1234abc`` is ~17 chars. Reserve a 2-char
+# gap before it; below that minimum, drop the block logo and fall back.
+_VERSION_RESERVE_MIN = 19
+_BLOCK_LOGO_MIN_WIDTH = _BLOCK_LOGO_WIDTH + 2  # one col of left padding + at least 1 right
+
+# The version sits on the middle row of the 3-row logo so the eye reads
+# the wordmark and the version as one cluster.
+_VERSION_ANCHOR_ROW = 1
+
+# Footer copy — verbatim from the spec.
+_FOOTER_LEFT_READY = "› Ready."
+_FOOTER_LEFT_HINT_LEAD = "  Type a message, or "
+_FOOTER_LEFT_HINT_CMD = "/help"
+_FOOTER_RIGHT = "/status · /model · /help · /exit"
 
 
-_BLOCK_LOGO_WIDTH = 71  # widest line of OPENCOMPUTER_BLOCK_LOGO
-
-# OpenSlides rose accent palette — banner-redesign 2026-05-10.
-_ROSE_ACCENT = "#C2185B"      # primary rose (panel border)
-_ROSE_TEXT = "#E91E78"        # light rose (wordmark, group labels)
-
-_MAX_GROUPS_SHOWN = 8       # how many tool/skill groups to list inline
-_MAX_ITEMS_PER_GROUP = 4    # how many items per group before "..."
-
-
-def _format_group_line(group: str, items: list[str]) -> str:
-    """Render one ``group: item1, item2, ...`` line, truncated."""
-    shown = items[:_MAX_ITEMS_PER_GROUP]
-    csv = ", ".join(shown)
-    if len(items) > _MAX_ITEMS_PER_GROUP:
-        csv += ", ..."
-    return f"  [{_ROSE_TEXT}]{group}[/{_ROSE_TEXT}]: [dim]{csv}[/dim]"
+def _build_version_cluster() -> tuple[str, str]:
+    """Return ``(visible_text, rich_markup)`` for the right-side
+    ``v{ver} · {sha}`` cluster. Returns ``("", "")`` when there's nothing
+    to render (e.g., ``__version__`` is empty).
+    """
+    if not __version__:
+        return "", ""
+    label = f"v{__version__}"
+    visible = label
+    markup = f"[bold {_PRIMARY}]{label}[/]"
+    sha = _git_short_sha()
+    if sha:
+        visible += f" · {sha}"
+        markup += f"[{_MUTED}] · {sha}[/]"
+    return visible, markup
 
 
-def _render_groups(grouped: dict[str, list[str]]) -> tuple[list[str], int]:
-    """Render up to ``_MAX_GROUPS_SHOWN`` groups; return (lines, total_items)."""
-    total = sum(len(v) for v in grouped.values())
-    keys = list(grouped.keys())
-    lines = [_format_group_line(k, grouped[k]) for k in keys[:_MAX_GROUPS_SHOWN]]
-    extra = len(keys) - _MAX_GROUPS_SHOWN
-    if extra > 0:
-        lines.append(f"  [dim](and {extra} more group{'s' if extra != 1 else ''}…)[/dim]")
-    return lines, total
+def _render_block_logo(console: Console, term_width: int) -> None:
+    """Render the 3-row ``OPENCOMPUTER`` half-block wordmark in primary,
+    with the version cluster pulled to the right edge on the middle row.
+    """
+    from rich.text import Text
+
+    version_visible, version_markup = _build_version_cluster()
+
+    for i, row in enumerate(_BLOCK_LOGO_ROWS):
+        line = Text(no_wrap=True, overflow="ignore")
+        line.append(row, style=_PRIMARY)
+        if i == _VERSION_ANCHOR_ROW and version_visible:
+            used = line.cell_len
+            pad = max(2, term_width - used - len(version_visible))
+            line.append(" " * pad)
+            line.append(Text.from_markup(version_markup))
+        console.print(line, soft_wrap=True, no_wrap=True, overflow="ignore")
+
+
+def _render_text_fallback(console: Console, term_width: int) -> None:
+    """Narrow-terminal fallback: render ``OPENCOMPUTER`` as bold text and
+    drop the half-block art. Version cluster (if any) goes on a second
+    line so we don't clip on very narrow terminals.
+    """
+    from rich.text import Text
+
+    title = Text(no_wrap=True, overflow="ellipsis")
+    title.append(OPENCOMPUTER_LOGO_FALLBACK, style=f"bold {_PRIMARY}")
+    console.print(title, soft_wrap=False, no_wrap=True, overflow="ellipsis")
+
+    version_visible, version_markup = _build_version_cluster()
+    if version_visible:
+        # Right-aligned when there's room, otherwise just print.
+        ver = Text.from_markup(version_markup)
+        pad = max(0, term_width - len(version_visible))
+        if pad > 0:
+            console.print(Text(" " * pad) + ver, no_wrap=True, overflow="ignore")
+        else:
+            console.print(ver, no_wrap=True, overflow="ignore")
+
+
+def _render_footer(console: Console, term_width: int) -> None:
+    """Render the single-line footer.
+
+    Layout:
+        ``› Ready.  Type a message, or /help    /status · /models · ...``
+
+    When the terminal is narrower than the combined width of the two
+    clusters, the right cluster wraps onto its own line — Rich handles
+    the wrap automatically because we use ``soft_wrap=True``.
+    """
+    from rich.text import Text
+
+    left_visible = (
+        _FOOTER_LEFT_READY + _FOOTER_LEFT_HINT_LEAD + _FOOTER_LEFT_HINT_CMD
+    )
+    gap = max(2, term_width - len(left_visible) - len(_FOOTER_RIGHT))
+    footer = Text.from_markup(
+        f"[bold {_PRIMARY}]{_FOOTER_LEFT_READY[:1]}[/]"
+        f"[bold {_FG}]{_FOOTER_LEFT_READY[1:]}[/]"
+        f"[{_MUTED}]{_FOOTER_LEFT_HINT_LEAD}[/]"
+        f"[{_FG}]{_FOOTER_LEFT_HINT_CMD}[/]"
+        f"{' ' * gap}"
+        f"[{_MUTED}]{_FOOTER_RIGHT}[/]"
+    )
+    console.print(footer, highlight=False, soft_wrap=True)
+
+
+def _render_update_hint(console: Console) -> None:
+    """Render the upgrade-available hint below the logo if one is set.
+
+    Fails open: any import or call error swallows silently — a stale
+    hint must never wedge ``oc chat`` startup.
+    """
+    try:
+        from opencomputer.cli_update_check import get_update_hint
+
+        hint = get_update_hint(timeout=0.2)
+        if hint:
+            console.print(f"[{_PRIMARY}]+ {hint}[/]", highlight=False)
+    except Exception:  # noqa: BLE001 — splash must never crash on hints
+        pass
+
+
+# --- Public entry point ------------------------------------------------
 
 
 def build_welcome_banner(
@@ -197,122 +289,41 @@ def build_welcome_banner(
     model: str,
     cwd: str,
     *,
+    provider: str | None = None,
     session_id: str | None = None,
     session_label: str | None = None,
     home: Path | None = None,
 ) -> None:
-    """Print the OPENCOMPUTER welcome banner — banner-redesign v3:
+    """Print the OpenComputer welcome banner.
 
-    1. Half-block OPENCOMPUTER wordmark (light rose ``#E91E78``,
-       centered, 71×3).
-    2. Side-by-side block: rose-bordered info panel on the left
-       (version + tools + skills, truncated), Pico the pill bug on
-       the right.
-    3. Welcome line + a tip.
+    OC-style minimal splash (2026-05-12 redesign): the ``OPENCOMPUTER``
+    half-block wordmark with the version + git SHA pulled to the right
+    edge of its middle row, then a footer pointing at the slash commands
+    users need to look up their runtime state.
+
+    ``model``, ``cwd``, ``provider``, ``session_id``, ``session_label``,
+    ``home`` are accepted for back-compat with the previous "Option D"
+    splash signature but are intentionally NOT rendered. Runtime state
+    lives in the statusline and ``oc status`` slash command. See
+    ``docs/superpowers/specs/2026-05-12-oc-splash-replace-hermes-design.md``.
     """
-    import random
+    term_width = console.size.width if console.size else 100
+    # Silence Ruff's unused-arg warning for kwargs preserved for API
+    # stability. They are deliberately not rendered.
+    _ = (model, cwd, provider, session_id, session_label, home)
 
-    from rich.columns import Columns
-    from rich.console import Group
-    from rich.panel import Panel
-    from rich.text import Text
-
-    from opencomputer.cli_banner_art import OPENCOMPUTER_BLOCK_LOGO
-
-    # Render the half-block OPENCOMPUTER wordmark. Left-aligned so it
-    # shares the same left margin as the info panel + Pico row below
-    # (Columns is left-flush at column 0). ``no_wrap`` + ``overflow``
-    # keeps Rich from soft-wrapping mid-glyph and breaking rows.
-    width = console.size.width if console.size else 80
-    logo = Text(
-        OPENCOMPUTER_BLOCK_LOGO.rstrip("\n"),
-        style=_ROSE_TEXT,
-        no_wrap=True,
-        overflow="ignore",
-    )
-    console.print(logo, soft_wrap=True, no_wrap=True, overflow="ignore")
-
-    # Build the info panel content — version line, tools, skills, then
-    # model/cwd/session. The grouping helpers return empty lists when
-    # the registry hasn't been initialized yet, which is fine.
-    sha = _git_short_sha() or ""
-    version_line = (
-        f"[bold {_ROSE_TEXT}]OpenComputer[/bold {_ROSE_TEXT}] "
-        f"[dim]v{__version__}[/dim]"
-    )
-    if sha:
-        version_line += f" [dim]· {sha}[/dim]"
-
-    panel_lines: list[str] = [version_line, ""]
-
-    tools_grouped = get_available_tools()
-    if tools_grouped:
-        tool_lines, n_tools = _render_groups(tools_grouped)
-        panel_lines.append("[bold]Available Tools[/bold]")
-        panel_lines.extend(tool_lines)
-        panel_lines.append("")
-
-    skills_grouped = get_available_skills()
-    if skills_grouped:
-        skill_lines, n_skills = _render_groups(skills_grouped)
-        panel_lines.append("[bold]Available Skills[/bold]")
-        panel_lines.extend(skill_lines)
-        panel_lines.append("")
-    else:
-        n_skills = 0
-    n_tools = sum(len(v) for v in tools_grouped.values()) if tools_grouped else 0
-
-    panel_lines.append(f"[bold]Model:[/bold]   {model}")
-    panel_lines.append(f"[bold]CWD:[/bold]     [dim]{cwd}[/dim]")
-    if session_id:
-        shown_session = session_label or session_id
-        panel_lines.append(f"[bold]Session:[/bold] [dim]{shown_session}[/dim]")
-    if n_tools or n_skills:
-        panel_lines.append("")
-        panel_lines.append(
-            f"[dim]{n_tools} tool{'s' if n_tools != 1 else ''} · "
-            f"{n_skills} skill{'s' if n_skills != 1 else ''} · "
-            f"[/dim][{_ROSE_TEXT}]/help[/{_ROSE_TEXT}][dim] for commands[/dim]"
-        )
-    _ = home  # accepted for backwards-compat; not rendered
-
-    panel_body = Group(*[Text.from_markup(line) for line in panel_lines])
-    info_panel = Panel(
-        panel_body,
-        border_style=_ROSE_ACCENT,
-        padding=(0, 2),
-        expand=False,
-    )
-
-    # Side-by-side per banner-redesign: rose-bordered info panel on
-    # the LEFT, Pico (rose pill bug) on the RIGHT. Falls back to
-    # stacked rendering on narrow terminals.
-    from opencomputer.cli_pico import render_pico
-    mascot = render_pico("idle")
-    if width >= 100:
-        console.print(Columns([info_panel, mascot], padding=(0, 2)))
-    else:
-        console.print(info_panel)
-        console.print(mascot)
-
-    # Update-check hint — non-blocking (200ms), silently None when the
-    # background check hasn't finished yet (caller already invoked
-    # prefetch_update_check at startup).
-    try:
-        from opencomputer.cli_update_check import get_update_hint
-        hint = get_update_hint(timeout=0.2)
-        if hint:
-            console.print(f"[{_ROSE_TEXT}]+ {hint}[/{_ROSE_TEXT}]")
-    except Exception:  # noqa: BLE001
-        pass  # update check is purely informational; never block startup
-
-    # Welcome line — Hermes-parity wording.
+    # Top spacer — one blank row so the logo doesn't hug the prompt
+    # scrollback.
     console.print()
-    console.print(
-        f"[bold]Welcome to OpenComputer![/bold] "
-        f"Type your message or [{_ROSE_TEXT}]/help[/{_ROSE_TEXT}] for commands."
-    )
 
-    # Tip
-    if _TIPS:
-        console.print(f"[dim]+ {random.choice(_TIPS)}[/dim]")
+    if term_width >= _BLOCK_LOGO_MIN_WIDTH:
+        _render_block_logo(console, term_width)
+    else:
+        _render_text_fallback(console, term_width)
+
+    # Spacer between logo and footer.
+    console.print()
+
+    _render_update_hint(console)
+    _render_footer(console, term_width)
+    console.print()
