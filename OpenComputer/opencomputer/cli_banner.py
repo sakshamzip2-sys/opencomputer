@@ -378,8 +378,15 @@ def _build_right_column(
         lines.append(f"[dim {_DIM}](and {extra_categories} more {plural}...)[/]")
 
     # MCP Servers — only rendered when at least one is known. Matches
-    # upstream Hermes' conditional section (banner.py:536-549).
+    # upstream Hermes' conditional section (banner.py:536-549). Three
+    # states drive the visual:
+    #   - "connected"  → bumps the summary count, shows tool count
+    #   - "configured" → declared in config, not yet connected (banner
+    #                    renders before MCPManager.connect_all). Neutral
+    #                    color, no count, no error message.
+    #   - anything else → red + error message (live snapshot path).
     mcp_connected = 0
+    mcp_configured = 0
     if mcp_status:
         lines.append("")
         lines.append(f"[bold {_ACCENT}]MCP Servers[/]")
@@ -397,6 +404,12 @@ def _build_right_column(
                 lines.append(
                     f"[dim {_DIM}]{name}[/] [{_TEXT}]({transport_short})[/] "
                     f"[dim {_DIM}]—[/] [{_TEXT}]{tool_count} {plural}[/]"
+                )
+            elif state == "configured":
+                mcp_configured += 1
+                lines.append(
+                    f"[dim {_DIM}]{name}[/] [{_TEXT}]({transport_short})[/] "
+                    f"[dim {_DIM}]— configured[/]"
                 )
             else:
                 err = srv.get("last_error") or "disconnected"
@@ -416,6 +429,12 @@ def _build_right_column(
     summary_parts = [f"{n_tools} tools", f"{n_skills} skills"]
     if mcp_connected:
         summary_parts.append(f"{mcp_connected} MCP")
+    elif mcp_configured:
+        # No live connections yet (banner-time), but config declares N
+        # MCP servers. Surface the count so users see the section is
+        # populated even when servers haven't connected.
+        plural = "MCP" if mcp_configured == 1 else "MCP"
+        summary_parts.append(f"{mcp_configured} {plural}")
     lines.append(
         f"[dim {_DIM}]{' · '.join(summary_parts)} · "
         f"[/][{_ACCENT}]/help[/][dim {_DIM}] for commands[/]"

@@ -1253,17 +1253,63 @@ def _session_label_for_banner(db_path, session_id: str) -> str:
         return session_id
 
 
+def _resolve_mcp_status_for_banner(cfg) -> list[dict] | None:
+    """Return CONFIGURED MCP servers as a status-shape list for the splash.
+
+    The banner renders BEFORE ``MCPManager.connect_all()`` runs (see
+    cli.py ~line 1820), so live connection state isn't available yet.
+    Instead we report the declared config from ``cfg.mcp.servers`` —
+    name + transport label + ``"configured"`` connection state — so the
+    banner can render the MCP section as a configuration preview.
+
+    Fails open: any error returns ``None`` so the splash still renders
+    without an MCP section. The banner accepts ``None`` and skips.
+    """
+    try:
+        mcp_block = getattr(cfg, "mcp", None)
+        servers = getattr(mcp_block, "servers", None) if mcp_block else None
+    except Exception:  # noqa: BLE001 — cfg shape is best-effort here
+        return None
+    if not servers:
+        return None
+
+    out: list[dict] = []
+    for srv in servers:
+        try:
+            if not getattr(srv, "enabled", True):
+                continue
+            transport = getattr(srv, "transport", "") or "stdio"
+            if transport == "stdio":
+                transport_label = "stdio"
+            elif transport in ("sse", "http"):
+                # Show the URL host instead of the full URL when present.
+                url = getattr(srv, "url", "") or ""
+                transport_label = url or transport
+            else:
+                transport_label = transport
+            out.append({
+                "name": getattr(srv, "name", "unknown"),
+                "transport": transport_label,
+                "connection_state": "configured",
+            })
+        except Exception:  # noqa: BLE001 — one bad server doesn't kill the section
+            continue
+    return out or None
+
+
 def _render_chat_banner(console, cfg, *, cwd: str, session_id: str, home) -> None:
     """Render the startup chat banner with the latest persisted session label."""
     from opencomputer.cli_banner import build_welcome_banner
 
     build_welcome_banner(
         console,
-        model=f"{cfg.model.model} ({cfg.model.provider})",
+        model=cfg.model.model,
         cwd=cwd,
+        provider=cfg.model.provider,
         session_id=session_id,
         session_label=_session_label_for_banner(cfg.session.db_path, session_id),
         home=home,
+        mcp_status=_resolve_mcp_status_for_banner(cfg),
     )
 
 
