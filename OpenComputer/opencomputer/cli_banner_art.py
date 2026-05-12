@@ -70,25 +70,25 @@ OPEN_COMPUTER_LOGO_HERMES_STYLE = """[bold #FF3D8A] ██████╗ ██
 OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH = 110  # widest row, cell-counted
 
 
-# Caduceus Braille-art with a 5-tier pink gradient. Lifted verbatim
-# (glyph-by-glyph) from upstream Hermes' ``HERMES_CADUCEUS`` constant
-# (sources/hermes-agent/hermes_cli/banner.py:77-91) — Braille blocks
-# produce a real silhouette where dots can't. Colors repainted from
-# gold/amber/bronze to OC pink shades.
-OPEN_COMPUTER_CADUCEUS_PINK = """[#C2185B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀⠀⢀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#C2185B]⠀⠀⠀⠀⠀⠀⢀⣠⣴⣾⣿⣿⣇⠸⣿⣿⠇⣸⣿⣿⣷⣦⣄⡀⠀⠀⠀⠀⠀⠀[/]
-[#E91E78]⠀⢀⣠⣴⣶⠿⠋⣩⡿⣿⡿⠻⣿⡇⢠⡄⢸⣿⠟⢿⣿⢿⣍⠙⠿⣶⣦⣄⡀⠀[/]
-[#E91E78]⠀⠀⠉⠉⠁⠶⠟⠋⠀⠉⠀⢀⣈⣁⡈⢁⣈⣁⡀⠀⠉⠀⠙⠻⠶⠈⠉⠉⠀⠀[/]
-[#FF3D8A]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣴⣿⡿⠛⢁⡈⠛⢿⣿⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#FF3D8A]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠿⣿⣦⣤⣈⠁⢠⣴⣿⠿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#E91E78]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠻⢿⣿⣦⡉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#E91E78]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⢷⣦⣈⠛⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#C2185B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣴⠦⠈⠙⠿⣦⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#C2185B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⣿⣤⡈⠁⢤⣿⠇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#8E1A4F]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠷⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#8E1A4F]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⠑⢶⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#8E1A4F]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⠁⢰⡆⠈⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#8E1A4F]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠳⠈⣡⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#8E1A4F]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
+# Pegasus Braille-art (user-supplied, generated via pegasus.py from the
+# game-icons SVG library). 16 rows tall, painted with a 5-tier pink
+# gradient: dark-rose edges → rose → hot-pink body → rose → dark-rose
+# tail fade. Constant name kept as ``OPEN_COMPUTER_CADUCEUS_PINK`` for
+# back-compat with ``cli_banner`` imports (it's the left-column hero
+# slot, not specifically a caduceus anymore).
+OPEN_COMPUTER_CADUCEUS_PINK = """[#C2185B]                     ⢀⣀⣤⣤⣤⣤⣴⣿⣿⡇[/]
+[#C2185B]  ⢻⣶⣤⡀            ⢀⣴⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣇[/]
+[#E91E78]   ⢻⣿⣿⣷⣤⣀       ⢀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣿⣿⣆[/]
+[#E91E78]    ⠹⣿⣿⣿⣿⣷⣦⣀   ⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧[/]
+[#E91E78]     ⠈⠻⢿⣿⣿⣿⣿⣷⣦⣄ ⠻⣿⣿⣿⣿⣿⣿⣿⡉⠻⢿⣿⣿⣿⣿⣿⣿⣧[/]
+[#FF3D8A]    ⠠⣦⣄⡀⠙⠻⢿⣿⣿⣿⣿⣿⣶⣄⡉⠻⢿⣿⣿⣿⣇    ⠉⠻⢿⣿⣿⡇[/]
+[#FF3D8A]     ⠹⣿⣿⣿⣶⣤⣉⣿⣿⣿⣿⣿⣿⣿⣶⣄⠙⢿⣿⣿⡄      ⠈⠉[/]
+[#FF3D8A]      ⠈⠙⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⡀⢻⣿⣷⡀[/]
+[#FF3D8A]       ⢀⣄⣀⠙⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ ⣿⣿⣷[/]
+[#E91E78]        ⢻⣿⣿⣷⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ ⣿⣿⣿[/]
+[#E91E78]         ⠙⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡟⢀⣿⣿⡏[/]
+[#C2185B]          ⢀⣉⣻⣿⣿⣿⣿⣿⣿⣿⣿⡿⢁⣾⣿⠏[/]
+[#C2185B]          ⠈⢿⣿⣿⣿⣿⣿⣿⣿⣿⠟⢀⣾⡿⠁[/]
+[#8E1A4F]            ⠉⠛⠻⢿⣿⣿⡿⠋⠠⠟⠉[/]"""
 
-OPEN_COMPUTER_CADUCEUS_PINK_WIDTH = 30  # Braille column count, NOT char cells
+OPEN_COMPUTER_CADUCEUS_PINK_WIDTH = 36  # widest source row, approx
