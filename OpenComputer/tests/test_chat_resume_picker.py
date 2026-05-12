@@ -214,16 +214,13 @@ def test_session_label_for_banner_shows_uuid_until_session_is_named(tmp_path: Pa
     )
 
 
-def test_render_chat_banner_drops_session_info_after_oc_splash_migration(
-    tmp_path: Path,
-) -> None:
-    """OC-style minimal splash (2026-05-12) intentionally drops runtime
-    info — session uuid, session title, model, cwd, provider — from the
-    splash. ``cli._render_chat_banner`` still resolves the session label
-    via ``_session_label_for_banner()`` (so it's available for the
-    statusline and ``oc status``), but the splash itself MUST NOT print
-    it. This test pins that contract so a future regression that
-    re-introduces session leakage on the splash fails loudly.
+def test_render_chat_banner_reflects_session_rename(tmp_path: Path) -> None:
+    """Hermes-style splash (2026-05-12 third pass) surfaces runtime info
+    — model · provider, cwd, and ``Session: {label}`` — in the panel's
+    left column under the caduceus. Renaming a session via
+    ``set_session_title`` changes what the splash shows on the next
+    render. Raw UUIDs never leak when a human title exists; before a
+    title is set, the UUID is shown elided (head…tail).
     """
     from opencomputer import cli
     from opencomputer.agent.state import SessionDB
@@ -242,29 +239,22 @@ def test_render_chat_banner_drops_session_info_after_oc_splash_migration(
         session=SimpleNamespace(db_path=db_path),
     )
 
-    # First render — session has no human title; uuid is the label.
+    # First render — session has no human title yet; splash shows
+    # ``Session: head…tail`` (elided uuid).
     before_stream = StringIO()
     cli._render_chat_banner(
-        Console(file=before_stream, force_terminal=True, color_system=None, width=100),
+        Console(file=before_stream, force_terminal=True, color_system=None, width=140),
         cfg,
         cwd=str(tmp_path),
         session_id=session_id,
         home=tmp_path,
     )
     before_out = before_stream.getvalue()
-    # OC-style minimal splash invariants — must hold regardless of session.
-    assert "OPENCOMPUTER" in before_out or "█" in before_out
-    assert "› Ready." in before_out
-    # No session info on the splash.
+    assert "Session:" in before_out
+    assert "d991d7c3" in before_out
+    assert "…" in before_out
+    # The full uuid never appears verbatim — always elided.
     assert session_id not in before_out
-    assert "d991d7c3" not in before_out
-    assert "SESSION" not in before_out
-    # No runtime info on the splash.
-    assert "gpt-5.4" not in before_out
-    assert "openai" not in before_out
-    assert "MODEL" not in before_out
-    assert "PROVIDER" not in before_out
-    assert "CWD" not in before_out
 
     # Rename the session — the label resolver picks up the new title.
     db.set_session_title(session_id, "pratyakksh")
@@ -272,20 +262,21 @@ def test_render_chat_banner_drops_session_info_after_oc_splash_migration(
         cli._session_label_for_banner(db_path, session_id) == "pratyakksh"
     )
 
-    # Second render — splash is still minimal; the rename does NOT
-    # surface on the splash. The label lives in statusline/`oc status`.
+    # Second render — splash surfaces the new human title in place of
+    # the elided uuid.
     after_stream = StringIO()
     cli._render_chat_banner(
-        Console(file=after_stream, force_terminal=True, color_system=None, width=100),
+        Console(file=after_stream, force_terminal=True, color_system=None, width=140),
         cfg,
         cwd=str(tmp_path),
         session_id=session_id,
         home=tmp_path,
     )
     rendered = after_stream.getvalue()
-    assert "pratyakksh" not in rendered
+    assert "Session:" in rendered
+    assert "pratyakksh" in rendered
+    # Raw uuid still never leaks.
     assert session_id not in rendered
-    assert "SESSION" not in rendered
 
 
 def test_resume_passthrough_unknown_spec_returns_input(
