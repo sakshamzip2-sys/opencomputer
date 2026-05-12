@@ -1,21 +1,23 @@
-"""Tests for cli_banner.py — OC-style minimal splash (post 2026-05-12).
+"""Tests for cli_banner.py — Hermes-style splash with OC pink + real data
+(2026-05-12 redesign, third pass).
 
-The previous "Option D HUD" splash (mascot + 4-column runtime grid + tool
-+ skill chip rows) was replaced with an OpenCode-style minimal splash:
-``OPENCOMPUTER`` half-block wordmark + version-right + footer prompt. Runtime
-state (model / provider / cwd / session) moved out of the splash to
-``oc status`` and statusline surfaces. See
-``docs/superpowers/specs/2026-05-12-oc-splash-replace-hermes-design.md``.
+Supersedes the OC-minimal-splash test suite. The new splash integrates
+the hermes-agent visual shape — chunky ``ansi_shadow`` wordmark over a
+rounded panel that puts a Braille caduceus + runtime info on the left
+and Available Tools + Available Skills on the right — with OC pink
+colors and OC's own data feeds (real registries, real version + SHA,
+real model/provider/cwd/session).
 """
 from __future__ import annotations
 
 import io
 import re
+from pathlib import Path
 
 import pytest
 from rich.console import Console
 
-# --- Helpers preserved across the migration -----------------------------
+# --- Helper tests (unchanged — public API stays stable) -----------------
 
 
 def test_format_banner_version_label_includes_version_string():
@@ -45,28 +47,34 @@ def test_format_banner_version_label_omits_git_sha_when_unavailable(monkeypatch)
 
 
 def test_ascii_art_constants_exist():
-    """``cli_banner_art`` exports are public API; downstream consumers may
-    reach into them (e.g., a future ``oc status``). Don't break that.
+    """``cli_banner_art`` exports are public API — downstream consumers
+    may reach into them. Don't break that.
     """
     from opencomputer.cli_banner_art import (
+        OPEN_COMPUTER_CADUCEUS_PINK,
+        OPEN_COMPUTER_LOGO_HERMES_STYLE,
+        OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH,
         OPENCOMPUTER_BLOCK_LOGO,
         OPENCOMPUTER_LOGO,
         OPENCOMPUTER_LOGO_FALLBACK,
         SIDE_GLYPH,
     )
 
+    # Legacy constants — kept for back-compat.
     assert isinstance(OPENCOMPUTER_LOGO, str)
-    lines = OPENCOMPUTER_LOGO.strip("\n").splitlines()
-    assert len(lines) >= 5
-    assert any(len(line) >= 50 for line in lines)
+    assert len(OPENCOMPUTER_LOGO.strip("\n").splitlines()) >= 5
     assert OPENCOMPUTER_LOGO_FALLBACK == "OPENCOMPUTER"
     assert isinstance(SIDE_GLYPH, str)
     assert len(SIDE_GLYPH.splitlines()) >= 6
-    # The active splash uses the block logo. Three rows, ≥70 cols wide.
     assert isinstance(OPENCOMPUTER_BLOCK_LOGO, str)
-    block_rows = OPENCOMPUTER_BLOCK_LOGO.rstrip("\n").splitlines()
-    assert len(block_rows) == 3
-    assert all(len(row) >= 70 for row in block_rows)
+
+    # New Hermes-style wordmark + caduceus.
+    assert isinstance(OPEN_COMPUTER_LOGO_HERMES_STYLE, str)
+    assert "OPEN-COMPUTER" not in OPEN_COMPUTER_LOGO_HERMES_STYLE  # rendered as art, not text
+    assert "██" in OPEN_COMPUTER_LOGO_HERMES_STYLE  # solid-block letterforms
+    assert OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH > 100
+    assert isinstance(OPEN_COMPUTER_CADUCEUS_PINK, str)
+    assert "⠀" in OPEN_COMPUTER_CADUCEUS_PINK or "⣿" in OPEN_COMPUTER_CADUCEUS_PINK
 
 
 def test_get_available_skills_walks_skill_dirs(monkeypatch, tmp_path):
@@ -136,20 +144,20 @@ def test_get_available_tools_returns_empty_dict_when_registry_unreachable(monkey
     assert get_available_tools() == {}
 
 
-# --- New OC-style minimal splash ---------------------------------------
+# --- New Hermes-style splash --------------------------------------------
 
 
-def _render(monkeypatch, *, width=120, **kwargs):
-    """Helper: render the welcome banner and return (output, console)."""
+def _render(monkeypatch, *, width=140, tools=None, skills=None, **kwargs):
+    """Helper: render the banner into a StringIO and return the text."""
     from opencomputer.cli_banner import build_welcome_banner
 
-    # Default monkeypatches — silence helpers that hit disk / subprocess
-    # unless the caller explicitly overrides.
     monkeypatch.setattr(
-        "opencomputer.cli_banner.get_available_skills", lambda: {}
+        "opencomputer.cli_banner.get_available_skills",
+        lambda: skills if skills is not None else {},
     )
     monkeypatch.setattr(
-        "opencomputer.cli_banner.get_available_tools", lambda: {}
+        "opencomputer.cli_banner.get_available_tools",
+        lambda: tools if tools is not None else {},
     )
     buf = io.StringIO()
     console = Console(file=buf, width=width, force_terminal=False)
@@ -159,180 +167,226 @@ def _render(monkeypatch, *, width=120, **kwargs):
         cwd=kwargs.pop("cwd", "/tmp"),
         **kwargs,
     )
-    return buf.getvalue(), console
+    return buf.getvalue()
 
 
-def test_build_welcome_banner_renders_opencomputer_wordmark(monkeypatch):
-    """At ≥73 cols, the splash MUST render the half-block ``OPENCOMPUTER``
-    wordmark from ``OPENCOMPUTER_BLOCK_LOGO``. We check for the actual
-    block-character row prefixes from that constant.
+def test_renders_hermes_style_ansi_shadow_wordmark(monkeypatch):
+    """At wide widths the splash renders the OPEN-COMPUTER ansi_shadow
+    wordmark — distinctive ``██╗`` / ``╔═══`` / ``╚═══`` blocks present.
     """
-    out, _ = _render(monkeypatch, width=120)
-    # The block logo has solid █ characters across all three rows.
-    assert "█" in out
-    # Row-1 of OPENCOMPUTER_BLOCK_LOGO starts with the "O" letter:
-    # ``▄▀▀▀▄`` — the splash output must include at least one of these
-    # distinctive half-block prefixes.
-    assert "▄▀▀▀▄" in out
+    out = _render(monkeypatch, width=140)
+    assert "██╗" in out
+    assert "╔" in out
+    assert "╚" in out
+    # Legacy half-block art must not regress back in alongside.
+    assert "▄▀▀▀▄" not in out
 
 
-def test_build_welcome_banner_includes_version_right(monkeypatch):
-    """Version + git SHA are pulled right on the splash's middle row."""
+def test_panel_title_includes_version_and_sha(monkeypatch):
+    """Panel title: ``OpenComputer v{__version__} · {sha}``."""
     from opencomputer import __version__
 
     monkeypatch.setattr(
         "opencomputer.cli_banner._git_short_sha", lambda: "deadbeef"
     )
-    out, _ = _render(monkeypatch, width=120)
+    out = _render(monkeypatch, width=140)
+    assert "OpenComputer" in out
     assert f"v{__version__}" in out
     assert "deadbeef" in out
-    assert " · " in out  # spacer between version and SHA
 
 
-def test_build_welcome_banner_includes_footer(monkeypatch):
-    out, _ = _render(monkeypatch, width=120)
-    # Left footer cluster.
-    assert "› Ready." in out
-    assert "Type a message, or" in out
-    assert "/help" in out
-    # Right footer cluster — keep verbatim from spec §3.1.
-    assert "/status · /model · /help · /exit" in out
-
-
-def test_footer_advertises_only_registered_slash_commands():
-    """Regression guard: every ``/cmd`` token the splash advertises in
-    its right-side footer MUST correspond to a registered slash command.
-    No liar UI.
+def test_panel_renders_runtime_info_in_left_column(monkeypatch):
+    """Left column under the caduceus shows model · provider, cwd, and
+    ``Session: {label}`` — opposite of the previous "no-runtime" spec.
     """
-    import re
-
-    from opencomputer.agent.slash_commands import register_builtin_slash_commands
-    from opencomputer.cli_banner import _FOOTER_RIGHT
-    from opencomputer.cli_ui.slash import SLASH_REGISTRY
-    from opencomputer.plugins.registry import registry as plugin_registry
-
-    # Built-in slash commands populate the plugin registry on first call.
-    register_builtin_slash_commands()
-
-    # Collect every advertised ``/cmd`` token from the footer.
-    advertised = set(re.findall(r"/([a-z][a-z0-9_-]*)", _FOOTER_RIGHT))
-    assert advertised, "footer advertises no slash commands — invalid state"
-
-    # Build the set of every name + alias that resolves to a real command.
-    legacy_names: set[str] = set()
-    for cmd in SLASH_REGISTRY:
-        legacy_names.add(cmd.name)
-        legacy_names.update(cmd.aliases)
-    handler_names: set[str] = set(plugin_registry.slash_commands.keys())
-
-    registered = legacy_names | handler_names
-    missing = advertised - registered
-    assert not missing, (
-        f"Footer advertises slash commands that are NOT registered: "
-        f"{sorted(missing)}. Either remove from cli_banner._FOOTER_RIGHT "
-        f"or register them in cli_ui/slash.py:SLASH_REGISTRY / "
-        f"slash_commands_impl/."
-    )
-
-
-def test_build_welcome_banner_does_not_render_runtime_info(monkeypatch):
-    """``provider``, ``session_id``, ``session_label``, ``cwd`` are accepted
-    for back-compat but MUST NOT appear in the splash output. They live in
-    statusline / ``oc status`` now.
-    """
-    out, _ = _render(
+    out = _render(
         monkeypatch,
         width=140,
         model="claude-opus-4-7",
-        cwd="/Users/saksham/super-secret-cwd",
         provider="anthropic",
+        cwd="/Users/saksham/Vscode/claude",
         session_id="64d3a534-5f77-4ebf-bfd4-61b16b68d749",
         session_label="my-cool-session",
     )
-    assert "claude-opus-4-7" not in out
-    assert "anthropic" not in out
-    assert "super-secret-cwd" not in out
-    assert "my-cool-session" not in out
-    assert "64d3a534" not in out
-    assert "b68d749" not in out
-    # Old HUD column labels — the splash must not regress.
-    assert "MODEL" not in out
-    assert "PROVIDER" not in out
-    assert "CWD" not in out
-    assert "SESSION" not in out
-    assert "TOOLS · " not in out
-    assert "SKILLS · " not in out
+    assert "claude-opus-4-7" in out
+    assert "anthropic" in out
+    assert "/Users/saksham/Vscode/claude" in out
+    assert "Session:" in out
+    assert "my-cool-session" in out
+    # Raw uuid never leaks when a human label is set.
+    assert "64d3a534-5f77-4ebf-bfd4-61b16b68d749" not in out
 
 
-def test_build_welcome_banner_narrow_terminal_fallback(monkeypatch):
-    """Below the 73-col block-logo width, the splash falls back to the
-    plain ``OPENCOMPUTER`` wordmark with no half-block art.
-    """
-    out, _ = _render(monkeypatch, width=40)
-    assert "OPENCOMPUTER" in out
-    # Half-block characters that only appear in the block-logo art MUST NOT
-    # appear in the narrow fallback. ``▀▄`` are the half-block markers.
-    distinctive_block_chars = ("▄▀▀▀▄", "█▀▀▀▄", "▀▄▄▄▀")
-    for marker in distinctive_block_chars:
-        assert marker not in out
-    # Footer must still render.
-    assert "› Ready." in out
-
-
-def test_build_welcome_banner_does_not_leak_hermes(monkeypatch):
-    """The splash must not surface any of the legacy Hermes-derived
-    strings. This regresses the migration if anyone adds them back.
-    """
-    monkeypatch.setattr(
-        "opencomputer.cli_banner.get_available_skills",
-        lambda: {"coding": ["edit"]},
+def test_panel_elides_session_uuid_when_no_label(monkeypatch):
+    """Without a real label, the splash shows ``Session: head…tail``."""
+    out = _render(
+        monkeypatch,
+        width=140,
+        session_id="64d3a534-5f77-4ebf-bfd4-61b16b68d749",
     )
-    monkeypatch.setattr(
-        "opencomputer.cli_banner.get_available_tools",
-        lambda: {"core": ["Edit"]},
+    assert "Session:" in out
+    assert "64d3a534" in out
+    assert "b68d749" in out
+    assert "…" in out
+    assert "64d3a534-5f77-4ebf-bfd4-61b16b68d749" not in out
+
+
+def test_session_label_echoing_uuid_is_treated_as_no_label(monkeypatch):
+    """``_session_label_for_banner`` returns the uuid as a fallback. The
+    splash must detect that and elide instead of printing the raw uuid.
+    """
+    uuid = "64d3a534-5f77-4ebf-bfd4-61b16b68d749"
+    out = _render(monkeypatch, width=140, session_id=uuid, session_label=uuid)
+    assert uuid not in out
+    assert "64d3a534" in out
+    assert "…" in out
+
+
+def test_panel_renders_tools_section_with_top_8_toolsets(monkeypatch):
+    """Tools section: ``Available Tools`` header + up to 8 toolset rows,
+    each ``toolset: tool, tool, ...``. Overflow shown as ``(and N more
+    toolsets...)``.
+    """
+    tools = {f"toolset_{i:02d}": [f"tool_{i}_a", f"tool_{i}_b"] for i in range(12)}
+    out = _render(monkeypatch, width=140, tools=tools)
+    assert "Available Tools" in out
+    assert "toolset_00:" in out
+    assert "toolset_07:" in out  # 8th (index 7)
+    assert "toolset_08:" not in out  # 9th is collapsed
+    assert "(and 4 more toolsets...)" in out
+
+
+def test_panel_renders_skills_section_with_top_8_categories(monkeypatch):
+    """Skills section: ``Available Skills`` header + up to 8 category
+    rows. Overflow shown as ``(and N more categories...)``.
+    """
+    skills = {f"cat_{i:02d}": [f"skill_{i}"] for i in range(15)}
+    out = _render(monkeypatch, width=140, skills=skills)
+    assert "Available Singular Skills" not in out
+    assert "Available Skills" in out
+    assert "cat_00:" in out
+    assert "cat_07:" in out
+    assert "cat_08:" not in out  # collapsed
+    assert "(and 7 more categories...)" in out
+
+
+def test_panel_renders_summary_line_with_real_counts(monkeypatch):
+    """Summary footer reports total tool and skill counts."""
+    tools = {"core": ["A", "B", "C"], "extras": ["D", "E"]}  # 5 tools total
+    skills = {"general": ["s1", "s2", "s3", "s4"]}            # 4 skills total
+    out = _render(monkeypatch, width=140, tools=tools, skills=skills)
+    assert "5 tools" in out
+    assert "4 skills" in out
+    assert "/help" in out
+
+
+def test_panel_summary_omitted_when_registries_empty(monkeypatch):
+    """When BOTH registries are empty (plugin discovery not yet run),
+    the misleading ``0 tools · 0 skills`` summary is suppressed.
+    """
+    out = _render(monkeypatch, width=140, tools={}, skills={})
+    assert "0 tools" not in out
+    # The headers themselves do render so users still see the structure.
+    assert "Available Tools" in out
+    assert "Available Skills" in out
+
+
+def test_welcome_and_tip_render_after_panel(monkeypatch):
+    """Welcome line + a ✦-prefixed tip below the panel."""
+    out = _render(monkeypatch, width=140)
+    assert "Welcome to OpenComputer!" in out
+    assert "Type your message or" in out
+    assert "/help" in out
+    assert "✦ Tip:" in out
+
+
+def test_tip_is_drawn_from_curated_list(monkeypatch):
+    """The rendered tip must be one of the curated ``_TIPS`` entries."""
+    from opencomputer.cli_banner import _TIPS
+
+    out = _render(monkeypatch, width=140)
+    assert _TIPS, "_TIPS must not be empty"
+    rendered_tips = [t for t in _TIPS if t in out]
+    assert len(rendered_tips) == 1, (
+        f"Expected exactly one curated tip in output, got {rendered_tips}"
     )
-    out, _ = _render(monkeypatch, width=140, session_id="abc-123")
+
+
+def test_chooses_a_random_tip_per_call(monkeypatch):
+    """Multiple invocations cycle through the tip pool (not pinned)."""
+    seen: set[str] = set()
+    for _ in range(50):
+        out = _render(monkeypatch, width=140)
+        match = re.search(r"✦ Tip: (.+?)(?:\033|$|\n)", out)
+        if match:
+            seen.add(match.group(1).strip())
+    # 50 calls × 7 tips → overwhelmingly likely we see ≥3 distinct tips.
+    assert len(seen) >= 3, f"Tip rotation looks pinned: only saw {seen!r}"
+
+
+def test_no_hermes_branding_leaks(monkeypatch):
+    """The output is OC-branded throughout — no upstream Hermes strings."""
+    out = _render(
+        monkeypatch,
+        width=140,
+        model="claude-opus-4-7",
+        provider="anthropic",
+        session_id="abc-123",
+        tools={"core": ["Edit"]},
+        skills={"general": ["foo"]},
+    )
     forbidden = (
         "NOUS HERMES",
         "Nous Research",
+        "Hermes Agent",
         "Messenger of the Digital Gods",
         "hermes shell",
-        "Hermes",
+        "kimi-k2.5:cloud",
     )
     for needle in forbidden:
         assert needle.lower() not in out.lower(), f"Hermes leak: {needle!r}"
 
 
-def test_build_welcome_banner_handles_missing_version(monkeypatch):
-    """Empty ``__version__`` ⇒ splash renders without the version cluster."""
+def test_accepts_legacy_combined_model_provider_string(monkeypatch):
+    """Old call sites pass ``"model (provider)"`` as one string. The
+    splash splits it back apart so both halves render correctly.
+    """
+    out = _render(monkeypatch, width=140, model="claude-opus-4-7 (anthropic)")
+    assert "claude-opus-4-7" in out
+    assert "anthropic" in out
+    # The combined form must NOT echo as a literal substring.
+    assert "claude-opus-4-7 (anthropic)" not in out
+
+
+def test_handles_missing_version_gracefully(monkeypatch):
+    """Empty ``__version__`` → no stray ``v · sha`` artifact in title."""
     monkeypatch.setattr("opencomputer.cli_banner.__version__", "")
-    out, _ = _render(monkeypatch, width=120)
-    # No stray ``v · sha`` artifact.
+    out = _render(monkeypatch, width=140)
+    # No partial ``v · {sha}`` line — when version is empty, the whole
+    # version cluster collapses.
     assert not re.search(r"\bv\s*·\s*[0-9a-f]{7}\b", out)
 
 
-def test_build_welcome_banner_handles_missing_sha(monkeypatch):
-    """``_git_short_sha`` returning None ⇒ no trailing ` · ` separator."""
+def test_handles_missing_sha_gracefully(monkeypatch):
+    """``_git_short_sha → None`` → title shows only ``OpenComputer v{ver}``."""
     from opencomputer import __version__
 
     monkeypatch.setattr("opencomputer.cli_banner._git_short_sha", lambda: None)
-    out, _ = _render(monkeypatch, width=120)
+    out = _render(monkeypatch, width=140)
     assert f"v{__version__}" in out
-    # No trailing ` · ` after the version when SHA is unavailable.
+    # No trailing ` · ` after version when SHA is unavailable.
     assert f"v{__version__} · " not in out
 
 
-def test_build_welcome_banner_accepts_all_legacy_kwargs_without_error(monkeypatch):
-    """Existing call site in cli.py passes (model, cwd, provider,
-    session_id, session_label, home). All must be accepted silently.
+def test_accepts_all_legacy_kwargs_without_error(monkeypatch):
+    """The signature ``(console, model, cwd, *, provider, session_id,
+    session_label, home)`` must stay stable — existing call site uses it.
     """
-    from pathlib import Path
-
     # Should not raise.
     _render(
         monkeypatch,
-        width=120,
-        model="claude-opus-4-7 (anthropic)",  # legacy combined form
+        width=140,
+        model="claude-opus-4-7 (anthropic)",
         cwd="/tmp",
         provider="anthropic",
         session_id="uuid-123",
@@ -341,80 +395,351 @@ def test_build_welcome_banner_accepts_all_legacy_kwargs_without_error(monkeypatc
     )
 
 
-def test_build_welcome_banner_renders_at_minimum_width_safely(monkeypatch):
-    """A pathologically narrow terminal (cols=20) must not crash."""
-    # Should not raise.
-    out, _ = _render(monkeypatch, width=20)
+def test_narrow_terminal_falls_back_gracefully(monkeypatch):
+    """Below ``_WORDMARK_MIN_WIDTH`` we drop the ansi_shadow art and use
+    a smaller fallback. Splash must not crash and must still print the
+    OpenComputer name.
+    """
+    out = _render(monkeypatch, width=80)
+    assert "OpenComputer" in out or "OPENCOMPUTER" in out
+
+
+def test_pathologically_narrow_does_not_crash(monkeypatch):
+    """20-col terminal — drops to plain text + stacked panel content."""
+    out = _render(monkeypatch, width=20)
+    # Plain fallback at min: bold OPENCOMPUTER appears.
     assert "OPENCOMPUTER" in out
 
 
-def test_build_welcome_banner_narrow_drops_sha_rather_than_truncate(monkeypatch):
-    """At widths too narrow for the full ``v{ver} · {sha}`` cluster, the
-    splash MUST drop the SHA cleanly rather than show a half-clipped
-    string like ``v2026.5.10.post3 · b`` (partial sha = ugly UI).
+def test_empty_model_and_cwd_do_not_crash(monkeypatch):
+    """Adversarial inputs: empty strings render without crash, model
+    line/cwd line are simply suppressed.
     """
-    from opencomputer import __version__
-
-    monkeypatch.setattr(
-        "opencomputer.cli_banner._git_short_sha", lambda: "deadbeef"
-    )
-    out, _ = _render(monkeypatch, width=20)
-    # Either: full cluster fits (it won't at 20 cols with a long ver), OR
-    # short version-only line, OR no version line at all. NEVER a partial.
-    for line in out.splitlines():
-        line_stripped = line.rstrip()
-        # If ``·`` appears, the SHA after it must NOT be a single trailing
-        # char (which is the visual-truncation signature).
-        if "·" in line_stripped:
-            after = line_stripped.split("·", 1)[1].strip()
-            assert len(after) >= 7 or after == "", (
-                f"Splash shows clipped SHA fragment: {line_stripped!r}"
-            )
-    # If a version line exists, it's the full label (no SHA suffix).
-    assert f"v{__version__}" in out or "OPENCOMPUTER" in out
+    out = _render(monkeypatch, width=140, model="", cwd="")
+    assert "Welcome to OpenComputer!" in out
 
 
-def test_build_welcome_banner_narrow_drops_version_when_even_label_overflows(
-    monkeypatch,
-):
-    """A ridiculously long version string at a small width — must drop the
-    version cleanly rather than render a partial.
-    """
-    monkeypatch.setattr(
-        "opencomputer.cli_banner.__version__",
-        "2026.5.10.post3.dev9999-rc-with-a-very-long-tag",
-    )
-    monkeypatch.setattr(
-        "opencomputer.cli_banner._git_short_sha", lambda: "deadbeef"
-    )
-    out, _ = _render(monkeypatch, width=18)
-    # The full version string is wider than 18 cols → must NOT appear.
-    assert "2026.5.10.post3.dev9999" not in out
-    # Logo + footer still render.
-    assert "OPENCOMPUTER" in out
-
-
-def test_build_welcome_banner_with_empty_model_and_cwd(monkeypatch):
-    """Adversarial inputs: empty strings must not crash or echo as runtime
-    info on the splash."""
-    out, _ = _render(monkeypatch, width=120, model="", cwd="")
-    # Splash still renders.
-    assert "› Ready." in out
-
-
-def test_build_welcome_banner_update_hint_failure_does_not_crash(monkeypatch):
-    """If the update-check helper raises, the splash must still render."""
+def test_update_hint_failure_swallowed(monkeypatch):
+    """If ``get_update_hint`` raises, the splash still finishes rendering."""
     def boom(timeout: float = 0.2):
         raise RuntimeError("update check broken")
 
     monkeypatch.setattr(
         "opencomputer.cli_update_check.get_update_hint", boom, raising=False
     )
-    out, _ = _render(monkeypatch, width=120)
-    assert "› Ready." in out
+    out = _render(monkeypatch, width=140)
+    assert "Welcome to OpenComputer!" in out
 
 
-# --- Pico mascot tests — unrelated, kept intact ------------------------
+def test_panel_renders_at_full_width_with_real_data_shape(monkeypatch):
+    """End-to-end: a realistic registry payload renders cleanly at the
+    typical terminal width — no Rich layout exceptions, all sections
+    present.
+    """
+    tools = {
+        "core": ["AppleScriptRun", "AskUserQuestion", "Bash", "Clarify"],
+        "coding-harness": ["Edit", "MultiEdit", "Read", "Write", "TodoWrite"],
+        "extras": ["AmazonTrackPrice", "ArxivSearch"],
+    }
+    skills = {
+        "coding": ["debug-python", "edit-skill", "review-skill"],
+        "research": ["arxiv", "blogwatcher", "polymarket"],
+    }
+    out = _render(
+        monkeypatch, width=140,
+        tools=tools,
+        skills=skills,
+        model="claude-opus-4-7",
+        provider="anthropic",
+        cwd="/Users/saksham/Vscode/claude",
+        session_id="64d3a534-5f77-4ebf-bfd4-61b16b68d749",
+    )
+    # Wordmark + panel + welcome + tip — every block.
+    assert "██╗" in out
+    assert "OpenComputer" in out
+    assert "claude-opus-4-7" in out
+    assert "anthropic" in out
+    assert "Available Tools" in out
+    assert "Available Skills" in out
+    assert "Edit" in out
+    assert "arxiv" in out
+    assert "Welcome to OpenComputer!" in out
+    assert "✦ Tip:" in out
+
+
+def test_long_toolset_items_truncated_per_row(monkeypatch):
+    """A toolset with many tools gets its items truncated with ``...``
+    so a single row doesn't blow out the panel width.
+    """
+    tools = {"big": [f"Tool{i:02d}" for i in range(40)]}
+    out = _render(monkeypatch, width=140, tools=tools)
+    assert "Tool00" in out
+    # The 40th tool can't fit in the per-row budget.
+    assert "Tool39" not in out
+    assert "..." in out
+
+
+# --- New section tests (panel chrome, MCP, profile, alignment) ---------
+
+
+def test_panel_renders_rounded_border(monkeypatch):
+    """The outer panel must render with ROUNDED box-drawing characters —
+    the visual signature of the Hermes-style splash.
+    """
+    out = _render(monkeypatch, width=140)
+    # Top-left + top-right + bottom-left + bottom-right corners of the
+    # rounded box. At least the top corners are guaranteed; bottom too.
+    assert "╭" in out
+    assert "╮" in out
+    assert "╰" in out
+    assert "╯" in out
+
+
+def test_panel_renders_braille_caduceus_inside(monkeypatch):
+    """The Braille-block caduceus must actually appear inside the
+    rendered panel, not just exist as a module-level constant.
+    """
+    out = _render(monkeypatch, width=140)
+    # Distinctive Braille glyphs from the caduceus art that don't
+    # appear in any other splash section.
+    assert "⣿" in out or "⣦" in out
+    assert "⠿" in out or "⣠" in out
+
+
+def test_panel_renders_mcp_section_when_status_provided(monkeypatch):
+    """``MCP Servers`` section + each server's row render when caller
+    passes a non-empty ``mcp_status`` list.
+    """
+    mcp = [
+        {
+            "name": "filesystem",
+            "transport": "stdio",
+            "connection_state": "connected",
+            "tool_count": 7,
+        },
+        {
+            "name": "web-search",
+            "transport": "http://localhost:9000",
+            "connection_state": "connected",
+            "tool_count": 3,
+        },
+    ]
+    out = _render(monkeypatch, width=140, mcp_status=mcp)
+    assert "MCP Servers" in out
+    assert "filesystem" in out
+    assert "7 tools" in out
+    assert "web-search" in out
+    assert "3 tools" in out
+    # Summary line counts connected MCP servers.
+    assert "2 MCP" in out
+
+
+def test_panel_renders_mcp_failed_state(monkeypatch):
+    """A disconnected/errored MCP server shows in red with the error."""
+    mcp = [
+        {
+            "name": "broken-mcp",
+            "transport": "stdio",
+            "connection_state": "error",
+            "last_error": "connection refused",
+        }
+    ]
+    out = _render(monkeypatch, width=140, mcp_status=mcp)
+    assert "MCP Servers" in out
+    assert "broken-mcp" in out
+    assert "connection refused" in out
+    # Failed servers don't bump the connected-MCP count.
+    assert "1 MCP" not in out
+
+
+def test_panel_omits_mcp_section_when_none(monkeypatch):
+    """No MCP status ⇒ no ``MCP Servers`` section, no MCP in summary."""
+    out = _render(monkeypatch, width=140, mcp_status=None)
+    assert "MCP Servers" not in out
+    assert " MCP " not in out
+
+
+def test_panel_renders_profile_line_when_non_default(monkeypatch):
+    """A non-default active profile surfaces in the left column under
+    the caduceus as ``Profile: {name}``.
+    """
+    monkeypatch.setattr(
+        "opencomputer.cli_banner._active_profile_name", lambda: "alpha"
+    )
+    out = _render(monkeypatch, width=140)
+    assert "Profile:" in out
+    assert "alpha" in out
+
+
+def test_panel_omits_profile_line_when_default(monkeypatch):
+    """No active profile (default) ⇒ no ``Profile:`` line."""
+    monkeypatch.setattr(
+        "opencomputer.cli_banner._active_profile_name", lambda: None
+    )
+    out = _render(monkeypatch, width=140)
+    assert "Profile:" not in out
+
+
+def test_active_profile_name_swallows_errors(monkeypatch):
+    """Profile read errors fail open — the helper returns None instead
+    of raising, so the splash still renders.
+    """
+    from opencomputer import cli_banner
+
+    def boom():
+        raise RuntimeError("profile config corrupted")
+
+    monkeypatch.setattr(
+        "opencomputer.profiles.read_active_profile", boom, raising=False
+    )
+    # No exception, returns None.
+    assert cli_banner._active_profile_name() is None
+
+
+def test_runtime_block_left_aligned_under_caduceus(monkeypatch):
+    """The caduceus is centered in the left column; the runtime info
+    below it is LEFT-aligned (not inheriting the column's centering).
+
+    Heuristic: the model line should appear with limited leading
+    whitespace, while the caduceus rows have substantial leading
+    whitespace from centering.
+    """
+    out = _render(
+        monkeypatch,
+        width=140,
+        model="claude-opus-4-7",
+        provider="anthropic",
+    )
+    # Strip ANSI sequences for whitespace measurement.
+    import re
+
+    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+    plain_lines = [ansi_re.sub("", line) for line in out.splitlines()]
+    model_lines = [l for l in plain_lines if "claude-opus-4-7" in l]
+    assert model_lines, "model line missing from output"
+
+    # The model line lives inside the panel's left column. Measure how
+    # many leading spaces it has *after* the panel's ``│`` border. If the
+    # column were center-aligned, the model line would carry many
+    # leading spaces (≥ ~10). Left-aligned: only the panel padding (~2-4).
+    line = model_lines[0]
+    idx = line.find("│")
+    after_border = line[idx + 1 :] if idx >= 0 else line
+    leading = len(after_border) - len(after_border.lstrip(" "))
+    assert leading <= 8, (
+        f"Model line looks centered, not left-aligned (leading={leading}): "
+        f"{line!r}"
+    )
+
+
+def test_tip_selection_uses_random_choice(monkeypatch):
+    """The tip is drawn via ``random.choice(_TIPS)``. Pinning ``choice``
+    is a more reliable way to assert that the tip subsystem is wired
+    correctly than relying on output sampling.
+    """
+    import random as random_mod
+
+    from opencomputer.cli_banner import _TIPS
+
+    target = _TIPS[3]  # arbitrary canonical pick
+    monkeypatch.setattr(random_mod, "choice", lambda seq: target)
+    out = _render(monkeypatch, width=140)
+    assert f"✦ Tip: {target}" in out
+
+
+def test_tip_pool_only_references_real_oc_commands():
+    """Regression guard: every tip must reference a real OC command or
+    documented env var. No tip may mention a non-existent flag.
+    """
+    from opencomputer.cli_banner import _TIPS
+
+    # Hard-coded forbidden references — flags/commands we don't ship.
+    forbidden_substrings = (
+        "oc chat -Q",  # quiet-mode flag never landed in OC
+        "opencomputer chat -Q",
+        "hermes",
+        "hermes_agent",
+    )
+    for tip in _TIPS:
+        for needle in forbidden_substrings:
+            assert needle.lower() not in tip.lower(), (
+                f"Tip references nonexistent surface {needle!r}: {tip!r}"
+            )
+
+
+def test_update_hint_renders_in_warn_yellow(monkeypatch):
+    """When an update IS available, the hint renders bold yellow with
+    a ``⚠`` glyph — distinct from the brand pink palette so users
+    notice it.
+    """
+    monkeypatch.setattr(
+        "opencomputer.cli_update_check.get_update_hint",
+        lambda timeout=0.2: "3 commits behind",
+        raising=False,
+    )
+    out = _render(monkeypatch, width=140)
+    assert "⚠" in out
+    assert "3 commits behind" in out
+
+
+def test_end_to_end_panel_has_every_section(monkeypatch):
+    """One render call with EVERY production feature wired in: real-shape
+    tool/skill registries, an active non-default profile, a connected MCP
+    server, a labeled session, version+SHA. Every section must appear.
+    """
+    monkeypatch.setattr(
+        "opencomputer.cli_banner._git_short_sha", lambda: "abc1234"
+    )
+    monkeypatch.setattr(
+        "opencomputer.cli_banner._active_profile_name", lambda: "research"
+    )
+    tools = {"core": ["Bash", "Edit"], "harness": ["MultiEdit"]}
+    skills = {"coding": ["debug-python"]}
+    mcp = [
+        {"name": "fs", "transport": "stdio", "connection_state": "connected", "tool_count": 5}
+    ]
+    out = _render(
+        monkeypatch,
+        width=140,
+        tools=tools,
+        skills=skills,
+        mcp_status=mcp,
+        model="claude-opus-4-7",
+        provider="anthropic",
+        cwd="/Users/saksham/Vscode/claude",
+        session_id="64d3a534-5f77-4ebf-bfd4-61b16b68d749",
+        session_label="research-session",
+    )
+    # Wordmark
+    assert "██╗" in out
+    # Title
+    assert "OpenComputer" in out
+    assert "abc1234" in out
+    # Caduceus
+    assert "⣿" in out or "⣦" in out
+    # Runtime
+    assert "claude-opus-4-7" in out
+    assert "anthropic" in out
+    assert "/Users/saksham/Vscode/claude" in out
+    assert "Session:" in out
+    assert "research-session" in out
+    assert "Profile:" in out
+    assert "research" in out
+    # Sections
+    assert "Available Tools" in out
+    assert "Available Skills" in out
+    assert "MCP Servers" in out
+    assert "fs" in out
+    # Summary
+    assert "3 tools" in out
+    assert "1 skills" in out
+    assert "1 MCP" in out
+    # Footer
+    assert "Welcome to OpenComputer!" in out
+    assert "✦ Tip:" in out
+
+
+# --- Pico mascot tests (unrelated — kept intact) -----------------------
 
 
 def test_pico_module_exposes_six_expressions():
