@@ -8,6 +8,7 @@ to ``available``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -311,6 +312,286 @@ def test_mcp_enumerates_servers_when_available() -> None:
     assert resp.status_code == 200
     names = {s["name"] for s in body["servers"]}
     assert names == {"fs-mcp", "github"}
+
+
+# ---------------------------------------------------------------------------
+# Mutations (Delete / Rename / New / Fork) — added 2026-05-12
+# ---------------------------------------------------------------------------
+
+
+def test_create_session_requires_auth() -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    resp = client.post("/api/sessions", json={"title": "X"})
+    assert resp.status_code == 401
+
+
+def test_create_session_generates_id(auth_headers: dict[str, str]) -> None:
+    """No id supplied → fresh UUID, get_session returns the new row."""
+
+    class FakeDB:
+        def __init__(self) -> None:
+            self.created: list[tuple[str, str, str | None]] = []
+
+        def get_session(self, sid: str) -> dict[str, Any] | None:
+            for s, _p, t in self.created:
+                if s == sid:
+                    return {"id": s, "title": t}
+            return None
+
+        def create_session(self, *, session_id: str, platform: str, title: str | None) -> None:
+            self.created.append((session_id, platform, title))
+
+        def __enter__(self) -> FakeDB:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            pass
+
+    fake = FakeDB()
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        return_value=fake,
+    ):
+        resp = client.post(
+            "/api/sessions",
+            headers=auth_headers,
+            json={"title": "Hello"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "session" in body
+    assert body["session"]["title"] == "Hello"
+    assert body["session"]["id"]
+    assert len(fake.created) == 1
+
+
+def test_create_session_409_on_explicit_id_collision(auth_headers: dict[str, str]) -> None:
+    class _DB:
+        def get_session(self, sid: str) -> dict[str, Any] | None:
+            return {"id": sid, "title": "existing"}
+
+        def create_session(self, **_: Any) -> None:
+            raise AssertionError("should not be called")
+
+        def __enter__(self) -> _DB:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            pass
+
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        return_value=_DB(),
+    ):
+        resp = client.post(
+            "/api/sessions",
+            headers=auth_headers,
+            json={"id": "taken", "title": "X"},
+        )
+    assert resp.status_code == 409
+
+
+def test_update_session_rejects_empty_title(auth_headers: dict[str, str]) -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    resp = client.patch(
+        "/api/sessions/abc",
+        headers=auth_headers,
+        json={"title": "   "},
+    )
+    assert resp.status_code == 400
+
+
+def test_update_session_404_when_missing(auth_headers: dict[str, str]) -> None:
+    class _DB:
+        def get_session(self, sid: str) -> None:
+            return None
+
+        def __enter__(self) -> _DB:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            pass
+
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        return_value=_DB(),
+    ):
+        resp = client.patch(
+            "/api/sessions/abc",
+            headers=auth_headers,
+            json={"title": "X"},
+        )
+    assert resp.status_code == 404
+
+
+def test_delete_session_requires_auth() -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    resp = client.delete("/api/sessions/abc")
+    assert resp.status_code == 401
+
+
+def test_fork_session_404_when_source_missing(auth_headers: dict[str, str]) -> None:
+    class _DB:
+        def get_session(self, sid: str) -> None:
+            return None
+
+        def __enter__(self) -> _DB:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            pass
+
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        return_value=_DB(),
+    ):
+        resp = client.post("/api/sessions/missing/fork", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Single skill / memory / config patch / session chat — added 2026-05-12
+# ---------------------------------------------------------------------------
+
+
+def test_get_single_skill_returns_match() -> None:
+    app = _build_app()
+    client = TestClient(app)
+
+    async def _fake() -> dict[str, Any]:
+        return {"items": [{"name": "skill1", "description": "first"}, {"name": "skill2"}]}
+
+    with patch(
+        "opencomputer.dashboard.routes.skills.list_skills",
+        new=AsyncMock(side_effect=_fake),
+    ):
+        resp = client.get("/api/skills/skill1")
+    assert resp.status_code == 200
+    assert resp.json()["skill"]["name"] == "skill1"
+
+
+def test_get_single_skill_404_when_unknown() -> None:
+    app = _build_app()
+    client = TestClient(app)
+
+    async def _fake() -> dict[str, Any]:
+        return {"items": [{"name": "skill1"}]}
+
+    with patch(
+        "opencomputer.dashboard.routes.skills.list_skills",
+        new=AsyncMock(side_effect=_fake),
+    ):
+        resp = client.get("/api/skills/skill-not-here")
+    assert resp.status_code == 404
+
+
+def test_get_memory_returns_full_payload(tmp_path: Path) -> None:
+    app = _build_app()
+    client = TestClient(app)
+    (tmp_path / "MEMORY.md").write_text("mem content", encoding="utf-8")
+    (tmp_path / "USER.md").write_text("user content", encoding="utf-8")
+
+    async def _status() -> dict[str, Any]:
+        return {"memory_md": {"path": "MEMORY.md"}}
+
+    with (
+        patch(
+            "opencomputer.dashboard.routes.memory.memory_status",
+            new=AsyncMock(side_effect=_status),
+        ),
+        patch(
+            "opencomputer.agent.config._home",
+            return_value=tmp_path,
+        ),
+    ):
+        resp = client.get("/api/memory")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["memory_md"] == "mem content"
+    assert body["user_md"] == "user content"
+    assert body["soul_md"] == ""
+    assert "status" in body
+
+
+def test_patch_config_requires_auth() -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    resp = client.patch("/api/config", json={"model": {"model": "x"}})
+    assert resp.status_code == 401
+
+
+def test_patch_config_rejects_empty_body(auth_headers: dict[str, str]) -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    resp = client.patch("/api/config", headers=auth_headers, json={})
+    assert resp.status_code == 400
+
+
+def test_patch_config_delegates(auth_headers: dict[str, str]) -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+
+    async def _merge(payload: dict[str, Any]) -> dict[str, Any]:
+        return {"applied": payload}
+
+    with patch(
+        "opencomputer.dashboard.routes.config.merge_put_config",
+        new=AsyncMock(side_effect=_merge),
+    ):
+        resp = client.patch(
+            "/api/config",
+            headers=auth_headers,
+            json={"model": {"model": "claude-opus-4-7"}},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["applied"]["model"]["model"] == "claude-opus-4-7"
+
+
+def test_session_chat_requires_message(auth_headers: dict[str, str]) -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/sessions/abc/chat",
+        headers=auth_headers,
+        json={"model": "x"},
+    )
+    assert resp.status_code == 400
+
+
+def test_session_chat_delegates_to_agent_loop(auth_headers: dict[str, str]) -> None:
+    app = _build_app(with_token=True)
+    client = TestClient(app)
+
+    async def _fake(**kw: Any) -> str:
+        assert kw["oc_session_id"] == "abc"
+        assert kw["user_message"] == "hi"
+        assert kw["model"] == "claude-opus-4-7"
+        return "hi back"
+
+    with patch(
+        "opencomputer.dashboard.routes.openai_compat._run_agent_completion",
+        new=AsyncMock(side_effect=_fake),
+    ):
+        resp = client.post(
+            "/api/sessions/abc/chat",
+            headers=auth_headers,
+            json={"message": "hi", "model": "claude-opus-4-7"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_id"] == "abc"
+    assert body["message"]["content"] == "hi back"
 
 
 # ---------------------------------------------------------------------------
