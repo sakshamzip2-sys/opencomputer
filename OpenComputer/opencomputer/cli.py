@@ -4525,10 +4525,9 @@ from opencomputer.cli_browser import browser_app  # noqa: E402
 
 app.add_typer(browser_app, name="browser")
 
-# 2026-05-11 — scoped-models favorites for Alt+M cycling
-from opencomputer.cli_favorites import favorites_app  # noqa: E402
-
-app.add_typer(favorites_app, name="favorites")
+# 2026-05-11 — scoped-models favorites for Alt+M cycling (file missing from commit 668d6c8; disabled)
+# from opencomputer.cli_favorites import favorites_app  # noqa: E402
+# app.add_typer(favorites_app, name="favorites")
 
 # Phase 10f.I — memory CLI subcommand group
 from opencomputer.cli_memory import memory_app  # noqa: E402

@@ -90,7 +90,9 @@ def test_invoke_openrouter_setup_replaces_invalid_old_model(
             "anthropic/claude-opus-4.6",
         ],
     )
-    monkeypatch.setattr(ip, "radiolist", lambda *a, **kw: 0)
+    # radiolist returns the default index, which now lands on the first
+    # real model (index 2 — past the two escape-hatch entries at 0/1).
+    monkeypatch.setattr(ip, "radiolist", lambda question, choices, default=0, **kw: default)
 
     ctx = _make_ctx(
         tmp_path,
@@ -101,7 +103,7 @@ def test_invoke_openrouter_setup_replaces_invalid_old_model(
     assert ok is True
     assert ctx.config["model"]["provider"] == "openrouter"
     assert ctx.config["model"]["api_key_env"] == "OPENROUTER_API_KEY"
-    assert ctx.config["model"]["model"] == "anthropic/claude-opus-4.7"
+    assert ctx.config["model"]["model"] == "moonshotai/kimi-k2.6"
 
 
 def test_openrouter_model_picker_defaults_to_curated_cloud_model(monkeypatch, tmp_path):
@@ -131,20 +133,132 @@ def test_openrouter_model_picker_defaults_to_curated_cloud_model(monkeypatch, tm
         default_model="anthropic/claude-opus-4.7",
     )
 
-    assert chosen == "anthropic/claude-opus-4.7"
+    assert chosen == "moonshotai/kimi-k2.6"
     assert captured["question"] == "Select default OpenRouter model:"
-    assert captured["default"] == 0
+    # Escape-hatch options live at indices 0/1; default cursor lands on
+    # the first real model at index 2.
+    assert captured["default"] == 2
     labels = captured["labels"]
-    assert labels[:4] == [
+    assert labels[:2] == ["Enter custom model name", "Skip (keep current)"]
+    assert labels[2:6] == [
+        "moonshotai/kimi-k2.6",
         "anthropic/claude-opus-4.7",
         "anthropic/claude-opus-4.6",
-        "openai/gpt-5.1",
-        "qwen/qwen3-coder:free",
+        "anthropic/claude-sonnet-4.6",
     ]
     assert "baidu/cobuddy:free" not in labels
     assert "google/gemma-4-31b-it:free" not in labels
-    assert "Enter custom model name" in labels
-    assert "Skip (keep current)" in labels
+
+
+def test_openrouter_model_picker_uses_screenshot_catalog_order(monkeypatch, tmp_path):
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    captured: dict[str, object] = {}
+
+    def fake_radiolist(question, choices, default=0, **kw):
+        captured["labels"] = [c.label for c in choices]
+        captured["default"] = default
+        return default
+
+    monkeypatch.setattr(ip, "radiolist", fake_radiolist)
+    monkeypatch.setattr(ip, "_fetch_openrouter_models", lambda *a, **kw: [
+        "deepseek/deepseek-v4-pro",
+        "arcee-ai/trinity-large-preview:free",
+        "anthropic/claude-opus-4.7",
+        "moonshotai/kimi-k2.6",
+        "qwen/qwen3.6-plus",
+        "openrouter/owl-alpha",
+        "minimax/minimax-m2.5:free",
+        "x-ai/grok-4.3",
+        "baidu/cobuddy:free",
+        "anthropic/claude-opus-4.6",
+        "anthropic/claude-sonnet-4.6",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-haiku-4.5",
+        "openrouter/elephant-alpha",
+        "openai/gpt-5.5",
+        "openai/gpt-5.4-mini",
+        "xiaomi/mimo-v2.5-pro",
+        "xiaomi/mimo-v2.5",
+        "tencent/hy3-preview:free",
+        "tencent/hy3-preview",
+        "openai/gpt-5.3-codex",
+        "google/gemini-3-pro-image-preview",
+        "google/gemini-3-flash-preview",
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3.1-flash-lite-preview",
+        "qwen/qwen3.5-plus-02-15",
+        "qwen/qwen3.5-35b-a3b",
+        "stepfun/step-3.5-flash",
+        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.5",
+        "z-ai/glm-5.1",
+        "z-ai/glm-5v-turbo",
+        "z-ai/glm-5-turbo",
+        "x-ai/grok-4.20",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "arcee-ai/trinity-large-thinking",
+        "openai/gpt-5.5-pro",
+        "openai/gpt-5.4-nano",
+    ])
+
+    ctx = _make_ctx(
+        tmp_path,
+        config={"model": {"model": "arcee-ai/trinity-large-preview:free"}},
+    )
+    chosen = ip._choose_openrouter_model(
+        ctx,
+        default_model="anthropic/claude-opus-4.7",
+    )
+
+    assert chosen == "arcee-ai/trinity-large-preview:free"
+    # Escape hatches live at indices 0/1; "currently in use" model now
+    # sits at index 2 (the first real model).
+    assert captured["default"] == 2
+    labels = captured["labels"]
+    assert labels[:2] == ["Enter custom model name", "Skip (keep current)"]
+    assert labels[2:40] == [
+        "arcee-ai/trinity-large-preview:free  \u2190 currently in use",
+        "moonshotai/kimi-k2.6",
+        "anthropic/claude-opus-4.7",
+        "anthropic/claude-opus-4.6",
+        "anthropic/claude-sonnet-4.6",
+        "qwen/qwen3.6-plus",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-haiku-4.5",
+        "openrouter/elephant-alpha",
+        "openrouter/owl-alpha",
+        "openai/gpt-5.5",
+        "openai/gpt-5.4-mini",
+        "xiaomi/mimo-v2.5-pro",
+        "xiaomi/mimo-v2.5",
+        "tencent/hy3-preview:free",
+        "tencent/hy3-preview",
+        "openai/gpt-5.3-codex",
+        "google/gemini-3-pro-image-preview",
+        "google/gemini-3-flash-preview",
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3.1-flash-lite-preview",
+        "qwen/qwen3.5-plus-02-15",
+        "qwen/qwen3.5-35b-a3b",
+        "stepfun/step-3.5-flash",
+        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.5",
+        "minimax/minimax-m2.5:free",
+        "z-ai/glm-5.1",
+        "z-ai/glm-5v-turbo",
+        "z-ai/glm-5-turbo",
+        "x-ai/grok-4.20",
+        "x-ai/grok-4.3",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "arcee-ai/trinity-large-thinking",
+        "openai/gpt-5.5-pro",
+        "openai/gpt-5.4-nano",
+        "deepseek/deepseek-v4-pro",
+    ]
+    assert "baidu/cobuddy:free" not in labels
 
 
 def test_openrouter_curated_defaults_exclude_google_ai_studio_free_models():
@@ -160,7 +274,8 @@ def test_openrouter_curated_defaults_exclude_google_ai_studio_free_models():
 
     assert "google/gemma-4-31b-it:free" not in labels
     assert "google/gemma-4-26b-a4b-it:free" not in labels
-    assert "qwen/qwen3-coder:free" in labels
+    assert "moonshotai/kimi-k2.6" in labels
+    assert "anthropic/claude-opus-4.7" in labels
 
 
 def test_openrouter_model_picker_can_skip_keep_current(monkeypatch, tmp_path):
@@ -208,8 +323,10 @@ def test_openrouter_model_picker_does_not_default_to_google_current_model(
         default_model="anthropic/claude-opus-4.7",
     )
 
-    assert chosen == "anthropic/claude-opus-4.7"
-    assert captured["default"] == 0
+    assert chosen == "moonshotai/kimi-k2.6"
+    # Escape hatches at indices 0/1; default cursor lands on the first
+    # real model at index 2 (google "currently in use" suppressed).
+    assert captured["default"] == 2
     assert "google/gemma-4-31b-it:free  \u2190 currently in use" not in captured["labels"]
 
 

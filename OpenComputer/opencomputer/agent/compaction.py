@@ -226,6 +226,22 @@ def context_window_with_overrides(
     # Anthropic + models.dev). Disabled on hot paths via the
     # ``enable_probe`` kwarg; the cache layer keeps subsequent calls
     # synchronous-fast.
+    try:
+        from opencomputer.agent.context_window_probe import cached_context_window
+
+        cached = cached_context_window(model, provider_hint=provider_hint)
+        if cached is not None:
+            return int(cached)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from opencomputer.openrouter_catalog import context_length_for_model
+
+        openrouter_ctx = context_length_for_model(model)
+        if openrouter_ctx is not None:
+            return int(openrouter_ctx)
+    except Exception:  # noqa: BLE001
+        pass
     if enable_probe:
         try:
             from opencomputer.agent.context_window_probe import probe_context_window

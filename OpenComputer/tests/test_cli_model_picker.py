@@ -1,6 +1,7 @@
 """Tests for ``oc model`` interactive picker (2026-04-30, Hermes-exact UX)."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,6 +39,96 @@ def test_grouped_models_skips_blank_model_id():
         grouped = _grouped_models()
     assert "anthropic" in grouped
     assert grouped["anthropic"] == ["claude-opus-4-7"]
+
+
+def test_model_picker_openrouter_uses_full_curated_catalog(monkeypatch):
+    """``oc model`` must show the same OpenRouter catalog as setup.
+
+    Regression: the picker only read the static model_metadata registry, so
+    OpenRouter showed just the provider manifest default plus custom entry.
+    """
+    from opencomputer import cli_model_picker as picker
+
+    captured_model_labels: list[str] = []
+
+    def fake_radiolist(question, choices, default=0, **kw):
+        nonlocal captured_model_labels
+        if question == "Select provider:":
+            return next(i for i, choice in enumerate(choices)
+                        if choice.value == "openrouter")
+        if question == "Select a model:":
+            captured_model_labels = [choice.label for choice in choices]
+            # Return the index of the first real model so the caller
+            # gets a concrete model id rather than the "Enter custom"
+            # escape hatch at index 0.
+            return default
+        raise AssertionError(f"unexpected radiolist question: {question}")
+
+    cfg = SimpleNamespace(
+        model=SimpleNamespace(provider="openrouter", model="baidu/cobuddy:free")
+    )
+
+    monkeypatch.setattr(picker, "_discover_provider_rows", lambda: [
+        {
+            "name": "openrouter",
+            "label": "OpenRouter",
+            "description": "100+ models, pay-per-use, free",
+            "default_model": "anthropic/claude-opus-4.7",
+        },
+    ])
+    monkeypatch.setattr(picker, "_grouped_models", lambda: {})
+    monkeypatch.setattr(picker, "fetch_openrouter_models", lambda *a, **kw: [])
+    monkeypatch.setattr(picker, "radiolist", fake_radiolist)
+    monkeypatch.setattr(picker, "load_config", lambda: cfg)
+    monkeypatch.setattr(picker, "save_config", lambda *_: None)
+    monkeypatch.setattr(picker, "set_value", lambda obj, *_: obj)
+
+    picker.model_picker()
+
+    assert captured_model_labels[:2] == [
+        "Enter custom model name",
+        "Skip (keep current)",
+    ]
+    assert captured_model_labels[2:40] == [
+        "moonshotai/kimi-k2.6",
+        "anthropic/claude-opus-4.7",
+        "anthropic/claude-opus-4.6",
+        "anthropic/claude-sonnet-4.6",
+        "qwen/qwen3.6-plus",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-haiku-4.5",
+        "openrouter/elephant-alpha",
+        "openrouter/owl-alpha",
+        "openai/gpt-5.5",
+        "openai/gpt-5.4-mini",
+        "xiaomi/mimo-v2.5-pro",
+        "xiaomi/mimo-v2.5",
+        "tencent/hy3-preview:free",
+        "tencent/hy3-preview",
+        "openai/gpt-5.3-codex",
+        "google/gemini-3-pro-image-preview",
+        "google/gemini-3-flash-preview",
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3.1-flash-lite-preview",
+        "qwen/qwen3.5-plus-02-15",
+        "qwen/qwen3.5-35b-a3b",
+        "stepfun/step-3.5-flash",
+        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.5",
+        "minimax/minimax-m2.5:free",
+        "z-ai/glm-5.1",
+        "z-ai/glm-5v-turbo",
+        "z-ai/glm-5-turbo",
+        "x-ai/grok-4.20",
+        "x-ai/grok-4.3",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "arcee-ai/trinity-large-preview:free",
+        "arcee-ai/trinity-large-thinking",
+        "openai/gpt-5.5-pro",
+        "openai/gpt-5.4-nano",
+        "deepseek/deepseek-v4-pro",
+    ]
 
 
 # ─── _infer_provider — model-id → provider mapping ─────────────────

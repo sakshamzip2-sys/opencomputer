@@ -25,6 +25,7 @@ from opencomputer.agent.config_store import (
 )
 from opencomputer.agent.model_metadata import list_models
 from opencomputer.cli_ui.menu import Choice, WizardCancelled, radiolist
+from opencomputer.openrouter_catalog import display_model_ids, fetch_openrouter_models
 
 console = Console()
 
@@ -144,29 +145,35 @@ def _pick_model(
 
     When ``models`` is empty (provider has no preregistered models in the
     curated catalog), prompts directly for a custom id. When non-empty
-    and ``allow_custom`` is True, appends an "Enter custom model id"
-    option so users can type a model name not in the curated list (e.g.
-    OpenRouter has thousands).
+    and ``allow_custom`` is True, appends custom and skip options so users
+    can type a model name not in the curated list (e.g. OpenRouter has
+    thousands) or keep the current model.
     """
     if not models:
         return _prompt_custom_model(current)
 
     choices: list[Choice] = []
-    default_idx = 0
-    for i, m in enumerate(models):
+    # Escape hatches go at the TOP so they remain visible even when the
+    # catalog overflows the terminal (radiolist has no scroll indicator).
+    if allow_custom:
+        choices.append(Choice(label="Enter custom model name", value="__custom__"))
+        choices.append(Choice(label="Skip (keep current)", value="__skip__"))
+
+    default_idx = len(choices)  # first real model
+    for m in models:
         label = m
         if m == current:
             label = f"{m}  ← currently in use"
-            default_idx = i
+            default_idx = len(choices)
         choices.append(Choice(label=label, value=m))
-    if allow_custom:
-        choices.append(Choice(label="Enter custom model id…", value="__custom__"))
 
     try:
         idx = radiolist("Select a model:", choices, default=default_idx)
     except WizardCancelled:
         return None
     chosen = choices[idx].value
+    if chosen == "__skip__":
+        return None
     if chosen == "__custom__":
         return _prompt_custom_model(current)
     return str(chosen)
@@ -186,6 +193,16 @@ def _prompt_custom_model(current: str) -> str | None:
     except (EOFError, KeyboardInterrupt):
         return None
     return raw or None
+
+
+def _models_for_provider(provider: str, grouped: dict[str, list[str]]) -> list[str]:
+    if provider == "openrouter":
+        try:
+            fetch_openrouter_models()
+        except Exception:  # noqa: BLE001
+            pass
+        return display_model_ids()
+    return grouped.get(provider, [])
 
 
 def model_picker() -> None:
@@ -238,7 +255,7 @@ def model_picker() -> None:
     # Models for the chosen provider come from the registry. If empty
     # (most plugin providers don't ship curated metadata), `_pick_model`
     # falls through to a free-text prompt.
-    models = grouped.get(chosen_provider, [])
+    models = _models_for_provider(chosen_provider, grouped)
     # If we know the plugin's default_model and it's not in the catalog,
     # surface it so users have something to pick.
     row = next((r for r in rows if r["name"] == chosen_provider), None)

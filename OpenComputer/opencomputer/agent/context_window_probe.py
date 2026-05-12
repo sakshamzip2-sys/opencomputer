@@ -135,6 +135,29 @@ def _cache_put(provider: str, model: str, context_length: int) -> None:
     _save_cache()
 
 
+def cache_context_window(
+    model: str,
+    context_length: int,
+    *,
+    provider_hint: str = "any",
+) -> None:
+    """Public wrapper for callers that already have vendor catalog metadata."""
+    if not model or context_length <= 0:
+        return
+    _cache_put(provider_hint or "any", model, int(context_length))
+
+
+def cached_context_window(model: str, *, provider_hint: str = "") -> int | None:
+    """Return a cached context window without performing any network probe."""
+    if not model:
+        return None
+    if provider_hint:
+        cached = _cache_get(provider_hint, model)
+        if cached is not None:
+            return cached
+    return _cache_get("any", model)
+
+
 def reset_cache() -> None:
     """Drop the in-memory cache. Used by tests."""
     global _MEM_CACHE
@@ -356,6 +379,8 @@ def probe_context_window(
 __all__ = [
     "CACHE_TTL_SECONDS",
     "PROBE_TIMEOUT_SECONDS",
+    "cache_context_window",
+    "cached_context_window",
     "probe_context_window",
     "reset_cache",
 ]

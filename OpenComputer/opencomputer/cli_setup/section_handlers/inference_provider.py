@@ -7,11 +7,8 @@ re-enter / skip), saves to ~/.opencomputer/.env, updates config.
 from __future__ import annotations
 
 import getpass
-import json
 import os
 from typing import Any
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 from opencomputer.cli_setup.env_writer import (
     default_env_file,
@@ -20,31 +17,17 @@ from opencomputer.cli_setup.env_writer import (
 )
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, radiolist
+from opencomputer.openrouter_catalog import (
+    OPENROUTER_MODEL_IDS,
+    display_model_ids,
+    fetch_openrouter_models,
+    setup_model_ids,
+)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DESCRIPTION = "100+ models, pay-per-use, free"
-OPENROUTER_RECOMMENDED_MODELS = [
-    "anthropic/claude-opus-4.7",
-    "anthropic/claude-opus-4.6",
-    "anthropic/claude-sonnet-4.6",
-    "openai/gpt-5.1",
-    "openai/gpt-5-pro",
-    "openai/gpt-5",
-    "moonshotai/kimi-k2.6",
-    "moonshotai/kimi-k2-thinking",
-    "minimax/minimax-m2.7",
-    "minimax/minimax-m2.5",
-    "qwen/qwen-max",
-    "qwen/qwen3-coder",
-    "deepseek/deepseek-chat",
-]
-OPENROUTER_FALLBACK_FREE_MODELS = [
-    "qwen/qwen3-coder:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "minimax/minimax-m2.5:free",
-    "qwen/qwen-2.5-coder-32b-instruct:free",
-    "nvidia/nemotron-nano-9b-v2:free",
-]
+OPENROUTER_RECOMMENDED_MODELS = OPENROUTER_MODEL_IDS
+OPENROUTER_FALLBACK_FREE_MODELS = OPENROUTER_MODEL_IDS
 OPENROUTER_MODEL_LIMIT = 500
 
 
@@ -99,57 +82,9 @@ def _openrouter_base_url() -> str:
     return os.environ.get("OPENROUTER_BASE_URL") or read_env_value("OPENROUTER_BASE_URL") or OPENROUTER_BASE_URL
 
 
-def _is_free_openrouter_model(model_id: str, pricing: object | None = None) -> bool:
-    if model_id.endswith(":free"):
-        return True
-    if not isinstance(pricing, dict):
-        return False
-    try:
-        prompt = float(str(pricing.get("prompt", "1")))
-        completion = float(str(pricing.get("completion", "1")))
-    except (TypeError, ValueError):
-        return False
-    return prompt == 0.0 and completion == 0.0
-
-
-def _sort_openrouter_model_ids(model_ids: list[str]) -> list[str]:
-    deduped = sorted(set(m for m in model_ids if m))
-    return sorted(deduped, key=lambda m: (not _is_free_openrouter_model(m), m.lower()))
-
-
 def _curate_openrouter_model_ids(model_ids: list[str]) -> list[str]:
-    """Return a short setup list: cloud models first, then a few free models."""
-    available = set(m for m in model_ids if m)
-    if not available:
-        return [*OPENROUTER_RECOMMENDED_MODELS, *OPENROUTER_FALLBACK_FREE_MODELS]
-
-    curated: list[str] = []
-    for model_id in OPENROUTER_RECOMMENDED_MODELS:
-        if model_id in available:
-            curated.append(model_id)
-    for model_id in OPENROUTER_FALLBACK_FREE_MODELS:
-        if model_id in available:
-            curated.append(model_id)
-
-    # If OpenRouter renames one of the paid families, keep one fresh entry
-    # for each requested family without flooding the setup screen.
-    family_prefixes = (
-        "anthropic/claude-opus",
-        "openai/gpt-5",
-        "moonshotai/kimi",
-        "minimax/minimax",
-        "qwen/qwen",
-        "deepseek/deepseek",
-        "nvidia/nemotron",
-    )
-    for prefix in family_prefixes:
-        if any(m.startswith(prefix) for m in curated):
-            continue
-        match = next((m for m in sorted(available) if m.startswith(prefix)), "")
-        if match:
-            curated.append(match)
-
-    return curated
+    """Return the screenshot-pinned OpenRouter menu order."""
+    return display_model_ids()
 
 
 def _fetch_openrouter_models(
@@ -158,49 +93,18 @@ def _fetch_openrouter_models(
     base_url: str | None = None,
     limit: int = OPENROUTER_MODEL_LIMIT,
 ) -> list[str]:
-    """Fetch current OpenRouter models, with free models first.
+    """Fetch current OpenRouter models and cache their context windows.
 
     OpenRouter's catalog changes frequently, so setup asks the live
     ``/models`` endpoint when possible and falls back to a small known-free
     list if offline.
     """
-    resolved_base = (base_url or _openrouter_base_url()).rstrip("/")
-    req = Request(
-        f"{resolved_base}/models",
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "OpenComputer setup wizard",
-        },
+    rows = fetch_openrouter_models(
+        api_key=api_key or _openrouter_api_key(),
+        base_url=base_url or _openrouter_base_url(),
+        limit=limit,
     )
-    key = api_key or _openrouter_api_key()
-    if key:
-        req.add_header("Authorization", f"Bearer {key}")
-
-    try:
-        with urlopen(req, timeout=8) as resp:  # noqa: S310 - fixed HTTPS API URL.
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (OSError, URLError, json.JSONDecodeError, TimeoutError):
-        return OPENROUTER_FALLBACK_FREE_MODELS[:limit]
-
-    rows = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        return OPENROUTER_FALLBACK_FREE_MODELS[:limit]
-
-    free: list[str] = []
-    paid: list[str] = []
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        model_id = item.get("id")
-        if not isinstance(model_id, str) or not model_id.strip():
-            continue
-        if _is_free_openrouter_model(model_id, item.get("pricing")):
-            free.append(model_id)
-        else:
-            paid.append(model_id)
-
-    ordered = _sort_openrouter_model_ids(free) + sorted(set(paid))
-    return ordered[:limit] or OPENROUTER_FALLBACK_FREE_MODELS[:limit]
+    return [row.model_id for row in rows[:limit]] or display_model_ids()[:limit]
 
 
 def _is_openrouter_model_id(model_id: str) -> bool:
@@ -239,11 +143,16 @@ def _model_matches_provider(provider: str, model_id: str) -> bool:
 
 def _choose_openrouter_model(ctx: WizardCtx, *, default_model: str) -> str | None:
     current = str((ctx.config.get("model") or {}).get("model") or "")
-    models = _curate_openrouter_model_ids(_fetch_openrouter_models())
-    if default_model and default_model not in models:
-        models = [default_model, *models]
+    _fetch_openrouter_models()
+    models = setup_model_ids(current)
 
-    choices: list[Choice] = []
+    # Escape hatches go at the TOP so they're always visible — radiolist
+    # has no scrollbar, and OpenRouter's catalog overflows most terminals,
+    # which would otherwise push these off-screen.
+    choices: list[Choice] = [
+        Choice("Enter custom model name", "__custom__"),
+        Choice("Skip (keep current)", "__skip__"),
+    ]
     current_idx = -1
     for model_id in models:
         label = model_id
@@ -260,10 +169,10 @@ def _choose_openrouter_model(ctx: WizardCtx, *, default_model: str) -> str | Non
     ):
         current_idx = len(choices)
         choices.append(Choice(f"{current}  ← currently in use", current))
-    choices.append(Choice("Enter custom model name", "__custom__"))
-    choices.append(Choice("Skip (keep current)", "__skip__"))
 
-    default_idx = current_idx if current_idx >= 0 else 0
+    # Cursor starts on the currently-used model (or first real model)
+    # so pressing Enter without scrolling keeps the previous behaviour.
+    default_idx = current_idx if current_idx >= 0 else min(2, len(choices) - 1)
     idx = radiolist("Select default OpenRouter model:", choices, default=default_idx)
     chosen = choices[idx].value
     if chosen == "__skip__":

@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -30,6 +33,33 @@ from typing import Literal
 from rich.console import Console
 
 console = Console()
+
+
+class _DoctorLogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextmanager
+def _capture_doctor_startup_logs() -> Iterator[list[logging.LogRecord]]:
+    """Capture plugin startup warnings so doctor output stays readable."""
+    logger = logging.getLogger("opencomputer")
+    handler = _DoctorLogCapture()
+    old_level = logger.level
+    old_propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    try:
+        yield handler.records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
 
 
 @dataclass(slots=True)
@@ -57,10 +87,10 @@ class CheckResult:
 
 def _status_icon(s: str) -> str:
     return {
-        "pass": "[green]✓[/green]",
-        "fail": "[red]✗[/red]",
-        "warn": "[yellow]![/yellow]",
-        "skip": "[dim]·[/dim]",
+        "pass": "[green]OK  [/green]",
+        "fail": "[red]FAIL[/red]",
+        "warn": "[yellow]WARN[/yellow]",
+        "skip": "[dim]SKIP[/dim]",
     }[s]
 
 
@@ -1574,6 +1604,127 @@ def _result_to_check(name: str, result: CheckResult) -> Check:
     return Check(name=name, status=_level_to_status(result), detail=result.message)
 
 
+def _plugin_startup_check(records: list[logging.LogRecord]) -> Check | None:
+    if not records:
+        return None
+
+    lock_conflicts = 0
+    register_errors = 0
+    shim_warnings = 0
+    other = 0
+    plugins: list[str] = []
+    for record in records:
+        message = record.getMessage()
+        if "single-instance lock unavailable" in message:
+            lock_conflicts += 1
+        elif "register() raised" in message:
+            register_errors += 1
+        elif "HOME-shim symlink" in message:
+            shim_warnings += 1
+        else:
+            other += 1
+        marker = "plugin '"
+        if marker in message:
+            tail = message.split(marker, 1)[1]
+            plugin = tail.split("'", 1)[0]
+            if plugin and plugin not in plugins:
+                plugins.append(plugin)
+
+    parts: list[str] = [f"{len(records)} startup notice(s) suppressed"]
+    if lock_conflicts:
+        parts.append(f"{lock_conflicts} already running/locked")
+    if register_errors:
+        parts.append(f"{register_errors} register error(s)")
+    if shim_warnings:
+        parts.append(f"{shim_warnings} Windows shim warning(s)")
+    if other:
+        parts.append(f"{other} other warning(s)")
+    if plugins:
+        shown = ", ".join(plugins[:5])
+        if len(plugins) > 5:
+            shown += f", +{len(plugins) - 5} more"
+        parts.append(f"plugins: {shown}")
+    return Check("Plugin Startup", "warn", "; ".join(parts))
+
+
+def _doctor_section(name: str) -> str:
+    key = name.lower()
+    if key in {"python version", "source freshness", "fd limit + competitors"}:
+        return "Core"
+    if key in {
+        "config file",
+        "provider plugin",
+        "provider api key",
+        "session db path",
+        "skills dir",
+        "profile preset",
+        "workspace overlay",
+        "profile home/",
+        "profile wrapper",
+        "profile soul.md",
+    }:
+        return "Configuration"
+    if key in {
+        "service",
+        "cron storage",
+        "webhook tokens",
+        "cost-guard limits",
+        "oauth store",
+        "adapter-runner",
+        "opencli-bridge",
+    }:
+        return "Services"
+    if key.startswith("introspection:") or key in {
+        "voice tts/stt key",
+        "orphan oi venv",
+        "ambient state",
+        "ambient foreground",
+        "skill-evolution",
+        "voice-mode",
+        "browser-control",
+        "wake-word",
+        "wake-train",
+    }:
+        return "Capabilities"
+    if key == "plugin startup":
+        return "Plugins"
+    return "Other"
+
+
+def _print_doctor_report(checks: list[Check]) -> tuple[int, int]:
+    failures = sum(1 for c in checks if c.status == "fail")
+    warnings = sum(1 for c in checks if c.status == "warn")
+    passes = sum(1 for c in checks if c.status == "pass")
+    skipped = sum(1 for c in checks if c.status == "skip")
+    max_name = max(len(c.name) for c in checks) if checks else 0
+
+    console.print(
+        f"[bold]Health summary:[/bold] "
+        f"[green]{passes} ok[/green]  "
+        f"[yellow]{warnings} warning(s)[/yellow]  "
+        f"[red]{failures} failure(s)[/red]  "
+        f"[dim]{skipped} skipped[/dim]\n"
+    )
+
+    section_order = ["Core", "Configuration", "Services", "Capabilities", "Plugins", "Other"]
+    grouped: dict[str, list[Check]] = {section: [] for section in section_order}
+    for check in checks:
+        grouped.setdefault(_doctor_section(check.name), []).append(check)
+
+    for section in section_order:
+        rows = grouped.get(section) or []
+        if not rows:
+            continue
+        console.print(f"[bold cyan]{section}[/bold cyan]")
+        for c in rows:
+            pad = " " * (max_name - len(c.name))
+            detail = f"  [dim]- {c.detail}[/dim]" if c.detail else ""
+            console.print(f"  {_status_icon(c.status)}  {c.name}{pad}{detail}")
+        console.print()
+
+    return failures, warnings
+
+
 def _check_service() -> Check:
     """Cross-platform always-on daemon health check.
 
@@ -1636,7 +1787,11 @@ def run_doctor(fix: bool = False) -> int:
     cfg_check, cfg = _check_config()
     checks.append(cfg_check)
 
-    checks.append(_check_provider_plugin(cfg))
+    with _capture_doctor_startup_logs() as plugin_startup_logs:
+        checks.append(_check_provider_plugin(cfg))
+    plugin_startup = _plugin_startup_check(plugin_startup_logs)
+    if plugin_startup is not None:
+        checks.append(plugin_startup)
     checks.append(_check_provider_key(cfg))
     checks.append(_check_session_db(cfg))
     checks.append(_check_skills_dir(cfg))
@@ -1734,20 +1889,11 @@ def run_doctor(fix: bool = False) -> int:
         contrib_checks = []
     checks.extend(contrib_checks)
 
-    # Print
-    max_name = max(len(c.name) for c in checks)
-    for c in checks:
-        pad = " " * (max_name - len(c.name))
-        detail = f"  [dim]— {c.detail}[/dim]" if c.detail else ""
-        console.print(f"  {_status_icon(c.status)}  {c.name}{pad}{detail}")
-
-    failures = sum(1 for c in checks if c.status == "fail")
-    warnings = sum(1 for c in checks if c.status == "warn")
-    console.print()
+    failures, warnings = _print_doctor_report(checks)
     if failures:
-        console.print(f"[red bold]{failures} failure(s)[/red bold] — fix these before running.")
+        console.print(f"[red bold]{failures} failure(s)[/red bold] - fix these before running.")
     elif warnings:
-        console.print(f"[yellow bold]{warnings} warning(s)[/yellow bold] — should still work.")
+        console.print(f"[yellow bold]{warnings} warning(s)[/yellow bold] - should still work.")
     else:
         console.print("[green bold]All checks passed.[/green bold]")
     return failures

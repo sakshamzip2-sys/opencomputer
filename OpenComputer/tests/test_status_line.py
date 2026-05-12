@@ -207,6 +207,9 @@ class TestMaxContextFor:
         # IS the right answer here; we mirror the compactor exactly.
         assert max_context_for("totally-unknown-model") == 64_000
 
+    def test_openrouter_baidu_cobuddy_uses_catalog_context(self) -> None:
+        assert max_context_for("baidu/cobuddy:free") == 131_072
+
     def test_empty_string_returns_default(self) -> None:
         assert max_context_for("") == DEFAULT_MAX_CONTEXT
 
