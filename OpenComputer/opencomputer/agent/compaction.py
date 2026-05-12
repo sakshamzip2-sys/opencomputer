@@ -226,23 +226,32 @@ def context_window_with_overrides(
     # Anthropic + models.dev). Disabled on hot paths via the
     # ``enable_probe`` kwarg; the cache layer keeps subsequent calls
     # synchronous-fast.
-    try:
-        from opencomputer.agent.context_window_probe import cached_context_window
-
-        cached = cached_context_window(model, provider_hint=provider_hint)
-        if cached is not None:
-            return int(cached)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from opencomputer.openrouter_catalog import context_length_for_model
-
-        openrouter_ctx = context_length_for_model(model)
-        if openrouter_ctx is not None:
-            return int(openrouter_ctx)
-    except Exception:  # noqa: BLE001
-        pass
     if enable_probe:
+        # The probe chain (cache lookup + OpenRouter catalog + live
+        # network probe). All three are skipped when ``enable_probe``
+        # is False, even the on-disk cache — because the cache holds
+        # results from PRIOR probes, and those probes may have
+        # widened the window (e.g. ``claude-sonnet-4-6`` → 1M via
+        # OpenRouter with `[1m]` suffix). Hot-path callers
+        # (``resolve_window_safe``, status-line renderers) pass
+        # ``enable_probe=False`` so they get the documented static
+        # value; live agents pass True to opt into the wider window.
+        try:
+            from opencomputer.agent.context_window_probe import cached_context_window
+
+            cached = cached_context_window(model, provider_hint=provider_hint)
+            if cached is not None:
+                return int(cached)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from opencomputer.openrouter_catalog import context_length_for_model
+
+            openrouter_ctx = context_length_for_model(model)
+            if openrouter_ctx is not None:
+                return int(openrouter_ctx)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from opencomputer.agent.context_window_probe import probe_context_window
 
