@@ -525,12 +525,17 @@ def _render_panel(
     table.add_row(left, right)
 
     title = f"[bold {_TITLE}]{format_banner_version_label()}[/]"
+    # Tightened from padding=(0, 2) to (0, 1) — the 2-cell horizontal
+    # padding inside the border added perceived whitespace on both
+    # sides without serving the layout. The Table.grid's own
+    # ``padding=(0, 2)`` (between columns) still spaces the hero from
+    # the sections by 2 cells, which is enough breathing room.
     panel = Panel(
         table,
         title=title,
         border_style=_BORDER,
         box=box.ROUNDED,
-        padding=(0, 2),
+        padding=(0, 1),
     )
     console.print(panel)
 
