@@ -1,0 +1,15 @@
+{
+  "id": "open-design",
+  "name": "Open Design",
+  "version": "0.1.0",
+  "description": "Sidecar bridge to Open Design (nexu-io/open-design) — local-first design product that turns 16 coding-agent CLIs into a design engine driven by skills + design systems. The plugin manages the open-design daemon lifecycle from inside OpenComputer: `oc design start|stop|status|url|restart`. A Design tab in the Hermes Workspace iframes the daemon's web UI on port 7456.",
+  "author": "OpenComputer Contributors",
+  "license": "Apache-2.0",
+  "kind": "mixed",
+  "entry": "plugin",
+  "profiles": ["*"],
+  "enabled_by_default": false,
+  "single_instance": true,
+  "tool_names": [],
+  "cli_commands": ["design"]
+}
