@@ -70,25 +70,28 @@ OPEN_COMPUTER_LOGO_HERMES_STYLE = """[bold #FF3D8A] ██████╗ ██
 OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH = 110  # widest row, cell-counted
 
 
-# Pegasus Braille-art (user-supplied, generated via pegasus.py from the
-# game-icons SVG library). 16 rows tall, painted with a 5-tier pink
-# gradient: dark-rose edges → rose → hot-pink body → rose → dark-rose
-# tail fade. Constant name kept as ``OPEN_COMPUTER_CADUCEUS_PINK`` for
-# back-compat with ``cli_banner`` imports (it's the left-column hero
-# slot, not specifically a caduceus anymore).
-OPEN_COMPUTER_CADUCEUS_PINK = """[#C2185B]                     ⢀⣀⣤⣤⣤⣤⣴⣿⣿⡇[/]
-[#C2185B]  ⢻⣶⣤⡀            ⢀⣴⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣇[/]
-[#E91E78]   ⢻⣿⣿⣷⣤⣀       ⢀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣿⣿⣆[/]
-[#E91E78]    ⠹⣿⣿⣿⣿⣷⣦⣀   ⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧[/]
-[#E91E78]     ⠈⠻⢿⣿⣿⣿⣿⣷⣦⣄ ⠻⣿⣿⣿⣿⣿⣿⣿⡉⠻⢿⣿⣿⣿⣿⣿⣿⣧[/]
-[#FF3D8A]    ⠠⣦⣄⡀⠙⠻⢿⣿⣿⣿⣿⣿⣶⣄⡉⠻⢿⣿⣿⣿⣇    ⠉⠻⢿⣿⣿⡇[/]
-[#FF3D8A]     ⠹⣿⣿⣿⣶⣤⣉⣿⣿⣿⣿⣿⣿⣿⣶⣄⠙⢿⣿⣿⡄      ⠈⠉[/]
-[#FF3D8A]      ⠈⠙⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⡀⢻⣿⣷⡀[/]
-[#FF3D8A]       ⢀⣄⣀⠙⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ ⣿⣿⣷[/]
-[#E91E78]        ⢻⣿⣿⣷⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ ⣿⣿⣿[/]
-[#E91E78]         ⠙⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡟⢀⣿⣿⡏[/]
-[#C2185B]          ⢀⣉⣻⣿⣿⣿⣿⣿⣿⣿⣿⡿⢁⣾⣿⠏[/]
-[#C2185B]          ⠈⢿⣿⣿⣿⣿⣿⣿⣿⣿⠟⢀⣾⡿⠁[/]
-[#8E1A4F]            ⠉⠛⠻⢿⣿⣿⡿⠋⠠⠟⠉[/]"""
+# Laurels Braille-art (user-supplied, generated via laurels.py from the
+# game-icons/lorc/laurels SVG — symmetric wreath silhouette). 16 rows
+# tall, 31 cells wide at peak, painted with a 5-tier pink gradient:
+# dark-rose top tips → rose → hot-pink body → rose → dark-rose → very
+# dark tail fade. Constant name kept as ``OPEN_COMPUTER_CADUCEUS_PINK``
+# for back-compat with ``cli_banner`` imports (it's the left-column
+# hero slot — pegasus before, laurels now, name is just a slot ID).
+OPEN_COMPUTER_CADUCEUS_PINK = """[#C2185B]          ⢀⣀⣠⣤⡄  ⢠⣤⣄⣀⡀[/]
+[#C2185B]       ⢀⣤⣠⣿⣿⡿⠋    ⠙⢿⣿⣿⣄⣤⡀[/]
+[#E91E78]      ⠰⣿⣿⣿⣿⠁        ⠈⣿⣿⣿⣿⠆[/]
+[#E91E78]    ⣴⣿⣶⣿⡿⠿⠃          ⠘⠿⢿⣿⣶⣿⣦[/]
+[#E91E78]   ⠸⣿⣿⣿⣿⣷⠄            ⠠⣾⣿⣿⣿⣿⠇[/]
+[#FF3D8A]  ⣴⣦⣨⣿⡿⠿⠟              ⠻⠿⢿⣿⣅⣴⣦[/]
+[#FF3D8A] ⢰⣿⣿⣿⣿⣷⣶⡄              ⢠⣶⣾⣿⣿⣿⣿⡆[/]
+[#FF3D8A] ⠈⠛⠿⣿⣿⡿⠿⠃              ⠘⠿⢿⣿⣿⠿⠛⠁[/]
+[#FF3D8A] ⢸⣿⣶⣿⣿⣶⣶⣦              ⣴⣶⣶⣿⣿⣶⣿⡇[/]
+[#FF3D8A] ⠸⣿⣿⣿⣿⣿⣿⠟              ⠻⣿⣿⣿⣿⣿⣿⠇[/]
+[#E91E78]  ⢈⣉⣉⣿⣿⣤⣴⣿⣦          ⣴⣿⣦⣤⣿⣿⣉⣉⡁[/]
+[#E91E78]  ⠹⣿⣿⣿⣿⣿⣿⣿⡿⢀⣤⡀    ⢀⣤⡀⢿⣿⣿⣿⣿⣿⣿⣿⠏[/]
+[#E91E78]   ⠹⣿⣿⡿⢿⣿⣏⣴⣿⣿⣿    ⣿⣿⣿⣦⣹⣿⡿⢿⣿⣿⠏[/]
+[#C2185B]     ⢠⣴⣾⣿⣿⣿⣿⡿⠃    ⠘⢿⣿⣿⣿⣿⣷⣦⡄[/]
+[#C2185B]      ⠙⢿⣿⠿⠛⠻⣷⣤⡀  ⢀⣤⣾⠟⠛⠿⣿⡿⠋[/]
+[#8E1A4F]             ⠙⠁  ⠈⠋[/]"""
 
-OPEN_COMPUTER_CADUCEUS_PINK_WIDTH = 36  # widest source row, approx
+OPEN_COMPUTER_CADUCEUS_PINK_WIDTH = 31  # widest source row (rows 5–9)
