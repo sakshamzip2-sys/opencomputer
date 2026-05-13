@@ -2,544 +2,278 @@
 
 Single-file brief a fresh Claude session needs to resume work on OpenComputer.
 
-Last updated: 2026-05-11 (self-evolution closed loop merged; v1.0 candidate awaiting dogfood gate).
+Last updated: 2026-05-12. Main tip: `0d5bb3e7`. Most recent merged work: PR #601 (compaction `enable_probe` fix), PR #602 (banner pegasus), PR #603 (banner skill-category rendering).
 
 ---
 
 ## 1. Project elevator pitch
 
-**OpenComputer** is a personal AI agent framework, written in Python 3.12+, that synthesizes the best ideas from four reference projects into one cohesive system:
+**OpenComputer** is a personal AI agent framework in Python 3.12+ that synthesizes four reference projects:
 
 | Reference | What we took |
 |---|---|
 | [Claude Code](https://github.com/anthropics/claude-code) | Plugin primitives (commands/skills/agents/hooks/MCP), lifecycle events, tool shapes (Edit, MultiEdit, TodoWrite) |
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Python core patterns, three-pillar memory (declarative + procedural + episodic), agent loop shape, channel adapter pattern, Jinja2 prompt templating (shared with Kimi) |
-| [OpenClaw](https://github.com/openclaw/openclaw) | Plugin-first architecture, strict SDK boundary, manifest-first two-phase discovery (scan cheap metadata, activate lazily), typed wire protocol |
-| [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | Dynamic injection providers for cross-cutting modes, fire-and-forget hooks, deferred MCP loading, StepOutcome abstraction |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Python core patterns, three-pillar memory (declarative + procedural + episodic), agent-loop shape, channel adapter pattern, Jinja2 prompts, BrowserHarness |
+| [OpenClaw](https://github.com/openclaw/openclaw) | Plugin-first architecture, strict SDK boundary, manifest-first two-phase discovery, typed wire protocol |
+| [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | Dynamic injection providers, fire-and-forget hooks, deferred MCP loading, StepOutcome abstraction |
 
-**Positioning:** "Same agent, same memory. Install the coding-harness plugin → it's a coding agent. Don't install → it's a chat agent. Your choice." Works from CLI, Telegram, Discord, and any WebSocket client (TUI, IDE).
+Plus [hermes-workspace](https://github.com/outsourc-e/hermes-workspace) — the optional alternative web UI bound via `oc workspace`.
 
-Identity is user-configurable, not locked:
-- You are **Saksham** (GitHub: `sakshamzip2-sys`).
-- Repo: `https://github.com/sakshamzip2-sys/opencomputer` (PUBLIC).
-- Authored on macOS (darwin), zsh.
+**Positioning:** "Same agent, same memory. Install the coding-harness plugin → it's a coding agent. Don't install → it's a chat agent." Runs from CLI, Telegram, Discord, Slack, Matrix, web UI, and any WebSocket client (TUI, IDE).
+
+- You are **Saksham** (GitHub: `sakshamzip2-sys`)
+- Repo: `https://github.com/sakshamzip2-sys/opencomputer` (PUBLIC)
+- Authored on macOS (darwin), zsh
 
 ---
 
 ## 2. Repository layout
 
-The parent git repo is at `/Users/saksham/Vscode/claude/` and contains the OpenComputer project plus four reference repos consolidated under `sources/` (gitignored so they don't pollute our commits):
-
 ```
 /Users/saksham/Vscode/claude/
 ├── .git/                            ← parent repo — GitHub sakshamzip2-sys/opencomputer
-├── .gitignore                       ← ignores sources/ + build artifacts
-├── .github/workflows/
-│   ├── test.yml                     ← pytest on Python 3.12 + 3.13 on every push/PR
-│   ├── lint.yml                     ← ruff check
-│   └── release.yml                  ← triggered on v* tags, publishes to PyPI (OIDC)
-├── OpenComputer/                    ← THE PROJECT. cd here for anything code-related.
-│   └── docs/refs/                   ← reference-extraction notes by repo
-│       ├── claude-code/
-│       ├── hermes-agent/
-│       ├── openclaw/
-│       └── kimi-cli/
-└── sources/                         ← reference repos (gitignored — not in commits)
-    ├── claude-code/
-    ├── hermes-agent/
-    ├── openclaw/
-    └── kimi-cli/
+├── .github/workflows/               ← test.yml, lint.yml, release.yml (OIDC PyPI)
+├── OpenComputer/                    ← THE PROJECT — cd here for code work
+└── sources/                         ← reference repos, gitignored (claude-code, hermes-agent, openclaw, kimi-cli, hermes-workspace)
 ```
 
 ### OpenComputer/ structure
 
 ```
 OpenComputer/
-├── pyproject.toml                   ← hatchling build, deps, ruff/pytest config
-├── README.md                        ← user-facing docs
-├── CLAUDE.md                        ← THIS FILE
-├── AGENTS.md                        ← dev guide for AI assistants
-├── RELEASE.md                       ← runbook for cutting a release
-├── CHANGELOG.md                     ← Keep-a-Changelog format
-├── .venv/                           ← local development venv (gitignored)
+├── pyproject.toml                   ← hatchling, ruff, pytest. Single entry point: `oc = opencomputer.cli:main`
+├── CLAUDE.md  AGENTS.md  RELEASE.md  CHANGELOG.md  README.md
 │
-├── opencomputer/                    ← CORE PACKAGE (can be refactored freely)
-│   ├── __init__.py                  ← __version__ = "0.1.0"
-│   ├── cli.py                       ← Typer CLI — 15 subcommands + profile/plugin/preset/memory/mcp groups
-│   ├── doctor.py                    ← opencomputer doctor — health checks
-│   ├── setup_wizard.py              ← opencomputer setup — onboarding
-│   ├── agent/
-│   │   ├── loop.py                  ← AgentLoop.run_conversation — THE while loop
-│   │   ├── state.py                 ← SessionDB (SQLite + FTS5 full-text search)
-│   │   ├── memory.py                ← MemoryManager (declarative + procedural)
-│   │   ├── config.py                ← typed dataclasses: Model/Loop/Session/Memory/MCP
-│   │   ├── config_store.py          ← load/save ~/.opencomputer/config.yaml
-│   │   ├── injection.py             ← InjectionEngine — collects mode providers per turn
-│   │   ├── compaction.py            ← CompactionEngine (auto-summarize when context full)
-│   │   ├── step.py                  ← StepOutcome dataclass
-│   │   ├── prompt_builder.py        ← Jinja2 prompt rendering
-│   │   └── prompts/base.j2          ← default system prompt template
-│   ├── tools/                       ← built-in tools
-│   │   ├── registry.py              ← ToolRegistry singleton + dispatch
-│   │   ├── read.py, write.py, bash.py, grep.py, glob.py
-│   │   ├── skill_manage.py          ← self-improvement: agent saves skills
-│   │   └── delegate.py              ← spawn subagent with isolated context
-│   ├── gateway/                     ← messaging gateway + wire server
-│   │   ├── server.py                ← Gateway daemon (Telegram/Discord etc.)
-│   │   ├── dispatch.py              ← MessageEvent → AgentLoop routing + typing heartbeat
-│   │   ├── protocol.py              ← WireRequest/Response/Event (pydantic)
-│   │   └── wire_server.py           ← WebSocket JSON-RPC for TUI/IDE clients
-│   ├── hooks/
-│   │   ├── engine.py                ← Hook dispatcher (6 events)
-│   │   └── runner.py                ← fire-and-forget async runner (kimi pattern)
-│   ├── plugins/                     ← plugin system (not plugins themselves!)
-│   │   ├── discovery.py             ← scans manifests → PluginCandidates (cheap)
-│   │   ├── loader.py                ← imports entry module + runs register(api)
-│   │   └── registry.py              ← PluginRegistry singleton + PluginAPI
-│   ├── mcp/
-│   │   └── client.py                ← MCPTool + MCPManager (deferred load)
-│   └── skills/
-│       └── debug-python-import-error/SKILL.md   ← first bundled skill
+├── opencomputer/                    ← CORE PACKAGE
+│   ├── cli.py                       ← Typer root
+│   ├── cli_*.py                     ← 67 subcommand modules. Truth: `ls cli_*.py | sed 's|cli_||;s|\.py||'`
+│   ├── agent/                       ← loop / state (SessionDB+FTS5) / memory / compaction (812 LOC) /
+│   │                                  injection / evolution_orchestrator / prompt_builder
+│   ├── acp/  agents/  awareness/    ← ACP protocol, subagent registry, layered awareness
+│   ├── auth/  channels/             ← OAuth helpers, generic channel base
+│   ├── tools/                       ← built-in tools + registry (PascalCase tool names)
+│   ├── gateway/                     ← daemon + dispatch + wire (WS JSON-RPC at 18789)
+│   ├── dashboard/                   ← FastAPI (REST + OpenAI-compat `/v1/*` + Hermes-shape `/api/*` aliases)
+│   ├── ui-tui/dist/                 ← TUI build artifact (gitignored, symlinked across worktrees)
+│   ├── workspace/                   ← hermes-workspace launcher: discovery + prerequisites + builder + lifecycle
+│   ├── hooks/                       ← event dispatcher + fire-and-forget runner
+│   ├── plugins/                     ← loader, registry, discovery (NOT the plugins themselves)
+│   ├── mcp/                         ← MCPManager + tools + catalog
+│   ├── observability/               ← trace contextvars (langfuse plumbing)
+│   ├── service/                     ← systemd unit template
+│   └── skills/                      ← bundled skills
 │
-├── plugin_sdk/                      ← PUBLIC CONTRACT. Plugins import from here ONLY.
-│   │                                  NEVER imports from opencomputer/*.
-│   │                                  Linter test enforces this.
-│   ├── __init__.py                  ← ~30 public exports
-│   ├── core.py                      ← Message, ToolCall, ToolResult, Platform, MessageEvent
-│   ├── tool_contract.py             ← BaseTool, ToolSchema
-│   ├── provider_contract.py         ← BaseProvider, ProviderResponse, StreamEvent, Usage
-│   ├── channel_contract.py          ← BaseChannelAdapter
-│   ├── hooks.py                     ← HookSpec, HookContext, HookDecision (6 events)
-│   ├── injection.py                 ← DynamicInjectionProvider ABC, InjectionContext
-│   └── runtime_context.py           ← RuntimeContext (plan_mode, yolo_mode, custom)
+├── plugin_sdk/                      ← PUBLIC CONTRACT. Plugins import from HERE ONLY. Test-enforced.
+│   ├── core.py  tool_contract.py  provider_contract.py  channel_contract.py
+│   └── hooks.py  injection.py  runtime_context.py  ingestion.py
 │
-├── extensions/                      ← 7 bundled plugins
-│   ├── telegram/                    ← kind=channel. TELEGRAM_BOT_TOKEN via env
-│   ├── discord/                     ← kind=channel. DISCORD_BOT_TOKEN
-│   ├── anthropic-provider/          ← kind=provider. x-api-key + Bearer-proxy support
-│   ├── openai-provider/             ← kind=provider. OpenAI + OpenAI-compatible endpoints
-│   ├── coding-harness/              ← kind=mixed. Edit/MultiEdit/TodoWrite/bg/plan-mode
-│   ├── dev-tools/                   ← kind=tools. Phase 12d.1 — porcelain dev utilities
-│   └── memory-honcho/               ← kind=memory. Phase 10f.K–N — Honcho overlay (opt-in)
+├── extensions/                      ← 86 bundled plugins. `ls extensions/` for the live truth. Categories:
+│   │   Channels: telegram, discord, slack, matrix, email, imessage, irc, dingtalk, feishu, gmail, …
+│   │   Providers (28+): anthropic, openai, openrouter, gemini, gemini-oauth, azure-foundry, aws-bedrock,
+│   │           groq, cerebras, deepseek, deepinfra, llama-cpp-server, kimi, kimi-china, codex,
+│   │           copilot-acp, dashscope, huggingface, arcee, jan, kilo, alibaba-coding-plan, …
+│   │   Tools: coding-harness, dev-tools, browser-harness (DEFAULT), opencli-bridge, adapter-runner,
+│   │          browser-recipes, ambient-sensors, voice, homeassistant, api-server, …
+│   │   Memory + observability: memory-honcho, skill-evolution, langfuse
+│   │   Legacy (kept dormant): browser-control (typed-error fallback only)
 │
-├── tests/                           ← 809 tests, all passing (59 test files)
-│
-└── docs/                            ← reference notes + author guides (Sub-project B populates more)
+├── tests/                           ← ~1,200 test files, ~15k tests passing
+├── docs/                            ← see §9 — rich tree (specs, parity docs, runbooks, refs)
+└── scripts/                         ← bootstrap_worktree.sh, refresh_extension_boundary_inventory.py, …
 ```
+
+### Profile state — `~/.opencomputer/<profile>/`
+
+A live OC profile is a fat directory with ~70 entries. The ones you'll touch often:
+
+```
+~/.opencomputer/<profile>/
+├── config.yaml                      ← canonical profile config (model, loop, memory, mcp, hooks)
+├── .env                             ← profile-scoped credentials
+├── MEMORY.md  USER.md  DREAMS.md  SOUL.md   ← declarative memory + identity + dreaming-v2 candidates
+├── sessions.db (+ -shm/-wal)        ← SessionDB (SQLite + FTS5) — all chat history
+├── audit.db                         ← F1 immutable HMAC-chained audit log
+├── cron.db                          ← scheduled jobs
+├── kanban.db                        ← OpenClaw kanban port
+├── .context_window_cache.json       ← current-branch territory: cached probe results
+├── feature_flags.json  cost_guard.json  persona_priors.json  learning_moments.json
+├── browser-profile/                 ← agent-browser persistent Chromium user-data-dir
+├── opencli/  opencli-shim-home/     ← opencli adapter state + HOME-shim symlink target
+├── skills/                          ← evolution-staged + accepted skills; evolution_tuning.json
+├── agents/  ambient/  audit/  cron/  evolution/  gateway/  hook_history.jsonl
+├── kanban/  langfuse/  locks/  logs/  memories/  pairing/  presets/  plugins/
+├── profile_bootstrap/  profiles/  rate_limits/  rules/  secrets/  sessions/
+├── tool_result_storage/  user_model/  webui/  wire.log  wire.pid
+└── home/                            ← Hermes-style wrappers + soul (sub-project C)
+```
+
+`oc -p <name>` switches profiles — every path above re-roots. Per-profile credentials, plugins, memory, browser cookies.
 
 ---
 
 ## 3. Architecture in one diagram
 
 ```
-                    user
-                      │
-   ┌──────────────────┼──────────────────────┐
-   │                  │                       │
-   ▼                  ▼                       ▼
-opencomputer    opencomputer            opencomputer
-   chat          gateway                    wire
-(streaming      (daemon with              (WS server
- CLI tokens)    channel adapters)          for TUI/IDE)
-   │                  │                       │
-   └──────────────────┼──────────────────────┘
-                      │
-                      ▼
-                ╔═══════════╗
-                ║ AgentLoop ║  ← run_conversation(user_msg, runtime)
-                ╠═══════════╣
-                ║ • inject (plan/yolo modes via InjectionEngine)
-                ║ • compact (auto-summarize old turns when full)
-                ║ • call provider.complete() or stream_complete()
-                ║ • dispatch tool calls in parallel (safety-checked)
-                ║ • fire PreToolUse hooks (can block)
-                ║ • loop until model stops calling tools
-                ╚═══════════╝
-                      │
-                      ▼
-          ┌───────────────────────────┐
-          │  plugin_sdk/ (PUBLIC)     │   ← 30 exports
-          │  Stable contract.         │
-          └───────────────────────────┘
-                      ▲
-                      │ (plugins import from here)
-                      │
-          ┌───────────┼───────────┬─────────────┐
-          │           │           │             │
-       telegram    discord   anthropic      coding-
-                              openai       harness
+                            user
+                              │
+       ┌──────────────────────┼─────────────────────────────────┐
+       │                      │                                 │
+       ▼                      ▼                                 ▼
+    oc chat              oc gateway                  oc webui / oc workspace
+   (streaming           (daemon: Telegram /                (Node SSR + FastAPI
+    CLI tokens)          Discord / Slack / Matrix /         dashboard backend
+                         IRC / Email / iMessage / …)        on port 9119)
+       │                      │                                 │
+       │                      │      ┌─── oc wire (WS JSON-RPC 18789, TUI/IDE clients) ──┐
+       │                      │      │                                                   │
+       └──────────────────────┼──────┴───────────────────────────┘                       │
+                              │                                                          │
+                              ▼                                                          ▼
+                        ╔═══════════╗                                            (same AgentLoop)
+                        ║ AgentLoop ║  run_conversation(user_msg, runtime)
+                        ╠═══════════╣
+                        ║ • inject  ║  plan / yolo / skill modes via InjectionEngine
+                        ║ • compact ║  auto-summarize old turns when context full
+                        ║ • call    ║  provider.complete() or stream_complete()
+                        ║ • dispatch║  tool calls in parallel (safety + consent checks)
+                        ║ • hooks   ║  25+ lifecycle events; PreToolUse can block
+                        ║ • loop    ║  until model stops calling tools
+                        ╚═══════════╝
+                              │
+                              ▼
+                ┌───────────────────────────┐
+                │  plugin_sdk/ (PUBLIC)     │   stable contract
+                └───────────────────────────┘
+                              ▲
+                              │  (plugins import from here ONLY)
+              ┌───────────┬───┴────────────┬──────────────┬──────────────┐
+              ▼           ▼                ▼              ▼              ▼
+          channels    providers       tools          memory        observability
+          (~10)       (~28)           (coding-       + skills      (langfuse)
+                                       harness,      evolution
+                                       browser,
+                                       opencli,
+                                       voice, …)
 ```
 
-**The rule:** plugins never import from `opencomputer/*`. Only from `plugin_sdk/*`. Enforced by a test that scans plugin_sdk/ for any `from opencomputer` imports.
+**The rule:** plugins never import from `opencomputer/*`. Only from `plugin_sdk/*`. Enforced by `tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer` (asserts `plugin_sdk/` clean) and `tests/test_plugin_extension_boundary.py` (asserts `extensions/` doesn't grow new violations — 26 existing violators frozen in `tests/fixtures/plugin_extension_import_boundary_inventory.json` as the cleanup floor).
 
 ---
 
-## 4. What's been built (all phases to date)
+## 4. Where the work is
 
-All committed + pushed to `main`. Current main sha: `5c62a12` (2026-04-24).
+**This file does NOT track shipped work.** `~/.claude/projects/-Users-saksham-Vscode-claude/memory/MEMORY.md` (auto-loaded) carries chronological ship history with PR# + date + condensed scope — that's the truth. `git log` is authoritative for code.
 
-| Phase | PR / Commit | What |
-|---|---|---|
-| 0-10b | `0d512cb`..`2858815` | Scaffold through v0.1.0: agent loop, SessionDB+FTS5, plugin system, Telegram/Discord channels, Anthropic+OpenAI providers, MCP, coding-harness, gateway/wire, streaming, CI/CD, PyPI prep. `git log` for detail. |
-| 10e | PR #2 / `00379e1` | WebFetch + WebSearch tools (2026-04-23) |
-| 10f.K–N | PRs #13 / #15 / #16 | Honcho memory overlay — plugin skeleton, wizard step, host key per profile |
-| 11a | PR #3 | Inventory / parity tracker |
-| 11b | PR #4 | Claude-code parity: NotebookEdit, SkillTool, PushNotification, AskUserQuestion |
-| 11c | PR #5 | MCP expansion — install-from-preset, catalog groundwork |
-| 11d | PR #6 | Episodic memory + Anthropic batch integration |
-| 12a | PR #18 / `1c08508` | Recall tool + post-response reviewer + agent cache (Tier 1 memory loop, 2026-04-23) |
-| 12d.1 | PR #12 | `dev-tools` plugin (porcelain dev utilities) |
-| 12d.2 | PR #17 / `545bf20` | Multi-provider WebSearch backend chain |
-| 12f | PR #9 | 15 curated skills imported (superpowers + everything-claude-code subset) |
-| 12g | PR #10 | SDK boundary hardening (test-enforced `plugin_sdk/` contract) |
-| 14.A | `2ff243c`, `1b02f84` | Per-profile directory + pre-import `-p` flag routing |
-| 14.B | `210599a` | `opencomputer profile` CLI (list/create/use/delete/rename/path) |
-| 14.C | `9673100` | `PluginManifest.profiles` + `single_instance` fields in SDK |
-| 14.D | `10300b4` | Layer A manifest profile enforcement in loader |
-| 14.E | `ee90467` | Profile-local plugin dir + install/uninstall/where CLI |
-| 14.J | PR #16 / `7169820` | Honcho host key derived from active profile + README limitations |
-| 14.L | PR #14 / `ebb32db` | README Profiles / Presets / Plugin sections + CHANGELOG |
-| 14.M | `7fc1185` | Named plugin-activation presets + CLI |
-| 14.N | `0a829ca` | Workspace `.opencomputer/config.yaml` overlay |
-| Sub-project A | PR #20 / `6ad86b5` | Honcho-as-default memory (A1-A8) — v1.0 ship-gate |
-| Sub-project B | PR #21 / `e57d191` | `opencomputer plugin new` scaffolder (B1-B6) — v1.0 ship-gate |
-| Sub-project D.1–3 | PR #22 / `9b55789` | Coding-harness Phase 6d-6f rebase + SDK boundary fix |
-| Sub-project D.5+D.7 | PR #23 / `1227e19` | ExitPlanMode tool + PreCompact/SubagentStop/Notification hook emissions |
-| Sub-project C | PR #24 / `f2e8f0f` | Profile parity with Hermes — `home/` + wrappers + `SOUL.md` (C1-C4) |
-| Adversarial follow-ups | PR #25 / `89b1e84` | Follow-ups across PRs #25-#28 (test hardening, drift guards) |
-| Sub-project E | PR #26 / `633c8eb` | Demand-driven plugin activation (E1-E6) |
-| Sub-project D tail | PR #27 / `5c62a12` | Cheap-route gating (D6) + slash-command router formalization (D8) — v1.0 candidate (2026-04-24) |
-| Drift preventers | PR #29 / `00bf48b` | Pre-v1.0 cleanup — PascalCase tool renames (CheckpointDiff, GitDiff, StartProcess, CheckOutput, KillProcess) + plugin search-path consolidation |
-| Sub-project F1 | PR #?? / (pending) | Consent layer + immutable audit log (core, non-bypassable). Schema v1→v2, 4 SDK types, 8 CLI subcommands, HMAC-chained tamper-evident audit, progressive promotion (N=10), bypass flag, AGPL-isolation grep test. Infrastructure only — F2+ attach claims to tools |
-| OI removal | 2026-04-27 (branch `feat/native-cross-platform-introspection`) | `oi_bridge` (Open Interpreter subprocess bridge, AGPL) replaced by native cross-platform `extensions/coding-harness/introspection/` module (psutil/mss/pyperclip/rapidocr-onnxruntime). 5 tool names preserved; F1 capability namespace migrated `oi_bridge.*` → `introspection.*`. Net diff ~−2,400 LOC. Cross-platform support extended from "macOS, Linux only" to "macOS, Linux, Windows" (psutil + os.walk replace the broken `ps aux` / `find -mmin` paths). `docs/f7/` removed. |
+**Active work (current branch):** `feat/oc-compaction-fix-2026-05-12` is fixing a bug in compaction where the context-window cache and OpenRouter catalog were probing even when the caller passed `enable_probe=False`. See `compaction.py:189–297` for the `enable_probe` semantics and `docs/context-window-deep-dive.md` (515 LOC) for the full design.
 
-**Test count:** 885 passing across 71 test files.
+**Roadmap pointers:**
 
-**Bundled extensions (7):** telegram, discord, anthropic-provider, openai-provider, coding-harness, dev-tools, memory-honcho.
+- **v1.0 candidate shipped.** Tag + PyPI publish is human-attended (OIDC tied to maintainer identity). See `RELEASE.md`.
+- **Sub-project F (User Intelligence System).** F1 (consent + immutable audit) and F2/F4/F5 + 3.E/3.F/3.G shipped. F6+ parked at `~/.claude/plans/there-are-many-pending-tranquil-fern.md`.
+- **OpenClaw parity.** 8/20 shipped per `oc parity-doctor run`. Tracker: `docs/openclaw-parity-2026-05-10.md` + `docs/OC-FROM-OPENCLAW.md`.
+- **Hermes parity.** Multi-wave; grep `MEMORY.md` for "hermes" — 16+ entries through the v2 honest-audit closures. Doc parity not formally tracked anymore (most of the surface already lifted).
+
+For any specific feature, grep `MEMORY.md` by name / PR# — entries are condensed and chronological.
 
 ---
 
-### 4.1 browser-harness (2026-05-08, DEFAULT — replaces legacy browser-control)
+## 5. How to run / develop / test
 
-**Status:** active default. ``adapter-runner`` now routes browser ops through ``BrowserHarnessActions`` (Hermes-derived, agent-browser CLI). The legacy ``browser-control`` plugin is dormant — its package files remain on disk so the typed-error fallback in ``adapter-runner._ctx._typed_browser_errors`` still works as a path-3 backstop, and the ``extensions.browser_control`` package namespace is bootstrapped at import time for any straggler relative imports — but its ``register()`` returns early before any tools are registered. Reactivate the legacy path via ``OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1``.
-
-**What it is:** a Hermes-derived multi-backend browser plugin lifted from `nousresearch/hermes-agent` `tools/browser_*.py`. Replaces the broken Playwright-based `browser-control` plugin with `agent-browser` CLI (Node, project-local install) plus pluggable cloud providers.
-
-**Backends supported (all from Hermes):**
-- Local headless Chromium via `agent-browser` (default)
-- User's real Chrome via CDP (`OPENCOMPUTER_BROWSER_CDP_URL=ws://localhost:9222`)
-- Browser Use Cloud (`BROWSER_USE_API_KEY`)
-- Browserbase (`BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID`)
-- Firecrawl (`FIRECRAWL_API_KEY`)
-- Camofox local stealth (`CAMOFOX_URL`)
-
-Plus one OC-specific addition planned (extension-daemon for managed-Chrome reliability) — not yet implemented; the structural fix for the chat-mode-after-idle bug comes from agent-browser's process-isolated daemon rather than Playwright/CDP.
-
-**Files:**
-- `extensions/browser-harness/dispatcher.py` — lifted Hermes `browser_tool.py` (byte-identical except imports)
-- `extensions/browser-harness/browser_camofox.py`, `browser_camofox_state.py` — Camofox client (lifted)
-- `extensions/browser-harness/browser_providers/` — 4 cloud provider files (lifted)
-- `extensions/browser-harness/redact.py` — Hermes secret-redaction module (lifted byte-identical)
-- `extensions/browser-harness/compat.py` — Hermes→OC shims (real wires for `is_safe_url`/`load_config`/`get_hermes_home`; `call_llm` raises until OC's `auxiliary_client` is wired)
-- `extensions/browser-harness/tools.py` — OC `BaseTool` wrappers: `BrowserNavigate`, `BrowserSnapshot`, `BrowserClick`, `BrowserType`, `BrowserVision`
-- `extensions/browser-harness/actions.py` — `BrowserHarnessActions` adapter-runner client (drop-in for `extensions.browser_control.client.BrowserActions`)
-- `extensions/browser-harness/config.py` — `detect_backend()` + `use_browser_harness_for_adapter_runner()` introspection
-- `extensions/browser-harness/VENDORED.md` — provenance + divergence log
-
-**External deps added:**
-- `requests` Python package (`pip install requests`) — Hermes uses it for HTTP calls into cloud providers
-- `node_modules/agent-browser` — installed via `npm install agent-browser` in OC repo root (project-local, NOT global)
-- `node_modules/.bin` is prepended to PATH at plugin load by `plugin.py`
-
-**Default behaviour:** `adapter-runner` routes browser ops through `browser-harness` automatically. No env var required.
+### Local setup
 
 ```bash
-opencomputer chat   # browser-harness handles browser tools by default
+cd /Users/saksham/Vscode/claude/OpenComputer
+source .venv/bin/activate   # venv uses Python 3.13 (anaconda)
 ```
 
-**Legacy escape hatch:** `OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1` re-enables the dormant `browser-control` plugin and routes `adapter-runner` back to it. Emergency only.
+### Worktree / merge refresh — non-negotiable
 
-**Persistent browser profile (OpenClaw-style, default since 2026-05-08):** `plugin.py` sets `AGENT_BROWSER_PROFILE=<oc_profile_home>/browser-profile/` at register time so agent-browser's Chromium uses a fixed user-data-dir per OC profile. Cookies, logins, extensions, and history persist across runs. Each `-p <name>` OC profile gets its own isolated browser profile. Users who export `AGENT_BROWSER_PROFILE` themselves before launch are left alone. Without this, agent-browser would default to an ephemeral `/var/folders/.../T/agent-browser-chrome-<uuid>/` dir per process — fresh dir on every daemon restart, all cookies lost.
+After `git worktree add` OR any merge into the active worktree:
 
-**Headed vs. headless:** `agent-browser` runs headless by default. Set `AGENT_BROWSER_HEADED=1` to see the Chromium window (useful for first-time logins / debugging). Headless is the right default for production / batch runs.
-
-**Known caveats:**
-- `call_llm` is stubbed (raises `CallLLMNotConfigured`); both Hermes call sites have try/except fallbacks so vision analysis and content-extraction features degrade gracefully. Wiring to `opencomputer.agent.auxiliary_client` is a future enhancement.
-- `check_website_access` returns None (no per-profile website allow/deny policy yet).
-- agent-browser's persistent profile dir is separate from the user's real system Chrome (Google Chrome.app). User logins from system Chrome are NOT shared. For sites needing auth, log in once via agent-browser's headed Chromium and the cookies stick to that OC-profile-scoped dir thereafter.
-- The Nous-managed-tool-gateway path was removed from `browser_providers/browser_use.py` (irrelevant to OC). Documented in `VENDORED.md` "Divergences" section.
-
----
-
-### 4.2 opencli-bridge (2026-05-08, complementary to browser-harness)
-
-**Status:** active default. Sibling browser-tool plugin alongside browser-harness. Bridges [`@jackwener/opencli`](https://github.com/jackwener/opencli) (Apache-2.0, 19k⭐, Node CLI) into OC. Provides 100+ pre-built deterministic site adapters (HN, Reddit, X/Twitter, Wikipedia, PyPI, Steam, GitHub, Bilibili, Xiaohongshu, Cursor / Notion / Antigravity Electron apps, etc.) plus a chrome.debugger extension auto-loaded into the agent's own Chrome. **Zero LLM tokens at runtime** for any task that maps to a built-in adapter.
-
-**Why it complements browser-harness rather than replacing it:**
-
-| Use case | Right backend |
-|---|---|
-| Site has a built-in OpenCLI adapter | `OpenCliRun` (zero tokens, deterministic) |
-| Site doesn't have one yet, recurring task | `OpenCliBrowse` → `OpenCliAuthor` (one-time author, then free forever) |
-| One-off raw exploration | browser-harness `BrowserNavigate / Snapshot / Click / Type / Vision` |
-| VPS deployment (no real Chrome avail) | browser-harness only |
-
-**Five tools registered:**
-- `OpenCliList` — discover the 100+ adapters (call first)
-- `OpenCliRun` — run a deterministic adapter
-- `OpenCliBrowse` — live browser ops via the chrome.debugger extension
-- `OpenCliAuthor` — crystallize a browse session into a reusable adapter
-- `OpenCliInspect` — inspect adapter source / args / status
-
-**Files (`extensions/opencli-bridge/`):**
-- `extension/v1.0.6/` — bundled Chrome extension (Apache-2.0, redistributed)
-- `plugin.py` — register entry + PATH prepend + extension side-load + HOME-shim
-- `dispatcher.py` — `subprocess.Popen(["opencli", ...])` JSON parser
-- `tools.py` — 5 `BaseTool` wrappers, all with priority hints in descriptions
-- `actions.py` — `OpenCliBridgeActions` for adapter-runner (parallel to `BrowserHarnessActions`)
-- `doctor.py` — three-step health check
-- `skills/opencli-routing/SKILL.md` — routing decision tree (when to use what)
-- `VENDORED.md` — provenance + Apache-2.0 attribution + re-sync checklist
-
-**External deps added:**
-- `@jackwener/opencli ^1.0.6` (resolves to 1.7.14) in [package.json](package.json) — npm install pulls it project-local at `node_modules/.bin/opencli`
-- The bundled extension ships in the OC repo; user takes no install step
-
-**Side-load mechanism:** `plugin.py` appends the extension path to `AGENT_BROWSER_EXTENSIONS` (additive, comma-separated). agent-browser's launcher passes that through as `--load-extension=<path>` to Chromium. Verified loaded by reading `chrome://extensions` shadow DOM during smoke tests.
-
-**Per-OC-profile state isolation (HOME-shim):** opencli hardcodes `os.homedir() / ".opencli"` for state ([upstream main.js:29](node_modules/@jackwener/opencli/dist/src/main.js)). To avoid clobbering the user's real `~/.opencli/`, `plugin.py:_setup_home_shim()` builds a per-OC-profile shim:
-
-```
-<oc_profile_home>/
-├── opencli/                   ← REAL state (authored adapters, configs)
-└── opencli-shim-home/
-    └── .opencli  →  ../opencli  ← symlink the dispatcher's HOME points at
+```bash
+pip install -e . --no-cache-dir --no-deps   # refresh editable shim
+hash -r                                      # zsh: clear command cache (NOT `source ~/.zshrc`)
+./scripts/bootstrap_worktree.sh              # symlinks ui-tui/dist/ + dashboard/static/spa/ into fresh worktrees
 ```
 
-dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Surgical: opencli only uses `os.homedir()` for the state path, so this override has no other side effects. Each `oc -p <name>` gets a fully isolated OpenCLI state tree.
+Stale `oc` binary after a merge is the single most common parallel-session failure mode.
 
-**Smoke test that passed:** `OpenCliList(filter="hackernews")` → returned catalog. `OpenCliRun(site="hackernews", command="top", args={limit: 3})` → returned 3 real top HN stories with rank/score/author/url, zero LLM tokens, JSON output.
+### Credentials — one of:
 
-**Known caveats:**
-- opencli's existing `~/.opencli/clis/` (e.g., user's prior `luma`, `learnx.bak`, `linkedin`, `swiggy` adapters) is NOT migrated automatically into per-OC-profile dirs. User can copy what they want manually. Default behavior is fresh start per OC profile.
-- The format flag is `-f json` (NOT `--json`) — dispatcher auto-injects it. Got bit by this once; document.
-- OpenCLI doesn't provide an `OPENCLI_HOME` env var — that's why we needed the symlink shim.
-- 5 OpenCLI upstream skills (`opencli-adapter-author`, `opencli-autofix`, `opencli-browser`, `opencli-usage`, `smart-search`) were NOT mirrored verbatim because the GH API fetch was sandboxed; we wrote our own concise `opencli-routing` skill that captures the decision tree. Future: fetch + mirror those 5 (Apache-2.0 allows).
-- The chrome.debugger extension can't attach to a tab agent-browser is already CDP-controlling (one-debugger-per-tab Chrome rule). Tab partitioning solves it: each path opens its own tabs. The agent picks per task, doesn't try to use both on the same tab.
-
-**LLM tool-selection steering:** purely encoded in tool descriptions (e.g., `OpenCliRun.description` says "PREFERRED for any web data task. Returns clean JSON, ZERO LLM tokens at runtime. ... If this returns 'adapter_not_found', do NOT just fall back to live browsing without crystallizing"). No InjectionEngine wiring needed — descriptions are read every turn and Claude follows priority hints reliably. Optional: post-task reflection hook for stronger nudge could be added later.
-
----
-
-### 4.3 CC §4 + §10 visibility surface (2026-05-10, schema v18)
-
-**Status:** active default. Closes the `/context` and `/usage` gaps documented in `docs/OC-FROM-CLAUDE-CODE.md` (§4 + §10).
-
-**Schema v18:** additive `sessions.compactions_count INTEGER DEFAULT 0`. AgentLoop's `_record_compaction()` bumps it after each successful `CompactionResult.did_compact` at both proactive and reactive compaction sites. The increment is atomic via `RETURNING` with a graceful pre-3.35 SQLite fallback. Telemetry must never wedge the loop — three-tier error handling (DB swallow → loop swallow → slash empty-state) guarantees that.
-
-**Surface added:**
-- `/context` slash — model, used/max tokens, remaining, compaction-trigger threshold, compactions this session, total input tokens. Reads `runtime.custom`.
-- `/usage` slash — augmented: compactions row when `session_compactions > 0`. Existing cache row, cost, tokens rows preserved.
-- `oc context show <session-id>` — historical session panel from SessionDB.
-- `oc context show --current` — render for the most-recent session.
-- `oc context list [--limit N]` — overview table: every session with its context % + compaction count.
-- `oc usage sessions [--session-id|--model|--provider|--since|--limit]` — SessionDB-backed per-session view (compactions + cost from joined `llm_calls`). Distinct from the existing top-level `oc usage` callback that reads JSONL telemetry.
-
-**Honest cost rendering:** `SessionUsageRow.cost_usd: float | None`. When `llm_calls` lacks pricing data the CLI shows `—`, not `$0.00`.
-
-**Why two commands on `oc context`** (`show` + `list`): Typer auto-promotes Typer apps with a single command, collapsing `oc context show <id>` parse. Registering `list` as a second command suppresses the auto-promote AND provides a useful discovery surface.
-
-**Spec:** `docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md`.
-
----
-
-### 4.4 Self-evolution closed loop (2026-05-11)
-
-**Status:** active default. Closes the four-island self-evolution gap documented in the 2026-05-11 brutal-honest review (skill-evolution machinery + dreaming v1/v2 + outcome-aware events all existed but were not connected).
-
-**What it does:**
-
-1. **Honcho `on_pre_compress`** — the prior TODO stub is replaced with a real `/v1/context-full` GET (2-attempt retry on 5xx / network). Returns a pinned `## Honcho user-model facts` block injected before compaction so peer-card content survives the summariser.
-2. **Honcho turn-completed handler** — the prior log-only stub is replaced with `conclude(observation_mode=inferred)` POST (2-attempt retry on 5xx / network). Every turn's signals land in Honcho's user-model as an inferred behavioral observation. Non-JSON-serializable signal values are repr-coerced before render.
-3. **Per-turn trace id** — `opencomputer.observability.trace` exposes a contextvar (`new_trace_id / set_trace_id / get_trace_id / reset_trace_id / trace_scope`). `AgentLoop.run_conversation` opens a scope at turn entry; `record_llm_call` auto-fills `LLMCallEvent.trace_id` from the contextvar when the caller doesn't supply one explicitly.
-4. **Langfuse parent span per turn** — `extensions.langfuse.plugin.open_turn_span` is a context manager called by `run_conversation` alongside `trace_scope`. All langfuse generations + tool spans created during the turn nest under one parent span via OTel context propagation. langfuse-inert mode is a no-op.
-5. **`SkillReviewDecisionEvent`** — new typed event in `plugin_sdk.ingestion`. Emitted by `oc skills accept / reject / review` on the default bus. Decision vocabulary: `accepted | rejected | edited | deferred`.
-6. **`EvolutionOrchestrator`** — `opencomputer/agent/evolution_orchestrator.py`. Subscribes to `skill_review_decision` + `turn_completed`. Maintains a rolling window of 20 decisions. Tunes `confidence_threshold` (skill-evo Stage-2) and `dreaming_v2_score_threshold` + `dreaming_v2_min_recall` on a hysteresis schedule (accept-rate <30% tightens, >80% loosens, dead band in between, min 10 decisions). Persists to `<profile_home>/skills/evolution_tuning.json` atomically with `fcntl.flock` on POSIX.
-7. **Gateway lifecycle wiring** — `Gateway._start_evolution_orchestrator` starts the orchestrator at daemon boot, stops at shutdown. CLI-mode users hit `EvolutionOrchestrator.get_or_start_orchestrator` lazy singleton (via `oc skills accept / reject / review` event-emission path) so standalone CLI sessions ALSO drive tuning.
-8. **`oc evolution-tuning` CLI** — `status` shows current tuning + decisions observed + last recompute, `tune` forces a manual recompute, `reset --yes` clears to defaults. Aggregate-only (privacy posture mirrors `oc skills evolution status`). Named `evolution-tuning` rather than `evolution` to avoid colliding with the existing trajectory/prompts/skills `oc evolution` namespace (PR-1).
-9. **Skill-evolution subscriber** — `_run_pipeline_inner` calls `load_tuning(_home())` and uses the result as the effective `confidence_threshold`, overriding the constructor default. Fall-back to ctor default on tuning-file read failure.
-10. **Provenance carries trace_id** — `skill_extractor` captures `get_trace_id()` at extraction time and stores it in `provenance.json`. `oc skills review` reads it back when emitting the decision event so the langfuse `score_trace` callback can post a decision score against the right server-side trace.
-
-**Persisted state:** `<profile_home>/skills/evolution_tuning.json` (schema v1; additive fields permitted, breaking changes bump version → reader falls back to defaults).
-
-**Failure isolation:** every wire degrades gracefully — Honcho down → fall back to none; langfuse inert → no scoring, tuning continues; orchestrator missing → decisions still flow on bus, no tune; bus event handler exception → logged + swallowed, never re-raised into the publisher.
-
-**Spec:** the 2026-05-11 in-chat brutal-honest review and the on-the-fly /brainstorm → /audit-design → /plan → /audit-plan workflow. No standalone spec doc (work was scoped tight enough that one would have been bureaucracy).
-
----
-
-### 4.5 Evolution dashboard visibility + Gap 2 + Gap 3 + B3 (2026-05-12)
-
-**Status:** active default. Closes four gaps from `self-evolution-comparison.md` / `self-evolution-gaps-deep-dive.md` in two merge commits: `a420656b` (dashboard + Gap 2 + Gap 3) and `3b60cc14` (B3).
-
-| Surface | What changed |
-|---|---|
-| `oc evolution dashboard` | New "Operational" table: skill-evolution heartbeat freshness, `_proposed/` candidate count, dreaming-v2 last-run breakdown with disjoint HELD buckets (`score_only` / `recall_only` / `both_gates` / `unattributed`), DREAMS.md size vs cap, optional catch-up row when last tick was a missed-cron recovery. |
-| `summarize_run_for_state()` in `cron/dreaming_v2_tick.py` | Pure function; persists per-tick counts to `<profile>/cron/dreaming_v2_state.json["last_summary"]` after every run. Invariant: `held == score_only + recall_only + both_gates + unattributed`. `unattributed > 0` triggers WARN log + red render — engine rationale-format drift never silently undercounts. |
-| `extensions/skill-evolution/subscriber.py::_is_enabled` | Defensive default-on. Missing / empty / malformed JSON / non-UTF-8 / non-dict shapes all return True with WARN logging. Only explicit `{"enabled": false}` opts out. Privacy preserved. |
-| `oc memory dream-v2-rescore` | New CLI; parses DREAMS.md, re-scores entries with configurable `--model`, renders diff table; with `--apply --promote-threshold N.NN` atomically appends promotion candidates to MEMORY.md via `MemoryManager.append_declarative()`. Provider-absent path exits 2 with `oc auth` pointer. Default `--limit=50` cost cap. |
-| `register_with_bus()` in `evolution/trajectory.py` | Now subscribes to BOTH `tool_call` and `session_end`. The previously orphaned `_on_session_end` persister is wired via new `_on_session_end_event` adapter. Return type changed `Subscription` → `tuple[Subscription, Subscription]` so callers unsubscribe both on shutdown. |
-
-**Privacy contracts preserved end-to-end:**
-- `last_summary` is counts only — never per-candidate text or rationale strings.
-- `_on_session_end_event` reads `event.session_id` only; the TrajectoryEvent metadata 200-char privacy cap is enforced by `TrajectoryEvent.__post_init__` at construction.
-- `dream-v2-rescore` feeds each entry's exact `raw_text` (same surface the original gate saw); does not pass Q/A separately.
-- The full `oc auth` early-exit prevents N AttributeErrors leaking provider state.
-
-**Adversarial-input coverage** (test count by surface):
-- `tests/test_evolution_dashboard_wide.py` — 21 tests (happy, empty, 7 adversarial, invariant, catch-up render)
-- `tests/test_skill_evolution_default_on.py` — 11 tests (every state-file shape)
-- `tests/test_dreams_rescore.py` — 24 tests (parser shapes, rescorer, threshold, callback isolation, CLI integration)
-- `tests/test_b3_trajectory_subscriber_session_end.py` — 7 tests (wiring, persistence, isolation, subscriber-failure-doesn't-poison-bus, sync + async paths)
-- 1 added E2E assertion in `tests/test_dreaming_v2_tick.py` confirming `last_summary` lands through the production code path.
-
-**Operational impact verified on disk:**
-- `~/.opencomputer/cron/dreaming_v2_state.json["last_summary"]` populated with `unattributed: 0`
-- `oc evolution dashboard` renders the Operational table on real profile
-- `oc memory dream-v2-rescore --help` is wired; full path exits cleanly when provider is absent
-
-**Status from each gap closed:**
-- Gap 1 (B3 trajectory auto-collection): **CLOSED** — was misdiagnosed as ~200 LOC subscriber. Actual fix: 56 LOC wiring.
-- Gap 2 (skill-evolution silent-disable on malformed state.json): **CLOSED**
-- Gap 3 (DREAMS.md re-scoring): **CLOSED**
-- Gaps 4–7 deliberately deferred (hardware / architectural / by design / partial mitigation via Gap 3).
-
-**Full pytest:** 15,076 passed, 0 failed, 30 skipped, 6 xfailed in 5:27 (post-merge baseline); B3 added 7 more — re-run pending. **Ruff:** clean across `opencomputer/`, `plugin_sdk/`, `extensions/`, `tests/`.
-
-**Spec:** `self-evolution-comparison.md` v3 + `self-evolution-gaps-deep-dive.md` status section. Senior-Engineer-Workflow phases ran end-to-end (/brainstorm → /audit-design → /plan → /audit-plan → /execute + /tdd → /review → /retro).
-
----
-
-### 4.6 `oc workspace` — hermes-workspace as a second browser surface (2026-05-12)
-
-**Status:** active default. Sibling to `oc webui` — leaves the existing webui untouched. `oc workspace` launches [hermes-workspace](https://github.com/outsourc-e/hermes-workspace) (MIT, Node SSR React app) pointed at OC's dashboard FastAPI as an OpenAI-compatible chat backend.
-
-**What it adds:**
-
-1. **OpenAI-compat HTTP shim** — `opencomputer/dashboard/routes/openai_compat.py` adds three routes to the existing dashboard FastAPI app (port 9119):
-   - `GET /v1/health` — public liveness probe
-   - `GET /v1/models` — OpenAI list shape over `cli_model_picker._grouped_models()`, deduped by model id
-   - `POST /v1/chat/completions` — Bearer-gated, streaming (SSE) + non-streaming, backed by `AgentLoop.run_conversation`. Stateless per request: the `messages[]` array drives `initial_messages`; the final user turn is `user_message`. Tool calls happen inside the loop but are not surfaced as OpenAI `tool_calls` deltas in v1 — only the terminal text response is streamed back. Body capped at 4 MiB; completion wall-clock cap 10 minutes; backpressure-safe SSE pump.
-2. **Hermes-shape `/api/*` parity aliases** — `opencomputer/dashboard/routes/hermes_aliases.py` mirrors workspace's expected dashboard surface by delegating to OC's existing `/api/v1/*` handlers and re-shaping the responses:
-   - `GET /api/sessions{,...}` → `{items, total, limit}` / `{session}` / messages page
-   - `GET /api/skills` + `/api/skills/categories` → `{skills}` / `{categories}`
-   - `GET /api/jobs` → `{jobs}` (cron registry)
-   - `GET /api/config` → OC config (Bearer-gated)
-   - `GET /api/mcp` → `{servers}` (coerced from `MCPManager`)
-   - On downstream failure: 200 with `{<key>: [], error: <str>}` rather than a 5xx — workspace's capability probe treats 5xx as "missing", so degraded paths still report as "available" with the error surfaced in-band.
-3. **`/health` alias** — bare `/health` (no `/v1/`) added in `dashboard/server.py` so the workspace's gateway-liveness probe finds OC.
-4. **`oc workspace` CLI** (`opencomputer/cli_workspace.py`):
-   - `oc workspace` (bare) / `oc workspace run` — discover hermes-workspace dir, check prereqs (node ≥ 22, pnpm ≥ 9), build if needed, spawn dashboard thread + Node subprocess, health-check both, open browser, block until Ctrl+C.
-   - `oc workspace build [--force]` — run `pnpm install` + `pnpm build`.
-   - `oc workspace doctor` — print prereq status + discovery + cache state.
-5. **Launcher package** (`opencomputer/workspace/`):
-   - `discovery.py` — explicit `--workspace-dir` → `$OC_WORKSPACE_DIR` → `<profile>/workspace/` → `~/.opencomputer/workspace/` → `/Users/saksham/Vscode/claude/sources/hermes-workspace/` dev-fallback. Explicit-then-invalid is a HARD ERROR, never silent fallback.
-   - `prerequisites.py` — `node --version` + `pnpm --version` with version-major gates and timeout.
-   - `builder.py` — cache hit when `dist/server/server.js` + `node_modules/.modules.yaml` are both present AND newer than `package.json`. Detects interrupted installs.
-   - `launcher.py` — `node server-entry.js` subprocess with enriched env. POSIX: `start_new_session=True` + process-group SIGTERM→5s→SIGKILL on shutdown. `_await_health` catches every `Exception` (including `httpx.ReadTimeout`) so timeouts can't escape uncaught and orphan Node. `spawn_workspace` catches `BaseException` so cleanup runs on every failure path.
-   - `lifecycle.py` — coordinates dashboard thread + workspace subprocess. Refuses to start when dashboard port is in use.
-
-**Env vars set into the Node subprocess:**
-
-| Var | Purpose |
-|---|---|
-| `HERMES_API_URL` | Gateway URL (chat completions, models) |
-| `HERMES_DASHBOARD_URL` | Dashboard URL (sessions, skills, jobs). Same as `HERMES_API_URL` because OC serves both surfaces on one FastAPI app. |
-| `HERMES_API_TOKEN` | Bearer token for `/v1/*` |
-| `CLAUDE_DASHBOARD_TOKEN` / `CLAUDE_API_TOKEN` | Mirror of `HERMES_API_TOKEN` for the workspace's gateway-capabilities layer (per upstream #124 migration). |
-| `OC_WORKSPACE_DIR` | Discovery override (operator-set; not set by launcher) |
-| `HOST`, `PORT`, `NODE_ENV`, `OPENCOMPUTER_HOME` | Workspace runtime |
-
-**Workspace capability state after the fixes** (`oc workspace` log):
-```
-mode=portable core=[health, chatCompletions, models, streaming]
-enhanced=[sessions, skills, memory, config, jobs, mcp]
-missing=[enhancedChat, mcpFallback, dashboard]
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...                                                   # native Anthropic
+export ANTHROPIC_BASE_URL=https://claude-router.vercel.app ANTHROPIC_AUTH_MODE=bearer  # proxy mode
+export OPENAI_API_KEY=sk-...                                                          # OpenAI
+# OR `oc auth login <provider>` — token cached per-profile in <profile>/.env
 ```
 
-The 3 still-missing surfaces have justified reasons documented in PR #597:
-- `enhancedChat` is hermes-agent's session-bound POST stream (`/api/sessions/{id}/chat/stream`); OC uses stateless `/v1/chat/completions`.
-- `mcpFallback` depends on the dashboard exposing `config.mcp_servers`; future PR.
-- `dashboard` is a separate `probeDashboard()` endpoint distinct from the `/api/*` tree; future PR.
+### CLI surface
 
-**Worktree bootstrap (2026-05-12).** `pyproject.toml` force-includes `opencomputer/ui-tui/dist/` and `opencomputer/dashboard/static/spa/` (gitignored build artifacts). A fresh `git worktree add` won't have those, so `uv tool install --editable .` would fail with `Forced include not found`. Fix: run `./scripts/bootstrap_worktree.sh` once after creating the worktree — it auto-discovers the sibling main checkout and symlinks the two dirs across. `.gitignore` covers the symlinks.
+There are **67 subcommand modules** (`ls opencomputer/cli_*.py`). The frequently-used ones:
 
-**Spec:** `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-design.md` + workflow notes at `docs/superpowers/specs/2026-05-12-oc-workspace-hermes-workflow-notes.md`.
+```bash
+oc chat                                # streaming CLI (-c resume last, -q quiet)
+oc --plan                              # plan mode (Edit/Write/Bash refused)
+oc gateway                             # channel daemon
+oc wire                                # WebSocket JSON-RPC at ws://127.0.0.1:18789
+oc webui                               # built-in React webui
+oc workspace                           # hermes-workspace alternative webui
+oc -p <name>                           # switch to named profile
 
-**Tests:** `test_workspace_discovery.py`, `test_workspace_prerequisites.py`, `test_workspace_builder.py`, `test_workspace_launcher.py`, `test_cli_workspace.py`, `test_dashboard_openai_compat.py`, `test_dashboard_health_alias.py`, `test_dashboard_hermes_aliases.py`. 92 tests; full suite 15,114 passed.
+oc plugins  / skills  / doctor         # listings + multi-layer health
+oc config show / variants / init       # config dump / bundled variants / wizard
+oc profile list/create/use/path        # profile management
 
----
+oc memory audit [--user] [--all] [--interactive]                # MEMORY.md / USER.md inspection
+oc memory dream-v2-rescore --apply --promote-threshold N        # DREAMS.md re-score
+oc context show [--current] [<id>] / list                       # session context %
+oc usage sessions                                               # per-session cost + compactions
+oc sessions tree                                                # subagent lineage view
 
-## 5. What's NEXT — single source of truth
+oc parity-doctor run                                            # OpenClaw parity audit
+oc hooks list / test / doctor                                   # hook diagnostics
+oc evolution dashboard                                          # skill-evolution + dreaming state
+oc evolution-tuning status / tune / reset                       # auto-tuned thresholds
+oc model picker                                                 # provider/model switcher
+oc auth login/logout                                            # provider tokens
+oc worktrees / checkpoints                                      # checkpoint hygiene + GC
+oc pin / unpin                                                  # pin sessions to top of MRU
+```
 
-### Current stance — v1.0 candidate, dogfood gate next
+### Test / lint
 
-**All v1.0 ship-gate sub-projects are merged on `main`** (tip: `5c62a12`):
+```bash
+pytest tests/                                          # ~15k tests, ~1,200 test files
+pytest tests/test_workspace_discovery.py -v            # one file
+ruff check opencomputer/ plugin_sdk/ extensions/ tests/
+```
 
-- Sub-project A — Honcho-as-default memory ✅ (PR #20)
-- Sub-project B — `opencomputer plugin new` scaffolder ✅ (PR #21)
-- Sub-project C — Profile parity with Hermes ✅ (PR #24)
-- Sub-project D — Coding-harness completeness ✅ (PRs #22, #23, #27)
-- Sub-project E — Demand-driven plugin activation ✅ (PR #26)
+Always run the FULL suite before pushing — per-feature passes have hidden snapshot / runtime regressions in the past.
 
-Next concrete action: tag v1.0 + PyPI release (see `RELEASE.md`).
+### Cut a release
 
-### 🛑 Dogfood gate — 2 weeks before v1.1 scope
-
-Before expanding beyond v1.0, use OpenComputer daily for 2 weeks. Feature priorities must come from actual usage gaps, not guesses. This gate is load-bearing — don't skip.
-
-### Immediately actionable (Tier 1)
-
-- **Tag v1.0 + PyPI release** (~1 hr; runbook in `RELEASE.md`; human-attended — PyPI publish uses OIDC tied to maintainer's GitHub identity, requires explicit sign-off).
-- **Phase 10d — publish example third-party plugin repo to PyPI** (1-2 days). Now unblocked by Sub-project B — the scaffolder is what the example would demonstrate end-to-end.
-
-### Dogfood-gated (Tier 2 — park until real demand signals)
-
-- **Phase 12m — MCP install-from-catalog + reconnect/health.** (Renamed from the older "Phase 12b" label to avoid collision with the `phase-12b*` branch-naming convention used for Sub-project D work, which is distinct and already merged.)
-- Phase 12c.1 — first 5 channel adapters (Slack, Matrix, Email, Webhook, OpenAI-compat API).
-- Phase 12c.2–4 — 15 more channel adapters.
-- Phase 12d.3–6 — memory-vector, memory-wiki, local-providers, media-tools plugin ports.
-- Phase 12e — coding-harness dedup audit.
-- Phase 14.F/G/H/K — per-profile credential isolation, templates, sharing, profile-aware MCP.
-- Phase 15.A — `opencomputer session resume` CLI wiring. Checkpoint table shipped; CLI surface pending.
-
-### Parked by design (Tier 3 — big scope, don't start without explicit go-ahead)
-
-- **Sub-project F — User Intelligence System.** 10-phase roadmap at `~/.claude/plans/there-are-many-pending-tranquil-fern.md` (F1 consent layer → F10 plural-representation ensemble). Explicitly parked until post-v1.0.
+See `RELEASE.md`. Bump version in two places, tag `vX.Y.Z`, push. CI handles PyPI via OIDC.
 
 ---
 
-### Non-obvious infra notes (add to your mental model)
+## 6. Plugin / hook reference
 
-**Plugin registration is Python-declarative, not YAML-based.** There are no `manifest.yaml` or `manifest.toml` files in `extensions/`. Each plugin's metadata (name, description, kind, tool set) is declared via a `register(api)` function in its `plugin.py`, typically constructing a `PluginManifest` from `plugin_sdk`. Don't hunt for YAML manifests — they don't exist.
+Load-bearing for anyone touching `extensions/` or writing hooks.
 
-**Manifest schema v4 fields (Sub-project G openclaw-parity, 2026-05-03):**
+**Plugin registration is Python-declarative, not YAML.** No `manifest.yaml` / `manifest.toml`. Each plugin has a `plugin.py` with `register(api)` that constructs a `PluginManifest` from `plugin_sdk`. Some plugins also ship a `plugin.json` for cheap two-phase discovery metadata.
 
-- `min_host_version` (string) — minimum `opencomputer.__version__` required; empty = no check. Validated as PEP 440 / semver / calver. Enforced at `loader.load_plugin` BEFORE entry-module import; mismatch → log + skip with `PluginIncompatibleError`. `extensions/anthropic-provider/plugin.json` uses this as the canonical example.
-- `activation` (object) — manifest-declared triggers: `on_providers`, `on_channels`, `on_commands`, `on_tools`, `on_models`. Read by `opencomputer.plugins.activation_planner.plan_activations`. Falls back to legacy `tool_names` inference (Sub-project E, PR #26) when absent. Existing Sub-project E demand-driven path remains unchanged.
-- `setup.providers[].auth_choices` (array) — rich auth UI metadata: per-method `label`, `cli_flag`, `option_key`, `group`, `onboarding_priority`. Falls back to legacy `auth_methods: list[str]` interpretation when empty.
-- `plugin.json` is now JSON5-tolerant (comments, trailing commas) via two-tier parse: `json.loads` first, `json5.loads` only on JSONDecodeError. Plain JSON manifests pay zero overhead.
-- 256KB cap on `plugin.json` size at discovery (`MAX_MANIFEST_BYTES`); pathological files skipped with a warning.
-- New: `opencomputer plugin inspect <id>` — compares manifest claims to actual `LoadedPlugin.registrations` post-load. Status `valid` / `drift`.
-- New: `plugin_sdk.SecretRef` + `SecretResolver` — typed wire primitive whose `model_dump()` never includes the value. Adoption is opportunistic (new wire methods only).
-- New: `opencomputer.gateway.error_codes.ErrorCode` (StrEnum) + `WireResponse.code: str | None` — typed error categories that wire clients can match on. Old clients ignore.
-- New: `tests/test_plugin_extension_boundary.py` — frozen-inventory test that fails on any NEW `from opencomputer.*` import inside `extensions/*.py`. Existing 26 violators frozen at `tests/fixtures/plugin_extension_import_boundary_inventory.json`. Cleanup is a per-extension follow-up.
+**Manifest schema v4 (optional fields; v3 manifests parse unchanged):**
 
-All v4 fields are optional; v3 manifests parse unchanged.
+- `min_host_version` — PEP 440 / semver / calver; enforced BEFORE entry-module import. Mismatch → `PluginIncompatibleError` + skip.
+- `activation` — manifest-declared triggers: `on_providers`, `on_channels`, `on_commands`, `on_tools`, `on_models`. Falls back to legacy `tool_names` inference.
+- `setup.providers[].auth_choices` — per-method `label`, `cli_flag`, `option_key`, `group`, `onboarding_priority`.
+- `plugin.json` is JSON5-tolerant via two-tier parse (`json.loads` → `json5.loads` only on decode error). 256KB cap; pathological files skipped with WARN.
+- `plugin_sdk.SecretRef` + `SecretResolver` — typed wire primitive whose `model_dump()` never includes the value.
+- `ErrorCode` + `WireResponse.code` — typed wire-error categories.
 
-**Schema-name uniqueness is the collision guard for tool names.** If two plugins register tools with the same `schema().name`, `ToolRegistry` raises `ValueError` at load. Tool names are PascalCase by convention (Edit, MultiEdit, Read, TodoWrite, etc.) — the SDK boundary test keeps this honest.
+**Tool-name collisions** caught at registry load (`ToolRegistry` raises `ValueError`). Names are PascalCase (Edit, MultiEdit, Read, TodoWrite, …).
 
-**Settings-based hooks — declare shell hooks without writing a plugin (III.6).** The top-level `hooks:` key in `~/.opencomputer/<profile>/config.yaml` accepts the same event-keyed shape Claude Code uses in `.claude/settings.json`:
+**Settings-based hooks** — declare shell hooks without writing a plugin via `hooks:` in `<profile>/config.yaml`:
 
 ```yaml
 hooks:
@@ -551,137 +285,73 @@ hooks:
     - command: "bash /path/to/cleanup.sh"
 ```
 
-**Wire protocol** (augmented 2026-05-08 — Hermes Doc-2 G3/G4):
+**Hook wire protocol:**
+- **stdout JSON** (preferred): `{"action": "block", "message": "..."}` or `{"decision": "block", "reason": "..."}` → block. `{"action": "approve"|"allow"}` → pass. `{"context": "..."}` on PRE_LLM_CALL appends to user message. Malformed JSON → fall back to exit-code path.
+- **Exit code** (fallback): `0` → pass, `2` → block with stderr, anything else → fail-open warn+pass.
+- **Timeouts / crashes** — fail-open. A wedged hook must never wedge the loop.
 
-* **stdout JSON (preferred)** — when the script's stdout parses as a JSON object, recognised keys take precedence over the exit code:
-  - `{"action": "block", "message": "..."}` → block (Hermes canonical)
-  - `{"decision": "block", "reason": "..."}` → block (Claude Code)
-  - `{"action": "approve" \| "allow"}` or `{"decision": "approve"}` → pass
-  - `{"context": "..."}` → on PRE_LLM_CALL only, append text to user message; ignored on other events
-  - `{}` or unrecognised keys → pass
-  - malformed JSON → fall back to exit-code path
-* **Exit-code (fallback)** — when stdout is empty or non-JSON: `0` → pass, `2` → block with stderr as reason, anything else → fail-open warn+pass.
-* **Timeouts and crashes** — fail-open. A wedged hook must never wedge the loop.
+Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_ID`, `OPENCOMPUTER_PROFILE_HOME`, plus `CLAUDE_PLUGIN_ROOT` aliased to profile home so Claude Code hook scripts drop in unchanged.
 
-Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_ID`, `OPENCOMPUTER_PROFILE_HOME`, plus `CLAUDE_PLUGIN_ROOT` aliased to profile home so Claude Code hook scripts drop in unchanged. A JSON blob carrying the `HookContext` is piped to the command's stdin. See `sources/claude-code/plugins/plugin-dev/skills/hook-development/SKILL.md` for the inspiration; settings-declared hooks coexist with (and fire AFTER) plugin-declared ones.
-
-**`oc hooks` CLI** (2026-05-08 — Hermes Doc-2 G1/G2): `oc hooks list` shows registration + last-fire metadata, `oc hooks test EVENT --execute [--for-tool NAME]` actually fires synthetic events through the engine (not just dry-run), `oc hooks doctor [--json]` surfaces health diagnostics for gateway file-discovery hooks (HOOK.yaml validity, handler import) plus settings-hook executable resolution plus recent fire activity.
-
-**Bundled settings variants (III.3).** Three starter `config.yaml` templates live under `opencomputer/settings_variants/` — `lax.yaml` (permissive dev posture, no hooks), `strict.yaml` (tightened loop budget + PreToolUse audit hook), and `sandbox.yaml` (placeholder Bash-sandbox hook; full wrapper lands with F3). Mirrors Claude Code's `sources/claude-code/examples/settings/README.md` examples. Discover and initialize from the CLI:
-
-```bash
-opencomputer config variants                           # list the three variants + descriptions
-opencomputer config init --variant strict              # copy strict.yaml → ~/.opencomputer/<profile>/config.yaml
-opencomputer config init --variant lax --force         # overwrite an existing config.yaml
-```
-
-The init command verifies the copied file re-parses via `load_config()` before confirming success; a bad variant rolls back (or restores the previous file on `--force`) so the user never ends up with a half-written `config.yaml`. Variants are starting points — edit the copied file freely after init; they integrate with the III.6 settings-hooks surface above.
-
----
-
-## 6. How to run / develop / test
-
-### Local setup
-
-```bash
-cd /Users/saksham/Vscode/claude/OpenComputer
-source .venv/bin/activate   # venv uses Python 3.13 (anaconda)
-```
-
-### Run the CLI
-
-```bash
-# Prereqs — one of:
-export ANTHROPIC_API_KEY=sk-ant-...              # native Anthropic
-# OR
-export ANTHROPIC_BASE_URL=https://claude-router.vercel.app
-export ANTHROPIC_AUTH_MODE=bearer
-export ANTHROPIC_API_KEY=<router-proxy-key>      # proxy mode
-# OR
-export OPENAI_API_KEY=sk-...                     # OpenAI
-
-opencomputer               # chat
-opencomputer --plan        # plan mode (Edit/Write/Bash refused)
-opencomputer gateway       # daemon for Telegram/Discord
-opencomputer wire          # WebSocket API at ws://127.0.0.1:18789
-opencomputer plugins       # list 7 installed plugins
-opencomputer skills        # list skills
-opencomputer doctor        # health check (multi-layer)
-opencomputer config show   # dump config
-
-# Memory subcommands (`opencomputer memory --help` for the full set)
-opencomputer memory audit            # per-paragraph inspection of MEMORY.md (PR #588)
-opencomputer memory audit --user     # same for USER.md
-opencomputer memory audit --all      # both files
-opencomputer memory audit --interactive  # walk + prompt keep/delete/replace/skip
-opencomputer memory show [--user]    # cat the file
-opencomputer memory edit [--user]    # open in $EDITOR
-opencomputer memory prune [--user]   # clear file (.bak preserved)
-```
-
-### Test / lint
-
-```bash
-pytest tests/                                          # all ~600 tests
-pytest tests/test_phase6b.py -v                        # one file
-ruff check opencomputer/ plugin_sdk/ extensions/ tests/  # lint
-```
-
-### Cut a release (when ready)
-
-See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. CI handles PyPI.
+**Bundled settings variants:** `lax.yaml`, `strict.yaml`, `sandbox.yaml` under `opencomputer/settings_variants/`. Bootstrap via `oc config init --variant <name>` — the init verifies the copy re-parses before confirming.
 
 ---
 
 ## 7. Non-obvious gotchas (burned-in lessons)
 
-1. **Plugin module-cache collisions.** When multiple plugins share sibling file names (`plugin.py`, `provider.py`), Python's `sys.modules` returns the first-loaded one for all imports. `plugins/loader.py` solves this: synthetic unique module names via `importlib.util.spec_from_file_location` + `_clear_plugin_local_cache()` between plugin loads. Tests use the same pattern (`importlib.util.spec_from_file_location` with unique names).
+1. **Plugin module-cache collisions.** When multiple plugins share sibling file names (`plugin.py`, `provider.py`), Python's `sys.modules` returns the first-loaded one for all imports. `plugins/loader.py` uses synthetic unique module names via `importlib.util.spec_from_file_location` + `_clear_plugin_local_cache()` between loads.
 
-2. **Claude Router proxy rejects x-api-key.** Some Anthropic proxies forward `x-api-key` unchanged to upstream Anthropic, which then rejects the proxy_key. `extensions/anthropic-provider/provider.py` supports `ANTHROPIC_AUTH_MODE=bearer` which uses `Authorization: Bearer` AND strips `x-api-key` via an httpx event hook before the request goes out.
+2. **Claude Router proxy rejects x-api-key.** Some Anthropic proxies forward `x-api-key` unchanged to upstream Anthropic, which then rejects the proxy_key. `extensions/anthropic-provider/provider.py` supports `ANTHROPIC_AUTH_MODE=bearer` — uses `Authorization: Bearer` AND strips `x-api-key` via an httpx event hook before send.
 
-3. **Compaction MUST preserve `tool_use`/`tool_result` pairs atomically.** Splitting them causes Anthropic's API to 400. `CompactionEngine._safe_split_index` walks back from the naive split point until it lands outside of any `tool_use`/`tool_result` pair.
+3. **Compaction MUST preserve `tool_use`/`tool_result` pairs atomically.** Splitting them causes Anthropic's API to 400. `CompactionEngine._safe_split_index` walks back from the naive split until outside any pair.
 
-4. **`DelegateTool._factory` needs `staticmethod` wrap.** Lambdas stored as class attributes get bound to `self` when accessed via instances. `set_factory` uses `cls._factory = staticmethod(factory)` to prevent this.
+4. **`DelegateTool._factory` needs `staticmethod` wrap.** Lambdas stored as class attributes get bound to `self` when accessed via instances. `set_factory` uses `cls._factory = staticmethod(factory)`.
 
 5. **asyncio subprocesses can't cross event loops.** A process started in one `asyncio.run()` can't be awaited in another. Background-process tests must do spawn + check + kill in one `asyncio.run()` call.
 
-6. **The plugin SDK boundary is enforced by a test.** `tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer` scans `plugin_sdk/*.py` for `from opencomputer` imports and fails if any exist. Do not bypass this — it's how the contract stays honest.
+6. **The plugin SDK boundary is test-enforced.** `tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer` asserts `plugin_sdk/` has no `from opencomputer` imports. `tests/test_plugin_extension_boundary.py` freezes the inventory of existing `extensions/*.py → opencomputer.*` violations (35 files at last count, see `tests/fixtures/plugin_extension_import_boundary_inventory.json`); any NEW violator or stale entry fails CI. Refresh inventory only as last resort via `scripts/refresh_extension_boundary_inventory.py`.
 
-7. **HookContext.runtime is optional for backwards compat.** Hooks written before Phase 6a don't pass it. New hooks should read modes through `effective_permission_mode(ctx.runtime)` (exported from `plugin_sdk`) rather than `ctx.runtime.plan_mode` / `ctx.runtime.yolo_mode` directly — the helper accounts for slash-command toggles living in `runtime.custom`.
+7. **HookContext.runtime is optional for backwards compat.** New hooks should read modes through `effective_permission_mode(ctx.runtime)` rather than `ctx.runtime.plan_mode` / `ctx.runtime.yolo_mode` directly — the helper accounts for slash-command toggles in `runtime.custom`.
 
-8. **Typer auto-promotes single-command apps.** A `typer.Typer(name="X")` with exactly one `@app.command(...)` collapses to a no-subcommand CLI, so `runner.invoke(app, ["show", arg])` misparses (the literal `"show"` becomes the first arg). Always register a second command — even a useful listing surface — to suppress the auto-promote. See `opencomputer/cli_context.py` (`show` + `list`) for the pattern.
+8. **Typer auto-promotes single-command apps.** A `typer.Typer(name="X")` with exactly one `@app.command(...)` collapses to a no-subcommand CLI. Always register a second command. See `cli_context.py` (`show` + `list`).
 
-9. **`AgentLoop._runtime` is aliased to the module-shared `DEFAULT_RUNTIME_CONTEXT` at `__init__` time.** Writes to `_runtime.custom` from methods called BEFORE `run_conversation` therefore leak across `AgentLoop` instances in the same process (most visible in tests). `run_conversation` rebinds `_runtime` per call so production paths are fine, but unit tests that exercise loop helpers directly must re-bind: `loop._runtime = RuntimeContext()`. See `tests/test_loop_compaction_increments_counter.py::_fresh_loop` for the pattern.
+9. **`AgentLoop._runtime` aliases the module-shared `DEFAULT_RUNTIME_CONTEXT` at `__init__` time.** Writes from methods called BEFORE `run_conversation` leak across instances in the same process (test pain). `run_conversation` rebinds per call so production paths are fine; unit tests must rebind: `loop._runtime = RuntimeContext()`.
 
-10. **Counter telemetry must never break the loop.** Anything bumping a per-session counter (compactions, future events) follows the three-tier swallow: `SessionDB.<method>` catches `sqlite3.Error` + returns sentinel; the `AgentLoop` helper catches any broad exception + logs WARNING; the slash / CLI renderer falls back to empty-state. A wedged counter must never wedge the agent. See `_record_compaction` for the canonical pattern.
+10. **Counter telemetry must never break the loop.** Anything bumping a per-session counter follows three-tier swallow: `SessionDB.<method>` catches `sqlite3.Error` + returns sentinel; the `AgentLoop` helper catches broad exception + logs WARNING; the slash/CLI renderer falls back to empty-state.
+
+11. **Editable install + worktrees / merges.** After `git worktree add` OR any merge, run `pip install -e . --no-cache-dir --no-deps` + `hash -r`. The `oc` shim goes stale otherwise. `source ~/.zshrc` does NOT refresh the exec cache.
+
+12. **`enable_probe=False` is load-bearing on hot paths.** Compaction / context-window probes hit the network and `~/.opencomputer/<profile>/.context_window_cache.json`. Callers that render in tight loops MUST pass `enable_probe=False` to get static defaults. Active branch is fixing leaks of probe-on through call chains that should be probe-off.
+
+13. **Silent `except: log.debug(...)` hides feature breakage.** Recently audited across `opencomputer/webui/` shims (9 swallow sites → WARN). Pattern reviewer: any generic `except` in a try/except should log at WARN minimum and assert the expected side effect fired, not just absence of exception.
+
+14. **Parallel sessions, one worktree = catastrophe.** Two Claude sessions touching the same checkout race git index + venv state. Use `git worktree add` per session; never share a tree. If you see "[gone]" branches, the `/clean_gone` slash command (from the `commit-commands` plugin) prunes them safely.
 
 ---
 
 ## 8. User preferences (learned across this project)
 
-- **Action over confirmation.** Saksham asks Claude to just do things. Don't ask "should I...?" — do what can be done, then report.
+- **Action over confirmation.** Just do things. Don't ask "should I…?" — do what can be done, then report.
 - **Per-phase workflow is a hard rule:** after each phase, review → `git push` → next phase. Never chain phases without the commit boundary.
 - **Concise communication.** Short responses. Direct. Don't pad.
-- **Stock market data must be live.** Not relevant to OpenComputer, but if stocks come up in a future session: use MCP servers (investor-agent, stockflow) + fresh web search. Never stale cached data.
-- **Plugins + skills + MCPs should be checked before answering.** If a relevant tool exists, use it rather than guessing.
+- **Production-grade, never MVP.** Every feature ships end-to-end. No "minimal scaffolding" promises that defer the actual surface.
+- **Brutal self-audit on declaring done.** When asked "are you sure?" or "be brutal", walk the spec line-by-line, run the full suite, verify side effects on disk. Frame skips honestly ("deferred" vs "transitively covered" vs "not required").
+- **Plugins + skills + MCPs FIRST.** If a relevant tool exists, use it rather than guessing or coding from scratch.
 
 ---
 
 ## 9. If you need to dig deeper
 
-- **Active plan (2026-04-23 onward):** `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` — current sub-projects A/B/C/D.
-- **Superseded historical plans (kept for context):**
-  - `~/.claude/plans/delightful-sauteeing-sutherland.md` — original master roadmap (Phase 0 through Phase 13). Superseded 2026-04-23.
-  - `~/.claude/plans/phase-12-ultraplan-spec.md` — Phase 12 detail spec. Superseded 2026-04-23.
-- **Reference implementations cloned locally at `../sources/`:**
-  - `/Users/saksham/Vscode/claude/sources/claude-code/` (plugin shapes)
-  - `/Users/saksham/Vscode/claude/sources/hermes-agent/` (Python patterns, loop, channels)
-  - `/Users/saksham/Vscode/claude/sources/openclaw/` (plugin SDK boundary, discovery)
-  - `/Users/saksham/Vscode/claude/sources/kimi-cli/` (dynamic injection, compaction, wire)
-- **Per-repo extraction notes:** `OpenComputer/docs/refs/<repo-name>/` — take notes
-  about each reference project here as you study it.
-- **Storage map (every SQLite DB, table, owner module):** `OpenComputer/docs/databases.md` — single canonical reference for `sessions.db` + 7 sub-DBs.
-- **GitHub:** https://github.com/sakshamzip2-sys/opencomputer
+**Auto-memory ship history:** `~/.claude/projects/-Users-saksham-Vscode-claude/memory/MEMORY.md` — every shipped feature, PR#, date, condensed scope.
 
----
+**docs/ tree** (curated by topic):
 
+- Architecture & contracts: `sdk-reference.md`, `memory-architecture.md`, `context-window-deep-dive.md`, `databases.md`, `acp.md`, `channels-ownership.md`
+- Parity & audits: `OC-FROM-OPENCLAW.md`, `openclaw-parity-2026-05-10.md`, `coding-harness-audit.md`
+- Operations: `security-production.md`, `parallel-sessions.md`, `local-models.md`, `mcp-catalog.md`, `memory_dreaming.md`
+- Sub-trees: `cli/` (worktrees, files, checkpoints), `runbooks/`, `deployment/` (raspberry-pi, systemd), `providers/`, `integrations/`, `evolution/`, `plugin-authors.md`
+- Active specs: `superpowers/specs/` — design docs for in-flight or recent work
+- Plans: `docs/plans/` (project-level) + `~/.claude/plans/` (cross-project)
+
+**Reference implementations** cloned at `../sources/`: `claude-code/`, `hermes-agent/`, `openclaw/`, `kimi-cli/`, `hermes-workspace/`. Extraction notes in `docs/refs/<repo-name>/`.
+
+**GitHub:** https://github.com/sakshamzip2-sys/opencomputer
