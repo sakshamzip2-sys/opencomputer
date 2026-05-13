@@ -35,6 +35,7 @@ from opencomputer.gateway.protocol import (
     EVENT_EVOLUTION_TUNING_CHANGED,
     EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
+    EVENT_PROFILE_SWAP,
     EVENT_STREAM_RETRY,
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
@@ -152,6 +153,10 @@ class WireServer:
         # as memory_write_subscription; unsubscribed on stop() to avoid
         # leaks across test/server lifecycles.
         self._evolution_tuning_subscription: Any | None = None
+        # 2026-05-13 — profile-swap bus → wire bridge. Surfaces
+        # ProfileSwapEvent globally so workspace SPA / TUI / IDE clients
+        # render a swap notification without polling.
+        self._profile_swap_subscription: Any | None = None
 
     async def start(self) -> None:
         self._server = await websockets.serve(
@@ -190,6 +195,20 @@ class WireServer:
                 "evolution.tuning_changed; dashboards won't receive tuning events"
             )
 
+        # 2026-05-13 — profile-swap bus → wire bridge.
+        try:
+            from opencomputer.ingestion.bus import default_bus as _bus_ps
+
+            self._profile_swap_subscription = _bus_ps.subscribe(
+                "profile_swap",
+                self._on_profile_swap_bus_event,
+            )
+        except Exception:
+            logger.exception(
+                "wire: failed to subscribe to default_bus for "
+                "profile.swap; workspace/TUI won't receive swap events"
+            )
+
         logger.info("wire: listening on ws://%s:%s", self.host, self.port)
 
     async def stop(self) -> None:
@@ -209,6 +228,14 @@ class WireServer:
                     "wire: evolution_tuning unsubscribe failed (ignored)"
                 )
             self._evolution_tuning_subscription = None
+        if self._profile_swap_subscription is not None:
+            try:
+                self._profile_swap_subscription.unsubscribe()
+            except Exception:
+                logger.exception(
+                    "wire: profile_swap unsubscribe failed (ignored)"
+                )
+            self._profile_swap_subscription = None
         self._loop_ref = None
         if self._server is not None:
             self._server.close()
@@ -808,6 +835,62 @@ class WireServer:
         except Exception:  # noqa: BLE001
             logger.exception(
                 "wire bridge: failed to forward evolution.tuning_changed event"
+            )
+
+    # ─── 2026-05-13 bus→wire bridge (profile.swap) ─────────────────
+
+    def _on_profile_swap_bus_event(self, event: Any) -> None:
+        """Sync bus handler — schedule a profile-swap broadcast.
+
+        Same shape as :meth:`_on_memory_write_bus_event`: builds a
+        typed payload on the publisher thread, hops onto the
+        wire-server loop via ``run_coroutine_threadsafe`` for per-client
+        fanout. Failure-isolated; a wedged WS client must not block the
+        orchestrator's swap path.
+
+        Carries enough context for a workspace SPA / TUI / IDE to
+        render ``"↪ from_profile → to_profile (handoff)"`` and refresh
+        profile-bound state (memory panel, plugin list, MCP catalog).
+        """
+        loop = self._loop_ref
+        if loop is None or loop.is_closed():
+            return
+        try:
+            payload = {
+                "from_profile": getattr(event, "from_profile", "") or "",
+                "to_profile": getattr(event, "to_profile", "") or "",
+                "trigger": getattr(event, "trigger", "") or "auto",
+                "classifier_confidence": float(
+                    getattr(event, "classifier_confidence", 0.0) or 0.0,
+                ),
+                "classifier_reason": (
+                    getattr(event, "classifier_reason", "") or ""
+                )[:200],
+                "has_handoff": bool(
+                    getattr(event, "has_handoff", False),
+                ),
+            }
+            if os.environ.get("OPENCOMPUTER_WIRE_DEBUG_EVENTS") == "1":
+                logger.debug(
+                    "wire bridge: broadcasting profile.swap %s->%s "
+                    "trigger=%s handoff=%s clients=%d",
+                    payload["from_profile"],
+                    payload["to_profile"],
+                    payload["trigger"],
+                    payload["has_handoff"],
+                    len(self._session_clients_all),
+                )
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_global(EVENT_PROFILE_SWAP, payload),
+                loop,
+            )
+        except RuntimeError:
+            logger.debug(
+                "wire bridge: loop closed before profile.swap broadcast"
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "wire bridge: failed to forward profile.swap event"
             )
 
     @staticmethod

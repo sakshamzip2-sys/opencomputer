@@ -598,6 +598,46 @@ def _maybe_run_auto_prune(db: SessionDB, cfg: Config) -> None:
         print(f"[oc] auto-pruned {deleted} stale session(s)", file=_sys.stderr)
 
 
+def _resolve_handoff_audit_key() -> bytes | None:
+    """Fetch / lazily-create the HMAC key for the swap audit chain.
+
+    Reuses the consent system's keyring entry under
+    ``service='opencomputer-consent'``, key ``'hmac-chain'`` — handoff
+    swap rows are appended to the SAME ``audit_log`` chain as consent
+    grants, so they must hash with the same key for ``verify_chain()``
+    to keep validating.
+
+    Returns ``None`` on keyring failure with no file fallback path
+    available — auditing is disabled but the swap continues.
+    """
+    try:
+        from opencomputer.agent.config import _home
+        from opencomputer.agent.consent.keyring_adapter import KeyringAdapter
+
+        home = _home()
+        home.mkdir(parents=True, exist_ok=True)
+        kr = KeyringAdapter(
+            service="opencomputer-consent", fallback_dir=home,
+        )
+        key_hex = kr.get("hmac-chain")
+        if key_hex is None:
+            import os as _os
+            key_bytes = _os.urandom(32)
+            try:
+                kr.set("hmac-chain", key_bytes.hex())
+            except Exception:  # noqa: BLE001 — fallback is in-memory only
+                _log.debug(
+                    "keyring set failed; handoff audit key is in-memory only",
+                )
+            return key_bytes
+        return bytes.fromhex(key_hex)
+    except Exception:  # noqa: BLE001 — defensive
+        _log.debug(
+            "handoff audit key resolution failed", exc_info=True,
+        )
+        return None
+
+
 def _apply_pending_profile_swap(
     runtime: object,
     *,
@@ -1508,6 +1548,20 @@ class AgentLoop:
                     input_tokens=0,
                     output_tokens=0,
                 )
+
+        # 2026-05-13 — Profile handoff auto-swap pipeline. Runs BEFORE
+        # _apply_pending_profile_swap so a FIRED decision queues the
+        # pending swap that _apply_pending consumes on this same turn.
+        # All failures are caught at the pipeline layer; never blocks
+        # the turn. Applies to ALL surfaces (CLI, webui, workspace,
+        # wire clients, gateway adapters) via the shared AgentLoop.
+        try:
+            await self._run_handoff_auto_swap(sid=sid, messages=messages)
+        except Exception:  # noqa: BLE001 — never wedge a turn on handoff
+            _log.warning(
+                "handoff auto-swap pipeline raised; turn continues",
+                exc_info=True,
+            )
 
         # Plan 1 of 3 — UI port: apply queued profile swap (Ctrl+P or
         # /persona slash command). Idempotent on no-pending.
@@ -4033,6 +4087,177 @@ class AgentLoop:
             return tuple(hits)
         except Exception:  # noqa: BLE001
             return ()
+
+    # ─── handoff auto-swap pipeline (2026-05-13) ─────────────────────
+
+    async def _run_handoff_auto_swap(
+        self, *, sid: str, messages: list,
+    ) -> None:
+        """Per-turn classifier-driven swap eval. Best-effort; never raises.
+
+        Wires the agent loop into
+        :func:`opencomputer.agent.handoff.run_auto_swap_pipeline`. On a
+        FIRED decision the pipeline generates the handoff, writes it to
+        the target profile's inbox, and queues ``pending_profile_id`` so
+        the immediately-following :func:`_apply_pending_profile_swap`
+        consumes it. Applies uniformly across CLI / webui / workspace /
+        gateway / wire surfaces — the same AgentLoop drives all of them.
+
+        Disabled by ``config.auto_swap_handoff == "off"`` or when no
+        target profile exists. Gateway sessions are disabled unless the
+        channel adapter exposes ``auto_swap_enabled = True``.
+        """
+        if not sid:
+            return
+        # Lazy import — keep loop module import-graph small in tests
+        # that monkey-patch out the loop without needing handoff plumbing.
+        from opencomputer.agent.handoff import (
+            AutoSwapTrigger,
+            HandoffAuditLogger,
+            ProviderAdapter,
+            run_auto_swap_pipeline,
+        )
+        from opencomputer.profiles import (
+            get_profile_dir,
+            list_profiles,
+            read_active_profile,
+        )
+
+        # Tunables — read directly from config so an operator can flip
+        # without redeploying. ``auto_swap_handoff`` of "off" disables
+        # entirely; "silent" is the default rollout shape.
+        auto_setting = getattr(self.config, "auto_swap_handoff", "silent")
+        auto_off = auto_setting == "off"
+
+        current = (
+            self._runtime.custom.get("active_profile_id")
+            or read_active_profile()
+            or "default"
+        )
+
+        try:
+            available = tuple(sorted(list_profiles()))
+        except Exception:  # noqa: BLE001 — defensive
+            available = ()
+
+        # Plan-mode gate uses the canonical helper so slash-command
+        # toggles in runtime.custom are honored.
+        try:
+            from plugin_sdk import PermissionMode, effective_permission_mode
+            plan_mode = effective_permission_mode(self._runtime) == PermissionMode.PLAN
+        except Exception:  # noqa: BLE001 — defensive
+            plan_mode = bool(self._runtime.custom.get("plan_mode"))
+
+        # Gateway opt-in: the runtime carries a channel marker on
+        # gateway-bound sessions. CLI / webui / workspace / wire are
+        # NOT gateway sessions.
+        is_gateway = bool(self._runtime.custom.get("_is_gateway_session"))
+        gateway_optin = bool(
+            self._runtime.custom.get("_channel_auto_swap_enabled")
+        )
+
+        # Build / cache the per-loop trigger + audit logger.
+        trigger = getattr(self, "_handoff_trigger", None)
+        if trigger is None:
+            trigger = AutoSwapTrigger()
+            self._handoff_trigger = trigger  # type: ignore[attr-defined]
+
+        # Rebind audit logger when the active profile changes — the
+        # ``audit_log`` table lives in each profile's
+        # ``<profile>/consent/audit.db`` so a logger bound to the OLD
+        # profile would write swap rows to the wrong DB after a
+        # mid-session swap. Re-init detection: store the profile the
+        # cached logger was bound to and compare on every turn.
+        cached_logger: HandoffAuditLogger | None = getattr(
+            self, "_handoff_audit_logger", None,
+        )
+        cached_profile: str = getattr(
+            self, "_handoff_audit_logger_profile", "",
+        )
+        if cached_logger is None or cached_profile != current:
+            # Close the prior logger to release its sqlite handle before
+            # rebinding. Best-effort — a close failure on the old DB
+            # must not block the swap on the new one.
+            if cached_logger is not None:
+                try:
+                    cached_logger.close()
+                except Exception:  # noqa: BLE001
+                    _log.debug(
+                        "prior audit logger close raised", exc_info=True,
+                    )
+            audit_logger = self._init_handoff_audit_logger(current)
+            self._handoff_audit_logger = audit_logger  # type: ignore[attr-defined]
+            self._handoff_audit_logger_profile = current  # type: ignore[attr-defined]
+        else:
+            audit_logger = cached_logger
+
+        # Last 3 user messages for the classifier; reuse the existing
+        # helper that the persona-uplift path also uses, so we don't
+        # diverge on classification windowing.
+        last_user = self._recent_user_messages(sid, messages=messages)
+
+        # Provider adapter — wrap the active provider once per loop.
+        adapter = getattr(self, "_handoff_provider_adapter", None)
+        if adapter is None or getattr(adapter, "provider", None) is not self.provider:
+            adapter = ProviderAdapter(
+                provider=self.provider,
+                model_id=getattr(self.provider, "model", "") or "",
+            )
+            self._handoff_provider_adapter = adapter  # type: ignore[attr-defined]
+
+        # Make the adapter + recent messages available to /handoff slash.
+        self._runtime.custom["_handoff_provider_adapter"] = adapter
+        self._runtime.custom["_handoff_recent_messages"] = tuple(messages)
+        self._runtime.custom["session_id"] = sid
+
+        def _resolve_target_home(profile_id: str):  # noqa: ANN202
+            root = get_profile_dir(None if profile_id == "default" else profile_id)
+            from pathlib import Path
+
+            return Path(root) / "home"
+
+        await run_auto_swap_pipeline(
+            trigger=trigger,
+            runtime=self._runtime,
+            session_id=sid,
+            current_profile=current,
+            available_profiles=available,
+            last_user_messages=last_user,
+            recent_messages=messages,
+            plan_mode=plan_mode,
+            auto_off=auto_off,
+            is_gateway_session=is_gateway,
+            gateway_optin=gateway_optin,
+            target_profile_home_resolver=_resolve_target_home,
+            provider_adapter=adapter,
+            audit_logger=audit_logger,
+            foreground_app=self._foreground_app_cache,
+        )
+
+    def _init_handoff_audit_logger(self, profile_id: str):  # noqa: ANN202
+        """Lazy-construct the HMAC-chained audit logger, returning None on
+        keyring/keymat failure. Cached on self after first call."""
+        from pathlib import Path
+
+        from opencomputer.agent.handoff import HandoffAuditLogger
+        from opencomputer.profiles import get_profile_dir
+
+        try:
+            root = get_profile_dir(None if profile_id == "default" else profile_id)
+            db_path = Path(root) / "consent" / "audit.db"
+            key = _resolve_handoff_audit_key()
+            if key is None:
+                _log.debug(
+                    "handoff audit disabled: no HMAC key available",
+                )
+                return None
+            return HandoffAuditLogger(db_path, key)
+        except Exception:  # noqa: BLE001 — observability MUST NOT gate the swap
+            _log.warning(
+                "handoff audit logger init failed; auditing disabled this session",
+                exc_info=True,
+            )
+            return None
 
     # ─── T1 of auto-skill-evolution plan: SessionEndEvent emission ─
 

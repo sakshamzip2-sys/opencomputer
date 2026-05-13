@@ -1620,6 +1620,18 @@ class Dispatch:
         if skill_bodies:
             custom["channel_skill_bodies"] = skill_bodies
         custom["channel_id"] = channel_id
+        # 2026-05-13 — Profile handoff auto-swap gating.
+        # Gateway sessions disable auto-swap by default because channel
+        # identity is part of the user's contract (a Telegram bot
+        # registered as ``@stocks_bot`` should not silently switch to a
+        # different profile mid-conversation). Adapters that DO want
+        # auto-swap (e.g. personal Discord DM bots) set
+        # ``BaseChannelAdapter.auto_swap_enabled = True`` either on the
+        # subclass or per-instance config.
+        custom["_is_gateway_session"] = True
+        custom["_channel_auto_swap_enabled"] = bool(
+            getattr(adapter, "auto_swap_enabled", False),
+        )
         return RuntimeContext(custom=custom)
 
     async def _safe_lifecycle_hook(self, coro) -> None:

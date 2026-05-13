@@ -1707,6 +1707,39 @@ def _run_chat_session(
             "path-glob rules registration failed (suppressed)", exc_info=True
         )
 
+    # 2026-05-13 — profile handoff: register the inbox-injection provider so
+    # any pending handoff in the active profile's ``inbox/`` lands as a
+    # system-prompt section on the next turn. Idempotent. Applies to ALL
+    # surfaces (CLI, webui, workspace, wire clients, gateway adapters) —
+    # the provider keys off the active profile, not the surface.
+    try:
+        from opencomputer.agent.handoff import HandoffInjectionProvider
+
+        def _active_profile_home() -> object:
+            from pathlib import Path
+
+            from opencomputer.profiles import (
+                get_profile_dir,
+                read_active_profile,
+            )
+
+            active = read_active_profile()
+            root = get_profile_dir(active)
+            return Path(root) / "home"
+
+        injection_engine.unregister("handoff_inbox")
+        injection_engine.register(
+            HandoffInjectionProvider(
+                profile_home_resolver=_active_profile_home,
+            ),
+        )
+    except Exception:  # noqa: BLE001 — never break loop boot
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").warning(
+            "handoff inbox injection provider registration failed",
+            exc_info=True,
+        )
+
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
 
     # Kanban-Goals v2 (2026-05-08) — banner callback for the Ralph loop.

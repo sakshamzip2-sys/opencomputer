@@ -119,6 +119,15 @@ EVENT_STREAM_RETRY = "stream.retry"
 # for the next change event. Same shape as the broadcast payload.
 METHOD_EVOLUTION_STATUS = "evolution.status"
 
+# 2026-05-13 — profile handoff swap notification. Broadcast globally so
+# every connected client (CLI TUI, hermes-workspace SPA, IDE bridges)
+# renders a toast/banner when the agent silently swaps profile. Carries
+# enough context for the UI to render "↪ default → stocks (handoff
+# written)" without an extra RPC. Replay is NOT buffered (consistent
+# with EVENT_EVOLUTION_TUNING_CHANGED) — a client reconnecting after the
+# event missed it; clients fetch active profile via existing RPCs.
+EVENT_PROFILE_SWAP = "profile.swap"
+
 
 __all__ = [
     "WireRequest",
@@ -145,4 +154,5 @@ __all__ = [
     "EVENT_MEMORY_WRITE",
     "EVENT_EVOLUTION_TUNING_CHANGED",
     "EVENT_STREAM_RETRY",
+    "EVENT_PROFILE_SWAP",
 ]

@@ -313,6 +313,28 @@ class MemoryWriteEvent(SignalEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileSwapEvent(SignalEvent):
+    """Fires when the agent swaps the active profile.
+
+    Surfaced over the wire as ``profile.swap`` so cross-process UIs
+    (hermes-workspace SPA, TUI, IDE bridges) can render a swap
+    notification without polling. Privacy posture: carries profile
+    *names* but NOT the handoff body — the body lives in the target
+    profile's inbox and is only visible to the model on the next turn.
+
+    2026-05-13 — Profile Handoff design spec.
+    """
+
+    event_type: str = field(default="profile_swap", init=False)
+    from_profile: str = ""
+    to_profile: str = ""
+    trigger: str = ""  # "auto" | "manual" | "cli"
+    classifier_confidence: float = 0.0
+    classifier_reason: str = ""
+    has_handoff: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ForegroundAppEvent(SignalEvent):
     """Foreground app or window-title change observed by ambient-sensors plugin.
 
@@ -545,6 +567,8 @@ __all__ = [
     "PolicyRevertedEvent",
     "DelegationCompleteEvent",
     "MemoryWriteEvent",
+    # 2026-05-13 — Profile Handoff design
+    "ProfileSwapEvent",
     # T1 of ambient foreground sensor plan (2026-04-27)
     "ForegroundAppEvent",
     "AmbientSensorPauseEvent",
