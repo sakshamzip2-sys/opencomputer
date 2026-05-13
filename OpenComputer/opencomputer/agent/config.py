@@ -1705,6 +1705,17 @@ class Config:
     #: string = server-local time (preserves existing behavior).
     #: Validated at ``load_config`` — invalid names raise ``RuntimeError``.
     timezone: str = ""
+    #: 2026-05-13 — Profile handoff auto-swap rollout knob.
+    #: ``"silent"`` (default): the classifier-driven trigger is live; on
+    #: a sustained-confidence persona shift, the agent generates a
+    #: handoff per protocol v2.0, writes it to the target profile's
+    #: ``inbox/``, and swaps profiles on the next turn. CLI / webui /
+    #: workspace / wire surfaces all participate; gateway channels are
+    #: opt-in via their per-channel ``auto_swap_enabled`` flag.
+    #: ``"off"``: classifier still runs (existing persona-uplift), but
+    #: no auto-swap fires. The ``/handoff <target>`` slash command is
+    #: still available for manual swaps with handoff content.
+    auto_swap_handoff: str = "silent"
     home: Path = field(default_factory=_home)
 
 

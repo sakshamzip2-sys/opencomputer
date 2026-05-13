@@ -154,6 +154,16 @@ class BaseChannelAdapter(ABC):
     #: optional methods.
     capabilities: ChannelCapabilities = ChannelCapabilities.NONE
 
+    #: 2026-05-13 — Profile handoff auto-swap opt-in.
+    #: Default ``False`` for gateway channels: a channel that binds a
+    #: profile to a chat (e.g. Telegram ``@stocks_bot``) treats the
+    #: channel identity as part of the user's contract; silently
+    #: switching profiles mid-conversation would surprise users.
+    #: Channels that DO want auto-swap (e.g. a personal Discord DM bot
+    #: where the user is comfortable with profile changes) set this to
+    #: ``True`` in their adapter subclass or per-instance config.
+    auto_swap_enabled: bool = False
+
     #: Substrings (lowercased) used by :meth:`_is_retryable_error` to
     #: classify transient errors. Adapters can extend this tuple with
     #: platform-specific patterns (e.g. Telegram's "Bad Gateway").

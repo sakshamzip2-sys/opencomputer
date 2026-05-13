@@ -47,6 +47,7 @@ from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.footer_cmd import FooterCommand
+from opencomputer.agent.slash_commands_impl.handoff_cmd import HandoffCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
 from opencomputer.agent.slash_commands_impl.mouse_cmd import MouseCommand
@@ -131,6 +132,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-04-30 — profile-suggest analyzes recent persona usage and
     # recommends create/switch actions. User-pull only.
     ProfileSuggestCommand,
+    # 2026-05-13 — /handoff <target> — manual profile swap with handoff
+    # document generated per handoff-protocol v2.0. Same pipeline as the
+    # classifier-driven auto-swap.
+    HandoffCommand,
     # 2026-05-06 — Phase 2 (S1 from OpenClaw deep-comparison) — inbound
     # queue mode override. /queue-mode [followup|interrupt|status].
     QueueModeCommand,

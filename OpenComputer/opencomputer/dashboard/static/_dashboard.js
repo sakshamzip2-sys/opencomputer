@@ -117,7 +117,115 @@
     return { close: () => es.close() };
   }
 
+  // 2026-05-13 — Profile handoff swap toast.
+  // Subscribes to the global SSE event stream and renders an in-DOM toast
+  // when the agent silently swaps the active profile. Idempotent: calling
+  // installProfileSwapToast() more than once is a no-op (guarded by a
+  // module-scoped sentinel). The toast auto-dismisses after 6s.
+  let _profileSwapToastInstalled = false;
+  function installProfileSwapToast() {
+    if (_profileSwapToastInstalled) return;
+    _profileSwapToastInstalled = true;
+
+    // Container is created lazily on first event so pages without
+    // a profile swap never pay the DOM cost.
+    function ensureToastContainer() {
+      let el = document.getElementById('oc-toast-container');
+      if (el) return el;
+      el = document.createElement('div');
+      el.id = 'oc-toast-container';
+      el.style.cssText =
+        'position:fixed;top:16px;right:16px;display:flex;flex-direction:column;' +
+        'gap:8px;z-index:99999;pointer-events:none;max-width:380px;';
+      document.body.appendChild(el);
+      return el;
+    }
+
+    function renderToast(payload) {
+      const container = ensureToastContainer();
+      const toast = document.createElement('div');
+      toast.style.cssText =
+        'background:var(--bg-elev,#1a1a1a);color:var(--fg,#ddd);' +
+        'border:1px solid var(--border,#333);border-left:3px solid var(--accent,#2563eb);' +
+        'border-radius:6px;padding:10px 14px;font-size:13px;font-family:inherit;' +
+        'box-shadow:0 4px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
+        'opacity:0;transform:translateX(20px);transition:all 0.2s ease-out;';
+
+      const fromProfile = String(payload.from_profile || '?');
+      const toProfile = String(payload.to_profile || '?');
+      const trigger = payload.trigger === 'manual' ? 'manual' : 'auto';
+      const hasHandoff = !!payload.has_handoff;
+      const conf = Number(payload.classifier_confidence || 0);
+      const confText = trigger === 'auto' && conf > 0
+        ? ' · ' + (conf * 100).toFixed(0) + '%'
+        : '';
+      const handoffSuffix = hasHandoff ? ' (handoff written)' : '';
+
+      const title = document.createElement('div');
+      title.style.cssText = 'font-weight:600;margin-bottom:2px;';
+      title.textContent = '↪ profile swap';
+
+      const body = document.createElement('div');
+      body.style.cssText = 'color:var(--fg-muted,#999);font-size:12px;';
+      // Use textContent (NOT innerHTML) — payload values come from a
+      // network source and must never be interpolated as HTML.
+      body.textContent =
+        '@' + fromProfile + ' → @' + toProfile +
+        ' [' + trigger + confText + ']' + handoffSuffix;
+
+      toast.appendChild(title);
+      toast.appendChild(body);
+      container.appendChild(toast);
+
+      // Animate in
+      requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateX(0)';
+      });
+
+      // Auto-dismiss after 6s
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(20px)';
+        setTimeout(() => {
+          if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 250);
+      }, 6000);
+    }
+
+    // Subscribe via the existing SSE multiplex; filter for profile_swap.
+    // The /api/v1/events stream uses wildcard subscription so this event
+    // type flows through automatically (test pinned in
+    // test_handoff_cross_surface::test_dashboard_sse_uses_wildcard).
+    subscribeStream(
+      '/api/v1/events?topics=profile_swap',
+      (data) => {
+        try {
+          renderToast(data || {});
+        } catch (err) {
+          console.error('profile-swap toast render failed', err);
+        }
+      },
+      (err) => {
+        // SSE auto-reconnects; log but don't show error UI for transient drops.
+        console.debug('profile-swap SSE error (auto-reconnecting)', err);
+      },
+    );
+  }
+
   window.OCDash = {
     ocGet, ocPost, fmtNum, fmtMs, renderNav, statusPill, subscribeStream,
+    installProfileSwapToast,
   };
+
+  // Auto-install on every page that loads _dashboard.js — opt out by
+  // setting window.__OC_DISABLE_PROFILE_SWAP_TOAST = true BEFORE this
+  // script executes (e.g. in tests).
+  if (!window.__OC_DISABLE_PROFILE_SWAP_TOAST) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', installProfileSwapToast);
+    } else {
+      installProfileSwapToast();
+    }
+  }
 })();

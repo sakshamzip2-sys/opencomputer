@@ -38,6 +38,7 @@ from opencomputer.gateway.protocol import (
     EVENT_EVOLUTION_TUNING_CHANGED,
     EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
+    EVENT_PROFILE_SWAP,
     EVENT_STREAM_RETRY,
     EVENT_TOOL_CALL,
     EVENT_TOOL_RESULT,
@@ -452,6 +453,26 @@ class StreamRetryPayload(_StrictModel):
     exhausted: bool
 
 
+class ProfileSwapPayload(_StrictModel):
+    """Server → client event when the agent swaps the active profile.
+
+    Carries the minimum a client UI needs to render
+    ``"↪ from_profile → to_profile (handoff)"`` and refresh any
+    profile-bound surfaces (memory panel, MCP list, plugin list).
+
+    No ``session_id`` keying — profile is per-process state. The bridge
+    broadcasts globally; clients re-fetch profile-bound state via
+    existing RPCs (``memory.status``, plugin manifests, etc.).
+    """
+
+    from_profile: str
+    to_profile: str
+    trigger: str  # "auto" | "manual" | "cli"
+    classifier_confidence: float = 0.0  # 0 for non-auto triggers
+    classifier_reason: str = ""
+    has_handoff: bool = False  # True if a handoff document was written
+
+
 # Map event name → payload schema.
 EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_TURN_BEGIN: TurnBeginPayload,
@@ -464,6 +485,7 @@ EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_MEMORY_WRITE: MemoryWritePayload,
     EVENT_EVOLUTION_TUNING_CHANGED: EvolutionTuningChangedPayload,
     EVENT_STREAM_RETRY: StreamRetryPayload,
+    EVENT_PROFILE_SWAP: ProfileSwapPayload,
 }
 
 
@@ -498,6 +520,8 @@ __all__ = [
     "EVENT_MEMORY_WRITE",
     "EVENT_EVOLUTION_TUNING_CHANGED",
     "EVENT_STREAM_RETRY",
+    "EVENT_PROFILE_SWAP",
+    "ProfileSwapPayload",
     # v2 method schemas
     "HelloParams",
     "HelloResult",
