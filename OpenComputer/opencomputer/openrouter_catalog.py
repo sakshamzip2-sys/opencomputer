@@ -8,7 +8,6 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
 OPENROUTER_MODEL_IDS: list[str] = [
     "moonshotai/kimi-k2.6",
     "anthropic/claude-opus-4.7",
