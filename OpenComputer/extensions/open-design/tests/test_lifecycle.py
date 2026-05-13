@@ -338,3 +338,97 @@ def test_log_rotation_no_op_when_log_missing(lifecycle) -> None:
         log.unlink()
     lifecycle._rotate_log_if_needed()
     assert not log.with_suffix(".log.1").exists()
+
+
+# ── Doctor contributions ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def doctor_module():
+    """Load doctor.py via spec_from_file_location to avoid sys.modules
+    collisions with the same name in other plugins.
+
+    doctor.py does ``from lifecycle import …`` which needs the plugin
+    root on sys.path[0] — the loader puts it there in production, but
+    tests have to do it themselves.
+    """
+    import importlib.util
+
+    plugin_root_str = str(_PLUGIN_ROOT)
+    if plugin_root_str not in sys.path:
+        sys.path.insert(0, plugin_root_str)
+
+    # Pre-load lifecycle under its plain name so `from lifecycle import …`
+    # inside doctor.py resolves to the same module the test fixture uses.
+    if "lifecycle" not in sys.modules:
+        spec_lc = importlib.util.spec_from_file_location(
+            "lifecycle", _PLUGIN_ROOT / "lifecycle.py",
+        )
+        assert spec_lc is not None and spec_lc.loader is not None
+        lc_mod = importlib.util.module_from_spec(spec_lc)
+        sys.modules["lifecycle"] = lc_mod
+        spec_lc.loader.exec_module(lc_mod)
+
+    spec = importlib.util.spec_from_file_location(
+        "_open_design_doctor_test", _PLUGIN_ROOT / "doctor.py",
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_open_design_doctor_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_doctor_contributions_have_typed_status(doctor_module) -> None:
+    """Every contribution must return a RepairResult with one of the
+    four typed status literals — pass/warn/fail/skip. Regression test
+    for the original bug where I called RepairResult(ok=..., message=...)
+    against an API that requires id+status+detail."""
+    import asyncio
+
+    contributions = doctor_module.build_contributions()
+    assert len(contributions) == 5, "expected 5 doctor rows"
+
+    valid_status = {"pass", "warn", "fail", "skip"}
+    for c in contributions:
+        result = asyncio.run(c.run(False))
+        assert result.id == c.id, f"id mismatch: {result.id} vs {c.id}"
+        assert result.status in valid_status, (
+            f"{c.id} returned invalid status {result.status!r}; "
+            f"must be one of {valid_status}"
+        )
+        assert isinstance(result.detail, str)
+        assert result.repaired is False  # fix=False → no mutation
+
+
+def test_doctor_home_check_passes_when_resolved(doctor_module, monkeypatch, tmp_path) -> None:
+    import asyncio
+    fake = tmp_path / "od"
+    (fake / "apps" / "daemon" / "dist").mkdir(parents=True)
+    (fake / "apps" / "daemon" / "dist" / "cli.js").write_text("// stub")
+    monkeypatch.setenv("OPEN_DESIGN_HOME", str(fake))
+
+    home_check = next(
+        c for c in doctor_module.build_contributions() if c.id == "open-design.home"
+    )
+    result = asyncio.run(home_check.run(False))
+    assert result.status == "pass"
+    assert str(fake) in result.detail
+
+
+def test_doctor_home_check_skips_when_unresolved(doctor_module, monkeypatch) -> None:
+    """When open-design is not installed, the doctor row should `skip`
+    (not `fail`) — the plugin is auto-enabled but open-design itself is
+    optional. Aggregate failure count in `oc doctor` stays clean."""
+    import asyncio
+    monkeypatch.setenv("OPEN_DESIGN_HOME", "/nonexistent/path-that-doesnt-exist")
+
+    home_check = next(
+        c for c in doctor_module.build_contributions() if c.id == "open-design.home"
+    )
+    result = asyncio.run(home_check.run(False))
+    # The default candidate paths may still resolve on this machine.
+    if result.status == "pass":
+        pytest.skip("default candidate path exists on this machine")
+    assert result.status == "skip"
+    assert "optional" in result.detail.lower()
