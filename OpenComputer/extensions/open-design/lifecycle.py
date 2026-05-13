@@ -63,6 +63,15 @@ SPAWN_WATCHDOG_S = 5.0
 #: Stop watchdog. SIGTERM → wait up to 5s → SIGKILL.
 STOP_WATCHDOG_S = 5.0
 
+#: Daemon log rotation. We append the daemon's stdout/stderr to a single
+#: file across restarts so users can ``tail -f`` continuously. To bound
+#: disk growth, ``start()`` rotates the active log when it exceeds
+#: ``LOG_ROTATE_THRESHOLD_BYTES``: ``open-design.log`` → ``.log.1``,
+#: ``.log.1`` → ``.log.2``, …, up to ``LOG_ROTATE_KEEP`` historical
+#: files. Pre-existing rotated files beyond that are deleted.
+LOG_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024  # 5 MiB
+LOG_ROTATE_KEEP = 3
+
 
 class OpenDesignNotInstalledError(RuntimeError):
     """open-design source tree not found at any known location."""
@@ -234,6 +243,50 @@ def _is_alive(pid: int) -> bool:
         if exc.errno == errno.ESRCH:
             return False
         return True
+
+
+def _rotate_log_if_needed() -> None:
+    """Rotate ``open-design.log`` when it exceeds the size threshold.
+
+    Called by ``start()`` before opening the log handle so the next
+    daemon spawn writes to a fresh file when the previous file got
+    large. Cheap (single stat) when under threshold. Failures are
+    logged at WARNING but never block daemon spawn.
+    """
+    log_path = _log_file()
+    try:
+        if not log_path.is_file():
+            return
+        if log_path.stat().st_size < LOG_ROTATE_THRESHOLD_BYTES:
+            return
+    except OSError as exc:
+        _log.warning("open-design: log size probe failed: %s", exc)
+        return
+
+    # Drop the oldest, then shift each existing rotation forward by one,
+    # then move the active log into slot 1.
+    oldest = log_path.with_suffix(f".log.{LOG_ROTATE_KEEP}")
+    try:
+        if oldest.exists():
+            oldest.unlink()
+    except OSError as exc:
+        _log.warning("open-design: failed to drop oldest log %s: %s", oldest, exc)
+        # Continue — even a partial rotation is better than no rotation.
+
+    for slot in range(LOG_ROTATE_KEEP - 1, 0, -1):
+        src = log_path.with_suffix(f".log.{slot}")
+        dst = log_path.with_suffix(f".log.{slot + 1}")
+        try:
+            if src.exists():
+                src.rename(dst)
+        except OSError as exc:
+            _log.warning("open-design: failed to rotate %s → %s: %s", src, dst, exc)
+
+    try:
+        log_path.rename(log_path.with_suffix(".log.1"))
+        _log.info("open-design: rotated log (size exceeded %d bytes)", LOG_ROTATE_THRESHOLD_BYTES)
+    except OSError as exc:
+        _log.warning("open-design: failed to rotate active log: %s", exc)
 
 
 def _clean_stale_pid() -> None:
@@ -427,15 +480,18 @@ def start(*, port: int | None = None, env_overrides: dict[str, str] | None = Non
     pid_path = _pid_file()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_log_if_needed()
 
     env = os.environ.copy()
     env["OD_PORT"] = str(effective_port)
-    # Default to allowing Hermes Workspace + OC dashboard as iframe parents
-    # so the Design tab works out of the box. Caller can override.
-    env.setdefault(
-        "OD_ALLOWED_FRAME_ANCESTORS",
-        "http://localhost:9119 http://127.0.0.1:9119 http://localhost:3000",
-    )
+    # Note: open-design v0.6.0 does NOT honor OD_ALLOWED_FRAME_ANCESTORS;
+    # the only frame-ancestors CSP it sets is on
+    # /api/live-artifacts/preview/* (and is 'self'). The main SPA at /
+    # has no CSP headers and no X-Frame-Options, so cross-origin iframes
+    # work without additional configuration. We do NOT set the env var
+    # here to avoid implying behavior we don't actually control. If a
+    # future open-design version adds CSP to /, override via
+    # ``env_overrides`` from the caller.
     if env_overrides:
         env.update(env_overrides)
 

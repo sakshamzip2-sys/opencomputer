@@ -288,3 +288,53 @@ def test_daemon_status_includes_web_served(lifecycle) -> None:
     )
     assert snap.web_served is False
     assert snap.to_dict()["web_served"] is False
+
+
+def test_log_rotation_drops_oldest_and_shifts(lifecycle, tmp_path) -> None:
+    """Log over threshold → active becomes .log.1, .log.1 → .log.2,
+    .log.2 → .log.3, prior .log.3 deleted. Underneath the threshold,
+    no rotation."""
+    log = lifecycle._log_file()
+    log.parent.mkdir(parents=True, exist_ok=True)
+
+    # Set up a pre-rotation chain at the keep limit.
+    log.write_bytes(b"X" * (lifecycle.LOG_ROTATE_THRESHOLD_BYTES + 1))
+    log.with_suffix(".log.1").write_text("rotated-1")
+    log.with_suffix(".log.2").write_text("rotated-2")
+    log.with_suffix(".log.3").write_text("rotated-3")  # should be deleted
+
+    lifecycle._rotate_log_if_needed()
+
+    # Active log moved to slot 1.
+    assert not log.exists() or log.stat().st_size == 0
+    assert log.with_suffix(".log.1").exists()
+    # The previous .log.1 ("rotated-1") now lives at .log.2.
+    assert log.with_suffix(".log.2").read_text() == "rotated-1"
+    # The previous .log.2 ("rotated-2") now lives at .log.3.
+    assert log.with_suffix(".log.3").read_text() == "rotated-2"
+    # The pre-existing .log.3 was dropped (size threshold for keep=3).
+    # The text "rotated-3" must no longer appear anywhere.
+    for slot in range(1, lifecycle.LOG_ROTATE_KEEP + 1):
+        path = log.with_suffix(f".log.{slot}")
+        if path.exists():
+            assert "rotated-3" not in path.read_text()
+
+
+def test_log_rotation_skips_when_under_threshold(lifecycle) -> None:
+    log = lifecycle._log_file()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("small")  # well under threshold
+
+    lifecycle._rotate_log_if_needed()
+
+    assert log.read_text() == "small"
+    assert not log.with_suffix(".log.1").exists()
+
+
+def test_log_rotation_no_op_when_log_missing(lifecycle) -> None:
+    """Missing log file → silently return, no rotation files created."""
+    log = lifecycle._log_file()
+    if log.exists():
+        log.unlink()
+    lifecycle._rotate_log_if_needed()
+    assert not log.with_suffix(".log.1").exists()
