@@ -1,0 +1,13 @@
+{
+  "id": "lsp-bridge",
+  "name": "LSP Bridge",
+  "version": "0.1.0",
+  "description": "Bridge to Language Server Protocol diagnostics — wraps pyright (Python) and typescript-language-server (TS/JS) as a single LspDiagnostics tool the agent can call. Subsumes the dozen language-shell plugins Claude Code ships (pyright-lsp, typescript-lsp, gopls-lsp, …) by exposing one tool that selects the right server per file extension.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "mixed",
+  "entry": "plugin",
+  "tool_names": [
+    "LspDiagnostics"
+  ]
+}

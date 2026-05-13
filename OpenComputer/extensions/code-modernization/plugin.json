@@ -1,0 +1,10 @@
+{
+  "id": "code-modernization",
+  "name": "Code Modernization",
+  "version": "0.1.0",
+  "description": "Legacy-system modernization toolkit — discovery, dependency mapping, business-rule extraction, modernization brief, reimagine/transform, security harden. Ships 7 skills (modernize-assess|map|extract-rules|brief|reimagine|transform|harden) and 5 specialist subagents (legacy-analyst, business-rules-extractor, architecture-critic, security-auditor, test-engineer).",
+  "author": "OpenComputer Contributors (port of Anthropic's code-modernization plugin)",
+  "license": "MIT",
+  "kind": "mixed",
+  "entry": "plugin"
+}
