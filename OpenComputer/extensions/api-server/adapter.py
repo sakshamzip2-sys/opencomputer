@@ -39,10 +39,12 @@ import contextvars
 import hashlib
 import logging
 import os
+import re
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -105,17 +107,62 @@ class _CachedResponse:
         self.expires_at = expires_at
 
 
-def _count_active_sessions() -> int | None:
-    """SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL.
+_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
-    Returns None on any failure (DB missing, schema drift, contention).
+
+def _resolve_sessions_db_path(profile: str | None = None) -> Path:
+    """Resolve ``sessions.db`` for a specific profile.
+
+    Mirrors ``opencomputer.agent.config._home()`` semantics without
+    importing from ``opencomputer.*`` (keeps the plugin-SDK boundary
+    clean — the freeze list does not need to grow). The on-disk layout
+    is:
+
+    - Default profile → ``<root>/sessions.db``
+    - Named profile ``<name>`` → ``<root>/profiles/<name>/sessions.db``
+
+    where ``<root>`` is ``OPENCOMPUTER_HOME_ROOT`` (test override) or
+    ``~/.opencomputer``.
+
+    Resolution order (highest → lowest priority):
+
+    1. Explicit ``profile`` arg (typically the per-request
+       ``X-OC-Profile`` header, after validation). Forces the named-
+       profile path scheme: ``<root>/profiles/<profile>/sessions.db``.
+       Default profile (``"default"`` or empty) falls through.
+    2. ``OPENCOMPUTER_HOME`` env var (set by ``oc -p <name>`` to the
+       active profile's home directory). Joined with ``sessions.db``.
+    3. ``<root>/sessions.db`` final fallback (default-profile path).
+
+    Profile names that fail the ``[a-z0-9][a-z0-9_-]{0,31}`` pattern
+    are rejected silently and we fall through to env-based resolution
+    — caller never sees a ``ValueError`` from this resolver.
+    """
+    if profile and profile != "default" and _PROFILE_NAME_RE.match(profile):
+        root_env = os.environ.get("OPENCOMPUTER_HOME_ROOT", "").strip()
+        root = Path(root_env) if root_env else Path.home() / ".opencomputer"
+        return root / "profiles" / profile / "sessions.db"
+
+    home_env = os.environ.get("OPENCOMPUTER_HOME", "").strip()
+    if home_env:
+        return Path(home_env) / "sessions.db"
+
+    root_env = os.environ.get("OPENCOMPUTER_HOME_ROOT", "").strip()
+    root = Path(root_env) if root_env else Path.home() / ".opencomputer"
+    return root / "sessions.db"
+
+
+def _count_active_sessions(profile: str | None = None) -> int | None:
+    """``SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL``.
+
+    Returns ``None`` on any failure (DB missing, schema drift,
+    contention). Resolves the path via :func:`_resolve_sessions_db_path`
+    so the X-OC-Profile header is honored for multi-tenant deployments.
     """
     try:
         import sqlite3
-        from pathlib import Path
 
-        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
-        db_path = Path.home() / ".opencomputer" / profile / "sessions.db"
+        db_path = _resolve_sessions_db_path(profile)
         if not db_path.exists():
             return None
         with sqlite3.connect(str(db_path)) as conn:
@@ -128,13 +175,11 @@ def _count_active_sessions() -> int | None:
         return None
 
 
-def _count_total_sessions() -> int | None:
+def _count_total_sessions(profile: str | None = None) -> int | None:
     try:
         import sqlite3
-        from pathlib import Path
 
-        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
-        db_path = Path.home() / ".opencomputer" / profile / "sessions.db"
+        db_path = _resolve_sessions_db_path(profile)
         if not db_path.exists():
             return None
         with sqlite3.connect(str(db_path)) as conn:
@@ -1137,14 +1182,28 @@ class APIServerAdapter(BaseChannelAdapter):
         # actual module (works whether loaded by package or by file path).
         import importlib
         mod = importlib.import_module(__name__)
-        try:
-            sessions_active = mod._count_active_sessions()
-        except Exception:  # noqa: BLE001
-            sessions_active = None
-        try:
-            sessions_total = mod._count_total_sessions()
-        except Exception:  # noqa: BLE001
-            sessions_total = None
+        # T61 (extended) — honor X-OC-Profile when counting sessions so
+        # multi-tenant front-doors that share a single api-server process
+        # see counts for the requested profile rather than the process-
+        # default profile. The helper accepts both the new signature
+        # (with profile arg) and the legacy zero-arg signature; the
+        # latter is exercised by tests that monkeypatch the helpers.
+        request_profile = self._resolve_request_profile(request)
+
+        def _safe_count(fn) -> int | None:
+            try:
+                return fn(request_profile)
+            except TypeError:
+                # Legacy zero-arg signature (test monkeypatches).
+                try:
+                    return fn()
+                except Exception:  # noqa: BLE001
+                    return None
+            except Exception:  # noqa: BLE001
+                return None
+
+        sessions_active = _safe_count(mod._count_active_sessions)
+        sessions_total = _safe_count(mod._count_total_sessions)
         try:
             memory_mb = mod._process_memory_mb()
         except Exception:  # noqa: BLE001

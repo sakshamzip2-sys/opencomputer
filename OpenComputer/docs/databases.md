@@ -15,22 +15,33 @@
 
 ## TL;DR
 
-OpenComputer ships **8 SQLite files**. One per-profile **megastore**
-(`sessions.db`) holds 19 SQLite objects across 5 owner modules. Five
-sub-DBs sit beside it under `<profile_home>/`. Two DBs sit *outside*
-any profile by design: `kanban.db` (cross-profile coordination
-primitive), `evals/history.db` (cwd-scoped, project-local).
+OpenComputer ships **8 owned SQLite files** plus one **optional** plugin
+file (`memory-vector/chroma.db`). The per-profile **megastore**
+(`sessions.db`) holds 16 base tables + 2 FTS5 virtual tables across 5+
+owner modules (plus 4 attached tables contributed by other modules).
+Five sub-DBs sit beside it under `<profile_home>/`. Two DBs sit
+*outside* any profile by design: `kanban.db` (cross-profile
+coordination primitive), `evals/history.db` (cwd-scoped, project-local).
 
 | Layer | File | Path formula | Profile-scoped? |
 |---|---|---|---|
 | Megastore | `sessions.db` | `<profile_home>/sessions.db` | yes |
 | Evolution | `evolution/trajectory.sqlite` | `<profile_home>/evolution/trajectory.sqlite` | yes |
-| Evolution | `evolution/rate.db` | `~/.opencomputer/evolution/rate.db` | **no** (gotcha — see §3.2) |
+| Evolution | `evolution/rate.db` | default constructor → `~/.opencomputer/evolution/rate.db`; production caller passes `<profile_home>/evolution/rate.db` | **default-constructor only** (gotcha — see §3.2) |
 | Inference | `inference/motifs.sqlite` | `<profile_home>/inference/motifs.sqlite` | yes |
 | User model | `user_model/graph.sqlite` | `<profile_home>/user_model/graph.sqlite` | yes |
 | User model | `user_model/drift_reports.sqlite` | `<profile_home>/user_model/drift_reports.sqlite` | yes |
 | Coordination | `kanban.db` | `<oc_root>/kanban.db` (or `<oc_root>/kanban/boards/<slug>/kanban.db`) | **shared by design** |
 | Evaluation | `evals/history.db` | `$OPENCOMPUTER_EVAL_HISTORY_DB` or `$CWD/evals/history.db` | **no** (cwd-scoped) |
+| Vector memory (opt-in) | `memory-vector/chroma.db` | `<profile_home>/memory-vector/chroma.db` | yes (only if `extensions/memory-vector` plugin is loaded) |
+
+> **WAL + cloud sync ≠ safe.** SQLite's WAL mode does NOT compose with
+> Dropbox, iCloud Drive, Syncthing, or OneDrive. If your home directory
+> syncs to one of those, add `~/.opencomputer/` (or at minimum
+> `~/.opencomputer/sessions.db*` and `~/.opencomputer/profiles/`) to
+> the sync ignore list, or you will silently corrupt your session
+> history. README §"Cloud-synced `~/.opencomputer/`" carries the
+> authoritative warning.
 
 ## Table of contents
 
@@ -47,8 +58,19 @@ primitive), `evals/history.db` (cwd-scoped, project-local).
 
 ## 1. Filesystem map
 
+The on-disk layout is **not** `<root>/<profile>/`. The default profile
+lives at the root; named profiles live one level deeper under
+`profiles/<name>/`. This is the layout
+`opencomputer.profiles.get_profile_dir` produces and the layout the
+CLI's `-p` flag activates.
+
 ```
-~/.opencomputer/                                  ← OC root (overridable via OC_HOME)
+~/.opencomputer/                                  ← OC root (overridable via OPENCOMPUTER_HOME_ROOT)
+│                                                    ← also the DEFAULT profile's home
+│
+├── sessions.db                                   ← default profile's megastore (§2)
+├── config.yaml  profile.yaml  MEMORY.md  USER.md  ← default profile's per-profile state
+├── active_profile                                ← sticky pointer (empty/missing = default)
 │
 ├── kanban.db                                     ← cross-profile coordination (shared)
 ├── kanban/
@@ -58,24 +80,30 @@ primitive), `evals/history.db` (cwd-scoped, project-local).
 │   └── workspaces/                               ← legacy single-board scratch
 │
 ├── evolution/
-│   └── rate.db                                   ← shared rate limiter (NOT per-profile;
-│                                                    profile-aware brethren are below
-│                                                    under <profile>/evolution/)
+│   └── rate.db                                   ← default-constructor rate limiter
+│                                                    (production paths pass profile-scoped
+│                                                    rate.db; see §3.2)
 │
-└── <profile>/                                    ← e.g. "default", "work", "saksham"
-    ├── sessions.db                               ← MEGASTORE — see §2
-    ├── config.yaml                               ← per-profile settings
-    ├── profile.yaml                              ← active plugins / preset
-    │
-    ├── evolution/
-    │   └── trajectory.sqlite                     ← RL-style training trajectories
-    │
-    ├── inference/
-    │   └── motifs.sqlite                         ← inferred behavioural motifs
-    │
-    └── user_model/
-        ├── graph.sqlite                          ← F4 user-model nodes/edges + FTS5
-        └── drift_reports.sqlite                  ← decay/drift report archive
+└── profiles/
+    └── <name>/                                   ← e.g. "work", "saksham", "coder"
+        ├── sessions.db                           ← NAMED profile's megastore (§2)
+        ├── config.yaml  profile.yaml  MEMORY.md  USER.md  SOUL.md
+        ├── home/                                 ← profile-scoped HOME for subprocesses (C1)
+        │
+        ├── evolution/
+        │   ├── trajectory.sqlite                 ← RL-style training trajectories
+        │   └── rate.db                           ← profile-scoped draft rate limiter
+        │                                            (ProceduralMemoryLoop passes this path)
+        │
+        ├── inference/
+        │   └── motifs.sqlite                     ← inferred behavioural motifs
+        │
+        ├── user_model/
+        │   ├── graph.sqlite                      ← F4 user-model nodes/edges + FTS5
+        │   └── drift_reports.sqlite              ← decay/drift report archive
+        │
+        └── memory-vector/                        ← optional (extensions/memory-vector plugin)
+            └── chroma.db                         ← ChromaDB persistent client store
 ```
 
 **Project-local (not under `~`):**
@@ -90,16 +118,30 @@ primitive), `evals/history.db` (cwd-scoped, project-local).
 
 | Module | Helper | Returns |
 |---|---|---|
-| `agent/config.py` | `_home()` | `<oc_root>/<active_profile>/` |
-| `agent/config.py` | `default_config().home` | same as `_home()` for the default profile |
+| `agent/config.py` | `_home()` | the **resolved active profile dir** (see "Profile resolution" below) |
+| `agent/config.py` | `default_config().home` | same as `_home()` for the active profile |
 | `agent/config.py` | `cfg.session.db_path` | `_home() / "sessions.db"` |
-| `kanban/db.py` | `kanban_home()` | `<oc_root>/` (one level above profile, by design) |
+| `profiles.py` | `get_default_root()` | the cross-profile root (`~/.opencomputer` or `$OPENCOMPUTER_HOME_ROOT`) |
+| `profiles.py` | `get_profile_dir(name)` | `<root>` when `name in (None, "default")`, else `<root>/profiles/<name>` |
+| `kanban/db.py` | `kanban_home()` | the cross-profile root — walks up two levels if `_home()` is under `profiles/<name>/` |
 | `kanban/db.py` | `kanban_db_path()` | resolves env overrides → active board → legacy default |
-| `evolution/storage.py` | `evolution_home()` | `_home() / "evolution"` (per-profile — distinct from rate.db's path) |
+| `evolution/storage.py` | `evolution_home()` | `_home() / "evolution"` (per-profile — distinct from `DraftRateLimiter`'s default-constructor path) |
 
-**Profile resolution.** `_home()` returns `<oc_root>/<profile>/` where
-`oc_root = OC_HOME or ~/.opencomputer` and `profile = OC_PROFILE or "default"`.
-The `oc -p <profile>` CLI flag exports `OC_PROFILE` before any imports run.
+**Profile resolution.** The CLI flag `oc -p <name>` runs
+`_apply_profile_override` in `cli.py`, which sets the `OPENCOMPUTER_HOME`
+env var to the resolved profile dir (`~/.opencomputer` for `default`,
+`~/.opencomputer/profiles/<name>` for any named profile) before any
+imports run. `_home()` then returns the value of `OPENCOMPUTER_HOME` —
+NOT `<root>/<profile>` (there is no separate `OC_PROFILE` env var; the
+flag is a one-shot translator). Two additional override env vars exist:
+
+- `OPENCOMPUTER_HOME_ROOT` (test/integration override): pins the
+  cross-profile root that `profiles.get_default_root()` returns. Does
+  NOT affect `_home()`'s resolution of the active profile.
+- `plugin_sdk.profile_context.current_profile_home` ContextVar
+  (per-asyncio-Task): set by the gateway dispatch path during a
+  per-message agent loop. Takes precedence over `OPENCOMPUTER_HOME`
+  inside `_home()` when set.
 
 ---
 
@@ -107,7 +149,7 @@ The `oc -p <profile>` CLI flag exports `OC_PROFILE` before any imports run.
 
 **Path:** `<profile_home>/sessions.db`
 **Owner:** `opencomputer.agent.state.SessionDB`
-**Schema-version constant:** `SCHEMA_VERSION` at `opencomputer/agent/state.py:37` (currently 12 at time of writing — check the constant for live value).
+**Schema-version constant:** `SCHEMA_VERSION` at `opencomputer/agent/state.py:137` (currently 19 at time of writing — check the constant for live value).
 **Migration style:** numbered Python migrations dict `MIGRATIONS: dict[tuple[int, int], str]` + single-row `schema_version` table. See `apply_migrations()` at `opencomputer/agent/state.py`.
 **Concurrency:** WAL mode + application-level retry-with-jitter on `SQLITE_BUSY`.
 
@@ -118,12 +160,18 @@ keeps everything in one file per profile so `opencomputer profile
 delete` cleans up cleanly. No second DB to worry about."* The
 megastore is a load-bearing simplification, not an accident.
 
-### Tables declared in `agent/state.py` (13 base + 2 FTS5)
+### Tables declared in `agent/state.py` (16 base + 2 FTS5)
+
+Counts here are **user-visible tables**, not raw `sqlite_master`
+objects. A fresh `sessions.db` has many additional rows in
+`sqlite_master` (FTS5 shadow tables `messages_fts_*` /
+`episodic_fts_*`, triggers, and indexes), but those are
+implementation detail of the two FTS5 virtual tables listed below.
 
 | Table | Purpose | Schema-version added | Notes |
 |---|---|---|---|
 | `schema_version` | Single-row counter for migrations. | v0 (baseline) | One INTEGER NOT NULL row. |
-| `sessions` | One row per conversation. | v1 | Adds `vibe`/`vibe_updated` (v6), `cwd` (Plan 3), `goal_*` (v11). |
+| `sessions` | One row per conversation. | v1 | Adds `vibe`/`vibe_updated` (v6), `cwd` (Plan 3), `goal_*` (v11), `parent_session_id` (delegate lineage, v18). |
 | `messages` | One row per turn. | v1 | `reasoning_details`/`codex_reasoning_items`/`reasoning_replay_blocks`/`attachments` added v2. |
 | `messages_fts` | FTS5 virtual table mirroring `messages.content`. | v1 | Tokenizer changed to `trigram` in v12 (CJK + substring search); falls back to `porter unicode61` if SQLite build lacks trigram. |
 | `episodic_events` | Per-turn event summaries (denormalized for "remind me what we decided about X"). | v1 | `dreamed_into` added v4 (P-18 dreaming consolidation); `recall_penalty` + `recall_penalty_updated_at` added v9. |
@@ -131,12 +179,15 @@ megastore is a load-bearing simplification, not an accident.
 | `consent_grants` | F1 consent layer — granted capabilities per scope. | v3 | PK `(capability_id, scope_filter)`. |
 | `consent_counters` | F1 consent layer — clean-run counters for progressive promotion. | v3 | PK `(capability_id, scope_filter)`. |
 | `audit_log` | F1 immutable HMAC-chained audit. | v3 | UPDATE/DELETE blocked by triggers (tamper-EVIDENCE not tamper-proof; FS edits caught by `AuditLogger.verify_chain()`). |
+| `prompt_checkpoints` | Snapshots of the assembled system+user prompt at key turns (`/snapshot`, `oc snapshot`). | v1 (DDL at module top) + v13 (idempotent re-create migration) | Indexed on `(session_id, created_at)`. |
 | `tool_usage` | Per-tool-call telemetry powering `opencomputer insights`. | v5 | Indexes on session, ts DESC, tool. |
 | `vibe_log` | Per-message persona/vibe verdict log (classifier evidence). | v6 | `classifier_version` field for A/B between regex and embedding/LLM classifiers. |
 | `turn_outcomes` | Outcome-aware learning: per-turn implicit signals + scoring. | v7 (signals), v8 (scores) | Phase 0 lands signals; Phase 1 layers `composite_score`/`judge_score`/`turn_score`. |
 | `recall_citations` | Outcome-aware learning: which memories were surfaced for which turn. | v7 | Joined with `turn_outcomes` to compute "memory M's downstream score." |
 | `policy_changes` | Reversible policy decisions, HMAC-chained as drafted. | v9 | Status: drafted → pending → active → reverted/expired_decayed. |
 | `policy_audit_log` | Append-only HMAC-chained log of every policy status transition. | v10 | v0.5 of outcome-aware learning closed v0's "transitions = UPDATEs" deferral. |
+| `llm_calls` | One row per provider call (tokens, cost, latency, cache stats). Drives `oc usage sessions`. | v15 | Indexes on session, ts DESC, model. |
+| `subagents` | Cross-process registry persistence for the in-memory `SubagentRegistry`. Captures parent/child session lineage for `oc sessions tree`. | v17 | Indexes on parent_session_id, child_session_id, state. |
 
 ### Tables attached by other modules (4 tables — `CREATE TABLE IF NOT EXISTS`, no schema-version coordination)
 
@@ -187,10 +238,8 @@ instead of inline Python migrations. Documented in `evolution/design.md`
 §5.1; flagged for future unification with the F1 framework
 (`# TODO(F1)` at `evolution/storage.py:5`).
 
-### 3.2 `evolution/rate.db` — the path-not-profile-scoped gotcha
+### 3.2 `evolution/rate.db` — the path scope is **call-site-dependent**
 
-**Path:** `~/.opencomputer/evolution/rate.db` (HARDCODED — does NOT
-honor `OC_HOME` or the active profile).
 **Owner:** `opencomputer/evolution/rate_limit.py` (`DraftRateLimiter`)
 **Tables:** `drafts(iso_ts TEXT PRIMARY KEY)` — one row per
 successfully synthesized draft.
@@ -198,14 +247,24 @@ successfully synthesized draft.
 **Caps:** per-day default 1, lifetime default 10. Reset via
 `opencomputer skill reset-limits`.
 
-> **Gotcha.** The default path is `Path.home() / ".opencomputer" /
-> "evolution" / "rate.db"`. If a user runs OpenComputer with
-> `OC_HOME=/opt/oc` (Docker / custom deployment) the rate counter
-> still writes to `~/.opencomputer/evolution/rate.db` rather than
-> `/opt/oc/evolution/rate.db`. Compare to `evolution/trajectory.sqlite`
-> in the same module's package, which correctly uses `_home()`. This
-> inconsistency is documented intentionally — fixing it is parked
-> under §8.
+**Path resolution — depends on who constructs the limiter:**
+
+| Call site | Path |
+|---|---|
+| `DraftRateLimiter()` — default constructor at `rate_limit.py:37` | `~/.opencomputer/evolution/rate.db` (hardcoded — does NOT honor `OPENCOMPUTER_HOME` or active profile) |
+| `ProceduralMemoryLoop.__post_init__` at `procedural_memory_loop.py:86` | `<profile_home>/evolution/rate.db` (correct per-profile path; this is the **production** call site) |
+
+> **Gotcha.** The hardcoded default at `rate_limit.py:37` only fires
+> when a caller constructs `DraftRateLimiter()` with no `db_path`
+> argument. The production path (`ProceduralMemoryLoop`) always passes
+> an explicit per-profile path computed from `evolution_root(home)`, so
+> in the running agent the rate limiter is correctly per-profile.
+> Direct callers (tests, ad-hoc scripts) that omit `db_path` will hit
+> the hardcoded default — fine for tests, surprising for a Docker
+> deployment that pins `OPENCOMPUTER_HOME=/opt/oc` and then calls
+> `DraftRateLimiter()` directly. Compare to `evolution/trajectory.sqlite`
+> in the same module's package, which uses `_home()` unconditionally.
+> Fixing the default-constructor path is parked under §8.
 
 ### 3.3 `inference/motifs.sqlite`
 
@@ -255,10 +314,14 @@ Two DBs deliberately do NOT live under any single profile.
 2. `OC_KANBAN_BOARD` env / `<oc_root>/kanban/.active-board` state file → per-board path at `<oc_root>/kanban/boards/<slug>/kanban.db`
 3. Legacy unnamed default at `<oc_root>/kanban.db`
 
-`<oc_root>` resolves via `OC_KANBAN_HOME` env or `_oc_home()`. Note:
-NOT `_home()` — `kanban_home()` deliberately resolves one level above
-the profile so all profiles share the board (see module docstring for
-the dispatcher/worker handoff rationale).
+`<oc_root>` resolves via `OC_KANBAN_HOME` env or `kanban_home()`'s
+walk-up of `_home()`. **The walk-up is load-bearing.** When the active
+profile is named (so `OPENCOMPUTER_HOME` points at
+`<root>/profiles/<name>`), `kanban_home()` detects this and walks up
+two levels to recover `<root>`. Without the walk-up,
+`oc -p worker chat` would silently fork the board off the dispatcher's
+view of it. See the module docstring at `kanban/db.py:1-39` for the
+dispatcher/worker handoff rationale.
 
 **Owner:** `opencomputer/kanban/db.py`
 **Migration style:** none — `CREATE TABLE IF NOT EXISTS` plus an
@@ -312,18 +375,23 @@ happened to be active — wrong layer.
 
 ## 5. External DBs we read but don't own
 
+These are SQLite files OpenComputer touches but doesn't own the schema
+of — third-party browser stores, OS-level chat history, and one
+optional plugin's persistent vector store.
+
 | DB | Path | Used by | Read/write |
 |---|---|---|---|
 | macOS Messages (`chat.db`) | `~/Library/Messages/chat.db` (overridable via `IMESSAGE_DB_PATH`) | `opencomputer/skills/profile_scraper/scraper.py` | **Read-only.** Source for the iMessage scraper skill that bootstraps user-profile data. |
+| Chromium-family browser `History` | `~/Library/Application Support/{Google/Chrome, BraveSoftware/Brave-Browser, Microsoft Edge, Vivaldi, Arc/User Data, Chromium}/<Profile>/History` | `opencomputer/profile_bootstrap/browser_history.py` | **Read-only via tempfile copy.** Profile bootstrap reads visits (URL/title/timestamp) to seed Layer-2 user-model context. Six Chromium-family browsers + all their per-browser profiles are enumerated. |
+| ChromaDB persistent store (`chroma.db`) | `<profile_home>/memory-vector/chroma.db` | `extensions/memory-vector/backend.py` (`VectorMemoryBackend`) | **Read/write — opt-in.** Only created when the `memory-vector` plugin is loaded. Uses ChromaDB's built-in sentence-transformers default (`all-MiniLM-L6-v2`); embeddings + collection metadata live in this file plus its `chroma.sqlite3`. |
 
 **Notes:**
 
-- These are **macOS-only**. The scraper does nothing on Linux/Windows.
-- We never write to them.
-- The setup-wizard surfaces `IMESSAGE_DB_PATH` as one of the
-  per-platform env-var keys (`opencomputer/setup_wizard.py`).
-- The `imessage` channel adapter and `iMessage` skill toolkit are
-  separate concerns; this entry is about the macOS Messages chat DB.
+- The Messages and browser-history readers are **macOS-only**. They no-op on Linux/Windows.
+- For the Messages and browser-history DBs, we never write — we copy the file to a tempfile (which bypasses the SQLite exclusive lock on APFS/ext4) before reading, so a running browser doesn't get its DB corrupted.
+- The setup-wizard surfaces `IMESSAGE_DB_PATH` as one of the per-platform env-var keys (`opencomputer/setup_wizard.py`).
+- ChromaDB ships its own internal SQLite (`chroma.sqlite3` alongside `chroma.db`) for its catalog. We don't depend on the schema of either — the `chromadb.PersistentClient` is the only stable interface.
+- The `imessage` channel adapter and `iMessage` skill toolkit are separate concerns from the macOS Messages `chat.db` read above.
 
 ---
 
@@ -497,8 +565,14 @@ running an existing install.
 - **Memory dreaming pipeline:** [`docs/memory_dreaming.md`](memory_dreaming.md)
 - **Evolution subsystem design:** [`docs/evolution/design.md`](evolution/design.md)
 
-> **Last verified against source:** 2026-05-06. Re-run the verification
+> **Last verified against source:** 2026-05-12. Re-run the verification
 > greps in the plan
 > (`docs/superpowers/plans/2026-05-06-sqlite-organization.md` Tasks
 > 2, 4.2, 4.3, 5.2, 5.3, 6.2, 6.3, 7.2, 8.2) when this document feels
-> stale.
+> stale. 2026-05-12 refresh closed audit gaps: env-var name
+> (`OC_HOME`→`OPENCOMPUTER_HOME`), profile path scheme (named under
+> `profiles/<name>`), `prompt_checkpoints`/`llm_calls`/`subagents`
+> added to the megastore catalog, rate.db scope clarified to default-
+> constructor only, Chromium browser History + `memory-vector/chroma.db`
+> added to external-SQLite coverage, kanban walk-up for named profiles
+> documented, WAL/cloud-sync warning surfaced in TL;DR.

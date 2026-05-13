@@ -7,10 +7,17 @@ primitive. A worker spawned with ``oc -p <profile>`` joins the same
 board as the dispatcher that claimed the task. The same applies to
 ``<root>/kanban/workspaces/`` and ``<root>/kanban/logs/``.
 
-In standard installs ``<root>`` is ``~/.opencomputer``. In Docker / custom
-deployments where ``OC_HOME`` points outside ``~/.opencomputer`` (e.g.
-``/opt/oc``), ``<root>`` is ``OC_HOME``. Three env-var overrides
-are available (highest precedence first, all optional):
+In standard installs ``<root>`` is ``~/.opencomputer``. In Docker /
+custom deployments where ``OPENCOMPUTER_HOME`` points outside
+``~/.opencomputer`` (e.g. ``/opt/oc``), ``<root>`` is the resolved
+home — but **when the active profile is named** (so ``OPENCOMPUTER_HOME``
+is ``<root>/profiles/<name>``), :func:`kanban_home` walks up two
+directories to recover the shared root. This is the load-bearing
+correctness move: without the walk-up, ``oc -p worker chat`` would
+silently fork the board off the dispatcher's view of it.
+
+Three env-var overrides are available (highest precedence first, all
+optional):
 
 * ``OC_KANBAN_DB`` — pin the database file path directly.
 * ``OC_KANBAN_WORKSPACES_ROOT`` — pin the workspaces root directly.
@@ -20,9 +27,9 @@ are available (highest precedence first, all optional):
 
 The dispatcher injects ``OC_KANBAN_DB`` and
 ``OC_KANBAN_WORKSPACES_ROOT`` into the worker subprocess env as a
-defense-in-depth measure: even if the worker's ``_oc_home()``
-resolution somehow disagrees with the dispatcher's (unusual symlink or
-Docker layout), the two processes still converge on the same files.
+defense-in-depth measure: even if the worker's home resolution somehow
+disagrees with the dispatcher's (unusual symlink or Docker layout),
+the two processes still converge on the same files.
 
 Schema is intentionally small: tasks, task_links, task_comments,
 task_events.  The ``workspace_kind`` field decouples coordination from git
@@ -89,20 +96,34 @@ def kanban_home() -> Path:
 
     1. ``OC_KANBAN_HOME`` env var when set and non-empty (explicit
        override for tests and unusual deployments).
-    2. ``_oc_home()``, which already returns ``<root>``
-       when ``OC_HOME`` is ``<root>/profiles/<name>``, and returns
-       ``OC_HOME`` directly for Docker / custom deployments.
+    2. Walked-up :func:`opencomputer.agent.config._home`. If
+       ``_home()`` resolves to ``<root>/profiles/<name>`` (the active
+       profile is named — see ``opencomputer.profiles.get_profile_dir``),
+       this function walks up two directories to ``<root>``. Otherwise
+       it returns ``_home()`` directly (default profile lives at the
+       root; Docker / custom deployments with ``OPENCOMPUTER_HOME``
+       pointing outside ``~/.opencomputer`` also resolve correctly
+       because their ``_home()`` is already the root).
 
     The kanban board is shared across profiles **by design** (see the
     module docstring). Resolving the kanban paths through the active
-    profile's ``OC_HOME`` would silently fork the board per profile,
-    which breaks the dispatcher / worker handoff.
+    profile's home would silently fork the board per profile, which
+    breaks the dispatcher / worker handoff. The walk-up in step 2 is
+    the load-bearing fix for that fork.
     """
     override = os.environ.get("OC_KANBAN_HOME", "").strip()
     if override:
         return Path(override).expanduser()
     from opencomputer.agent.config import _home as _oc_home
-    return _oc_home()
+    home = _oc_home()
+    # When the active profile is named, _home() resolves to
+    # <root>/profiles/<name>. The kanban board lives at the shared root
+    # one level above, so we walk up. The "profiles" segment name is the
+    # invariant we anchor to — it's hardcoded in
+    # opencomputer.profiles.get_profile_dir and is unlikely to change.
+    if home.parent.name == "profiles":
+        return home.parent.parent
+    return home
 
 
 # ---------------------------------------------------------------------------
