@@ -17,6 +17,7 @@ import subprocess
 from plugin_sdk.doctor import HealthContribution, RepairResult
 
 from lifecycle import (  # noqa: E402 — sys.path[0] populated by loader
+    WEB_INDEX_REL_PATH,
     resolve_open_design_home,
     status as lifecycle_status,
 )
@@ -101,6 +102,34 @@ async def _check_daemon(fix: bool) -> RepairResult:
     )
 
 
+async def _check_web_built(fix: bool) -> RepairResult:
+    """The Next.js SPA must be exported to ``apps/web/out`` for the
+    daemon's ``express.static`` middleware to serve ``GET /``.
+
+    Without this, ``http://127.0.0.1:7456/`` returns "Cannot GET /" and
+    the Hermes Design tab iframes a 404. Doctor flags it as a hard
+    failure with an actionable build command.
+    """
+    del fix
+    home = resolve_open_design_home()
+    if home is None:
+        return RepairResult(
+            ok=False,
+            message="cannot check SPA — OPEN_DESIGN_HOME not resolved",
+        )
+    index = home / WEB_INDEX_REL_PATH
+    if not index.is_file():
+        return RepairResult(
+            ok=False,
+            message=(
+                f"SPA not built: {index} missing. "
+                f"Run `pnpm --filter @open-design/web build` in {home} "
+                "to populate apps/web/out, then restart the daemon."
+            ),
+        )
+    return RepairResult(ok=True, message=f"SPA: built at {home / 'apps/web/out'}")
+
+
 def build_contributions() -> list[HealthContribution]:
     return [
         HealthContribution(
@@ -122,6 +151,11 @@ def build_contributions() -> list[HealthContribution]:
             id="open-design.daemon",
             description="Open Design daemon status",
             run=_check_daemon,
+        ),
+        HealthContribution(
+            id="open-design.web-built",
+            description="Open Design web SPA built (apps/web/out)",
+            run=_check_web_built,
         ),
     ]
 

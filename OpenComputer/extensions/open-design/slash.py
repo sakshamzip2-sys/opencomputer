@@ -22,6 +22,7 @@ from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from lifecycle import (  # noqa: E402 — sys.path[0] populated by loader
     DaemonAlreadyRunningError,
     OpenDesignNotInstalledError,
+    PortInUseError,
     restart as lifecycle_restart,
     start as lifecycle_start,
     status as lifecycle_status,
@@ -43,7 +44,12 @@ _HELP = (
 
 def _status_line() -> str:
     snap = lifecycle_status()
-    state = "running" if snap.running else "stopped"
+    if snap.running and snap.web_served:
+        state = "running (SPA ready)"
+    elif snap.running:
+        state = "running (SPA missing — see `oc design status`)"
+    else:
+        state = "stopped"
     pid = snap.pid if snap.pid is not None else "—"
     return f"open-design: {state} · url {snap.url} · pid {pid}"
 
@@ -72,15 +78,19 @@ class DesignCommand(SlashCommand):
                 return SlashCommandResult(output=f"already running — {exc}", handled=True)
             except OpenDesignNotInstalledError as exc:
                 return SlashCommandResult(output=f"open-design not installed: {exc}", handled=True)
+            except PortInUseError as exc:
+                return SlashCommandResult(output=f"port conflict: {exc}", handled=True)
             except Exception as exc:  # noqa: BLE001 — slash must never raise
                 _log.warning("/design start crashed: %s", exc)
                 return SlashCommandResult(output=f"start failed: {exc}", handled=True)
+            if not snap.running:
+                return SlashCommandResult(
+                    output=f"open-design: failed to come up — see {snap.log_path}",
+                    handled=True,
+                )
+            extra = "" if snap.web_served else f" · WARNING SPA unavailable — {snap.error}"
             return SlashCommandResult(
-                output=(
-                    f"open-design: started at {snap.url} (pid={snap.pid})"
-                    if snap.running
-                    else f"open-design: failed to come up — see {snap.log_path}"
-                ),
+                output=f"open-design: started at {snap.url} (pid={snap.pid}){extra}",
                 handled=True,
             )
 
@@ -100,15 +110,19 @@ class DesignCommand(SlashCommand):
                 snap = lifecycle_restart()
             except OpenDesignNotInstalledError as exc:
                 return SlashCommandResult(output=f"open-design not installed: {exc}", handled=True)
+            except PortInUseError as exc:
+                return SlashCommandResult(output=f"port conflict: {exc}", handled=True)
             except Exception as exc:  # noqa: BLE001
                 _log.warning("/design restart crashed: %s", exc)
                 return SlashCommandResult(output=f"restart failed: {exc}", handled=True)
+            if not snap.running:
+                return SlashCommandResult(
+                    output=f"restart did not become healthy — see {snap.log_path}",
+                    handled=True,
+                )
+            extra = "" if snap.web_served else f" · WARNING SPA unavailable — {snap.error}"
             return SlashCommandResult(
-                output=(
-                    f"open-design: restarted at {snap.url} (pid={snap.pid})"
-                    if snap.running
-                    else f"restart did not become healthy — see {snap.log_path}"
-                ),
+                output=f"open-design: restarted at {snap.url} (pid={snap.pid}){extra}",
                 handled=True,
             )
 

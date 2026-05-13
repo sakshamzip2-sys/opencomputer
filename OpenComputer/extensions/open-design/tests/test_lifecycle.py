@@ -165,3 +165,126 @@ def test_validate_port_helper_clamps(lifecycle) -> None:
     assert lifecycle._validate_port(70_000, source="test") == lifecycle.DEFAULT_PORT
     assert lifecycle._validate_port(0, source="test") == lifecycle.DEFAULT_PORT
     assert lifecycle._validate_port(-1, source="test") == lifecycle.DEFAULT_PORT
+
+
+def test_port_in_use_helper_detects_listener(lifecycle) -> None:
+    """Bind a socket, verify _port_in_use sees it; close, verify clear.
+
+    Uses port 0 so the OS picks a free ephemeral port — guaranteed not
+    to conflict with anything else on the test runner.
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        assert lifecycle._port_in_use(port) is True
+    finally:
+        sock.close()
+    # After close, should be free again (allow a small grace for TIME_WAIT;
+    # in practice immediate re-bind succeeds because the test socket was
+    # never connected).
+    assert lifecycle._port_in_use(port) is False
+
+
+def test_start_raises_port_in_use_when_squatter_present(
+    lifecycle, tmp_path, monkeypatch,
+) -> None:
+    """Spawn a stub Node-free 'daemon' source tree, bind the daemon's
+    port from this test, and verify start() raises PortInUseError.
+
+    Importantly, this triggers the new guard BEFORE Popen runs — so
+    no zombie subprocess is left behind even though the daemon binary
+    points to a path that wouldn't execute. We bind on the resolved
+    port AFTER computing it (via OD_PORT) to avoid racing the OS.
+    """
+    import socket
+
+    # Synthetic open-design tree with a built daemon entry (file just
+    # needs to exist; we won't reach Popen).
+    fake = tmp_path / "od"
+    daemon_dir = fake / "apps" / "daemon"
+    (daemon_dir / "dist").mkdir(parents=True)
+    (daemon_dir / "dist" / "cli.js").write_text("// stub")
+    monkeypatch.setenv("OPEN_DESIGN_HOME", str(fake))
+
+    # Pick a free port via OS, then hold it open + tell start() to use it.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        with pytest.raises(lifecycle.PortInUseError, match=str(port)):
+            lifecycle.start(port=port)
+    finally:
+        sock.close()
+
+
+def test_probe_spa_index_rejects_cannot_get(lifecycle) -> None:
+    """Helper unit test — synthesise the daemon's 'Cannot GET /' body
+    via a small HTTPServer and verify _probe_spa_index returns False."""
+    import http.server
+    import threading
+
+    class CannotGetHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — stdlib API
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<html><body><pre>Cannot GET /</pre></body></html>")
+
+        def log_message(self, *_args):  # silence stderr
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), CannotGetHandler)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{port}"
+        assert lifecycle._probe_spa_index(url) is False
+    finally:
+        server.shutdown()
+
+
+def test_probe_spa_index_accepts_real_spa(lifecycle) -> None:
+    """Helper unit test — synthesise a 200 HTML page that looks like a
+    Next.js SPA and verify _probe_spa_index returns True."""
+    import http.server
+    import threading
+
+    class SpaHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<!DOCTYPE html><html lang='en'><head><title>SPA</title></head></html>")
+
+        def log_message(self, *_args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), SpaHandler)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{port}"
+        assert lifecycle._probe_spa_index(url) is True
+    finally:
+        server.shutdown()
+
+
+def test_daemon_status_includes_web_served(lifecycle) -> None:
+    """DaemonStatus dataclass exposes web_served; default is False."""
+    snap = lifecycle.DaemonStatus(
+        running=False,
+        pid=None,
+        port=7456,
+        url="http://127.0.0.1:7456",
+        home=None,
+        log_path=lifecycle._log_file(),
+    )
+    assert snap.web_served is False
+    assert snap.to_dict()["web_served"] is False

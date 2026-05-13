@@ -35,6 +35,13 @@ _log = logging.getLogger("opencomputer.open_design.lifecycle")
 
 DEFAULT_PORT = 7456
 DAEMON_REL_PATH = "apps/daemon/dist/cli.js"
+#: The daemon serves the built Next.js SPA from ``apps/web/out`` via
+#: ``express.static`` (see ``apps/daemon/src/server.ts``: STATIC_DIR =
+#: PROJECT_ROOT/apps/web/out). If ``out/`` is missing, GET / returns
+#: "Cannot GET /" — the daemon is alive but the UI is unbuilt. Doctor
+#: flags this and the iframe-wrapper shows an actionable hint.
+WEB_OUT_REL_PATH = "apps/web/out"
+WEB_INDEX_REL_PATH = "apps/web/out/index.html"
 #: Paths we probe for daemon liveness. Open-design's HTTP surface doesn't
 #: expose a canonical health endpoint (POSTs to /api/* are real routes,
 #: but GET / and GET /api/* may 404). Any HTTP response — including 404 —
@@ -65,14 +72,32 @@ class DaemonAlreadyRunningError(RuntimeError):
     """Daemon already running (live PID file)."""
 
 
+class PortInUseError(RuntimeError):
+    """Configured port is held by another (unknown) process.
+
+    Distinct from :class:`DaemonAlreadyRunningError` because the
+    incumbent owner is not under our PID-file tracking — we can't kill
+    it via ``oc design stop``. The user has to identify and stop the
+    foreign process themselves (e.g. via ``lsof -i :7456``).
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class DaemonStatus:
+    """Snapshot of daemon + SPA readiness.
+
+    ``running`` means the HTTP listener is up. ``web_served`` means
+    ``GET /`` returns the built SPA, not "Cannot GET /". Both must be
+    true for the Hermes Design tab to embed the iframe cleanly.
+    """
+
     running: bool
     pid: int | None
     port: int
     url: str
     home: Path | None
     log_path: Path
+    web_served: bool = False
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,6 +108,7 @@ class DaemonStatus:
             "url": self.url,
             "home": str(self.home) if self.home else None,
             "log_path": str(self.log_path),
+            "web_served": self.web_served,
             "error": self.error,
         }
 
@@ -220,6 +246,26 @@ def _clean_stale_pid() -> None:
             pass
 
 
+def _port_in_use(port: int, *, host: str = "127.0.0.1") -> bool:
+    """True if a TCP listener already holds ``host:port``.
+
+    Uses a non-blocking bind probe (SO_REUSEADDR=0 by default on macOS
+    and Linux) — fast, no privileges needed. We do this rather than a
+    full ``lsof`` call so the check stays portable and millisecond-fast.
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(0.25)
+        sock.bind((host, port))
+    except OSError:
+        return True
+    finally:
+        sock.close()
+    return False
+
+
 def _probe_url(url: str, timeout: float = 0.5) -> bool:
     """Lightweight HTTP HEAD probe — daemon healthy if any 2xx/3xx/4xx replies.
 
@@ -242,14 +288,77 @@ def _probe_url(url: str, timeout: float = 0.5) -> bool:
     return False
 
 
+def _probe_spa_index(url: str, timeout: float = 0.5) -> bool:
+    """GET / and verify it returns the SPA, not the daemon's "Cannot GET /".
+
+    The daemon's express.static middleware only fires when
+    ``apps/web/out/index.html`` exists. If the SPA isn't built, GET /
+    falls through to Express's default 404 with text "Cannot GET /".
+    We probe by GET-ing / and checking for an HTML response — a 404
+    text/plain response or a non-HTML 200 both mean "UI missing".
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url + "/", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return False
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if "html" not in content_type:
+                return False
+            body_head = resp.read(512).decode("utf-8", errors="ignore").lower()
+            # Heuristic: real SPA serves <!doctype html ...> or <html ...>
+            # Daemon 404 body is exactly "Cannot GET /" with text/html;charset=utf-8
+            if "cannot get" in body_head:
+                return False
+            return ("<!doctype" in body_head) or ("<html" in body_head)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+        return False
+
+
 def status() -> DaemonStatus:
-    """Return the current daemon status without side effects beyond pid-cleanup."""
+    """Return the current daemon status without side effects beyond pid-cleanup.
+
+    Returns three signals:
+
+    * ``running`` — the HTTP listener responds on the configured port.
+    * ``web_served`` — ``GET /`` returns the built SPA (HTML index). If
+      the listener is up but the SPA is missing, ``web_served`` is
+      False and ``error`` carries an actionable build hint.
+    * ``error`` — set when the daemon is up but the UI is unbuilt, OR
+      when the daemon is down with a recorded log.
+    """
     _clean_stale_pid()
     pid = _read_pid()
     port = _resolve_port()
     url = f"http://127.0.0.1:{port}"
     home = resolve_open_design_home()
     running = pid is not None and _is_alive(pid) and _probe_url(url)
+
+    web_served = False
+    error: str | None = None
+    if running:
+        web_served = _probe_spa_index(url)
+        if not web_served:
+            hint = "unknown reason"
+            if home is not None:
+                index = home / WEB_INDEX_REL_PATH
+                if not index.is_file():
+                    hint = (
+                        f"SPA not built — {index} missing. "
+                        f"Run `pnpm --filter @open-design/web build` in {home} "
+                        "and then `oc design restart`."
+                    )
+                else:
+                    hint = (
+                        f"SPA built at {index} but daemon is not serving it. "
+                        "The daemon may have started before the build "
+                        "finished — try `oc design restart`."
+                    )
+            error = hint
+
     return DaemonStatus(
         running=running,
         pid=pid if running else None,
@@ -257,6 +366,8 @@ def status() -> DaemonStatus:
         url=url,
         home=home,
         log_path=_log_file(),
+        web_served=web_served,
+        error=error,
     )
 
 
@@ -297,6 +408,21 @@ def start(*, port: int | None = None, env_overrides: dict[str, str] | None = Non
         if port is not None
         else _resolve_port()
     )
+
+    # Port-conflict guard. The earlier _read_pid + _is_alive check
+    # only catches OUR previous daemons. A foreign process on the
+    # configured port — a stray daemon from a different profile, a
+    # crashed-but-orphaned spawn, an unrelated server — would otherwise
+    # cause the spawn to crash silently with EADDRINUSE and leave a
+    # corrupt PID file pointing at the dead child.
+    if _port_in_use(effective_port):
+        raise PortInUseError(
+            f"port {effective_port} is already in use by another process "
+            f"(not tracked in {_pid_file()}). "
+            f"Run `lsof -i :{effective_port}` to find it, stop it, then "
+            f"retry. Or set OD_PORT to a free port."
+        )
+
     log_path = _log_file()
     pid_path = _pid_file()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -411,9 +537,12 @@ def status_json() -> str:
 __all__ = [
     "DAEMON_REL_PATH",
     "DEFAULT_PORT",
+    "WEB_INDEX_REL_PATH",
+    "WEB_OUT_REL_PATH",
     "DaemonAlreadyRunningError",
     "DaemonStatus",
     "OpenDesignNotInstalledError",
+    "PortInUseError",
     "resolve_open_design_home",
     "restart",
     "start",

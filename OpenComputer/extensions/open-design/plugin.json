@@ -8,8 +8,8 @@
   "kind": "mixed",
   "entry": "plugin",
   "profiles": ["*"],
-  "enabled_by_default": false,
-  "single_instance": true,
+  "enabled_by_default": true,
+  "single_instance": false,
   "tool_names": [],
   "cli_commands": ["design"]
 }

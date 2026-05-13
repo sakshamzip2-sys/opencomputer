@@ -19,21 +19,26 @@ OpenComputer and exposes a Hermes Workspace "Design" tab.
 
 ## Setup
 
+The plugin is **enabled by default** — `oc design …` verbs are
+available out of the box. You only need to install + build open-design
+itself once.
+
 ```bash
 # 1. Clone open-design somewhere the plugin can find it:
 git clone https://github.com/nexu-io/open-design ~/.open-design
 # (or set OPEN_DESIGN_HOME=/path/to/open-design)
 
-# 2. Build the daemon once (needs Node 24 + pnpm 10.33):
+# 2. Build the daemon once (needs Node 22+ and pnpm 10.33; engines
+#    pin ~24 but Node 22 works in practice with the engine-check skip):
 cd ~/.open-design
 corepack enable
 pnpm install
-pnpm --filter @open-design/daemon build
+pnpm --filter '@open-design/contracts' --filter '@open-design/platform' \
+     --filter '@open-design/sidecar-proto' --filter '@open-design/sidecar' \
+     --filter '@open-design/daemon' build
+npm rebuild better-sqlite3  # native binding for the Node version on PATH
 
-# 3. Enable the plugin:
-oc plugins enable open-design
-
-# 4. Start the daemon:
+# 3. Start the daemon:
 oc design start
 ```
 
@@ -72,8 +77,15 @@ work`) stops/starts a separate daemon under that profile's directory.
 ## Implementation notes
 
 - `kind: "mixed"` — CLI + slash + doctor; no agent tool / provider / channel.
-- `single_instance: true` — loader-level PID lock prevents double-spawn from parallel sessions.
-- `enabled_by_default: false` — opt-in (the daemon is a heavyweight Node process).
+- `single_instance: false` — the plugin's `register()` is cheap (wires
+  verbs only), so the loader lock would be harmful with auto-enable
+  across parallel sessions. Daemon-level singleton-ness is enforced by
+  the profile-scoped PID file at
+  `~/.opencomputer/<profile>/locks/open-design.pid` — `start()` refuses
+  to spawn a second daemon when a live PID is recorded.
+- `enabled_by_default: true` — verbs available out of the box. The
+  daemon itself stays opt-in: `oc design start` brings it up only when
+  the user asks.
 - All boundary imports go through `plugin_sdk/*`; zero `opencomputer.*` imports.
 
 ## Source

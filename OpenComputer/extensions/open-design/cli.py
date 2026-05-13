@@ -22,6 +22,7 @@ import typer
 from lifecycle import (  # noqa: E402 — sys.path[0] populated by loader
     DaemonAlreadyRunningError,
     OpenDesignNotInstalledError,
+    PortInUseError,
     resolve_open_design_home,
     restart as lifecycle_restart,
     start as lifecycle_start,
@@ -47,23 +48,26 @@ def _fail(message: str, *, code: int = 1) -> None:
 def cmd_status(
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
-    """Show daemon health, PID, port, URL, and resolved source path."""
+    """Show daemon health, PID, port, URL, source path, and SPA readiness."""
     snapshot = lifecycle_status()
     if json_out:
         typer.echo(lifecycle_status_json())
         return
-    state = "running" if snapshot.running else "stopped"
-    typer.secho(
-        f"open-design: {state}",
-        fg=typer.colors.GREEN if snapshot.running else typer.colors.YELLOW,
-    )
-    typer.echo(f"  url  : {snapshot.url}")
-    typer.echo(f"  port : {snapshot.port}")
-    typer.echo(f"  pid  : {snapshot.pid if snapshot.pid is not None else '—'}")
-    typer.echo(f"  home : {snapshot.home if snapshot.home else '(not found — set OPEN_DESIGN_HOME)'}")
-    typer.echo(f"  log  : {snapshot.log_path}")
+    if snapshot.running and snapshot.web_served:
+        state, color = "running", typer.colors.GREEN
+    elif snapshot.running:
+        state, color = "running (SPA unavailable)", typer.colors.YELLOW
+    else:
+        state, color = "stopped", typer.colors.YELLOW
+    typer.secho(f"open-design: {state}", fg=color)
+    typer.echo(f"  url       : {snapshot.url}")
+    typer.echo(f"  port      : {snapshot.port}")
+    typer.echo(f"  pid       : {snapshot.pid if snapshot.pid is not None else '—'}")
+    typer.echo(f"  home      : {snapshot.home if snapshot.home else '(not found — set OPEN_DESIGN_HOME)'}")
+    typer.echo(f"  web_served: {'yes' if snapshot.web_served else 'no'}")
+    typer.echo(f"  log       : {snapshot.log_path}")
     if snapshot.error:
-        typer.secho(f"  error: {snapshot.error}", fg=typer.colors.RED)
+        typer.secho(f"  error     : {snapshot.error}", fg=typer.colors.RED)
 
 
 @app.command("start")
@@ -77,11 +81,18 @@ def cmd_start(
         _fail(str(exc), code=2)
     except OpenDesignNotInstalledError as exc:
         _fail(str(exc), code=3)
+    except PortInUseError as exc:
+        _fail(str(exc), code=7)
     if snapshot.running:
         typer.secho(
             f"open-design daemon running at {snapshot.url} (pid={snapshot.pid})",
             fg=typer.colors.GREEN,
         )
+        if not snapshot.web_served:
+            typer.secho(
+                f"  warning: web SPA unavailable — {snapshot.error}",
+                fg=typer.colors.YELLOW,
+            )
     else:
         _fail(
             "daemon did not become healthy within 5s — "
@@ -108,11 +119,18 @@ def cmd_restart(
         snapshot = lifecycle_restart(port=port)
     except OpenDesignNotInstalledError as exc:
         _fail(str(exc), code=3)
+    except PortInUseError as exc:
+        _fail(str(exc), code=7)
     if snapshot.running:
         typer.secho(
             f"open-design daemon restarted at {snapshot.url} (pid={snapshot.pid})",
             fg=typer.colors.GREEN,
         )
+        if not snapshot.web_served:
+            typer.secho(
+                f"  warning: web SPA unavailable — {snapshot.error}",
+                fg=typer.colors.YELLOW,
+            )
     else:
         _fail(
             "daemon did not become healthy after restart — "
