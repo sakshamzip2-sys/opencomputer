@@ -201,7 +201,18 @@ class WorkspaceLifecycle:
             )
             self._stop_requested.set()
 
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        # SIGHUP is critical: macOS / Linux send it when the controlling
+        # terminal closes (Cmd-W, kill terminal app, SSH disconnect). Without
+        # a SIGHUP handler the python parent terminates instantly with no
+        # cleanup, and the node child — which we placed in its own session
+        # via start_new_session=True — is reparented to launchd as an
+        # orphan still holding port 3000. (2026-05-14: traced to "port
+        # already in use" recurring after every terminal close.)
+        signals_to_trap: list[int] = [signal.SIGINT, signal.SIGTERM]
+        sighup = getattr(signal, "SIGHUP", None)
+        if sighup is not None:
+            signals_to_trap.append(sighup)
+        for sig in signals_to_trap:
             try:
                 previous[sig] = signal.signal(sig, _on_signal)
             except (ValueError, OSError):

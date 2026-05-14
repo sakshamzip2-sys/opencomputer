@@ -127,6 +127,61 @@ def _check_rate_limit() -> None:
         )
 
 
+# 2026-05-14: Anthropic API rejects requests with too many tools (or too
+# much tool-definition bytes), returning the misleading 400 "Third-party
+# apps now draw from your extra usage..." rather than a clean
+# limit-exceeded error. Empirical: first-95 OC tools in registration
+# order succeeds; trim-by-size variants do not. Cap at 60 in registration
+# order — preserves core tools (Edit/Read/Write/Bash) at the head; drops
+# the tail (large duplicate MCP tools). Override with
+# OPENCOMPUTER_ANTHROPIC_MAX_TOOLS (positive int = cap; 0 = disable).
+def _max_tools_cap() -> int:
+    raw = os.environ.get("OPENCOMPUTER_ANTHROPIC_MAX_TOOLS", "").strip()
+    if not raw:
+        return 60
+    try:
+        n = int(raw)
+        return n if n > 0 else 10_000  # 0 = disable cap; large sentinel
+    except ValueError:
+        return 60
+
+
+def _trim_tools_for_api(tools: list, model: str) -> list:
+    """Trim the tool list to the Anthropic-API limit by taking the first N.
+
+    Tools register in deterministic order (core OC tools first, then
+    plugins, MCP-server tools last). Keeping the HEAD preserves the
+    highest-priority tools (Edit, Read, Write, Bash, Skill, …) and drops
+    the tail (large duplicate MCP tools) where bloat accumulates.
+    Empirical (2026-05-14): first-95 reliably succeeds; trim-by-size
+    does not. We migrate any tail ``cache_control`` breakpoint onto the
+    new last tool so prompt caching survives the trim.
+    """
+    if not tools:
+        return tools
+    cap = _max_tools_cap()
+    if len(tools) <= cap:
+        return tools
+    trimmed = list(tools[:cap])
+    last_orig = tools[-1] if isinstance(tools[-1], dict) else None
+    if (
+        last_orig
+        and last_orig.get("cache_control")
+        and trimmed
+        and isinstance(trimmed[-1], dict)
+        and "cache_control" not in trimmed[-1]
+    ):
+        trimmed[-1] = dict(trimmed[-1])
+        trimmed[-1]["cache_control"] = last_orig["cache_control"]
+    dropped = [t.get("name", "?") for t in tools[cap:] if isinstance(t, dict)]
+    _log.warning(
+        "anthropic: trimmed %d tools to %d for API compatibility "
+        "(dropped tail: %s); set OPENCOMPUTER_ANTHROPIC_MAX_TOOLS to override",
+        len(tools), cap, ", ".join(dropped[:6]) + ("…" if len(dropped) > 6 else ""),
+    )
+    return trimmed
+
+
 def _record_429(exc: AnthropicRateLimitError) -> None:
     """TS-T7 — persist the 429 so concurrent sessions back off too."""
     headers: dict[str, str] | None = None
@@ -1441,7 +1496,7 @@ class AnthropicProvider(BaseProvider):
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if api_tools:
-            kwargs["tools"] = api_tools
+            kwargs["tools"] = _trim_tools_for_api(api_tools, model)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
@@ -1692,7 +1747,7 @@ class AnthropicProvider(BaseProvider):
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if api_tools:
-            kwargs["tools"] = api_tools
+            kwargs["tools"] = _trim_tools_for_api(api_tools, model)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
@@ -1812,7 +1867,7 @@ class AnthropicProvider(BaseProvider):
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if api_tools:
-            kwargs["tools"] = api_tools
+            kwargs["tools"] = _trim_tools_for_api(api_tools, model)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
