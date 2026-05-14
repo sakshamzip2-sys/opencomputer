@@ -42,14 +42,17 @@ jobs:
       # force-include is strict and `pip install -e` evaluates package_data
       # at install time, so the SPA + TUI artifact dirs must exist before
       # pip install or hatchling fails the editable build.
+      #
+      # 2026-05-14 CI tolerance: the ui-web/ + ui-tui/ source trees
+      # aren't tracked in this repo. When absent, the build scripts
+      # stub the artifact dirs (rather than erroring) so pip install
+      # still succeeds. Caching is omitted because the cache-dependency
+      # files don't exist on a fresh checkout — adding the cache flag
+      # would make `setup-node` fail before our build scripts can run.
       - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: |
-            OpenComputer/ui-web/package-lock.json
-            OpenComputer/ui-tui/package-lock.json
       - name: Build dashboard SPA
         run: ./scripts/build-dashboard.sh
       - name: Build Ink TUI
