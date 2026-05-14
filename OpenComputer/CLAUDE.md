@@ -326,6 +326,8 @@ Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_
 
 14. **Parallel sessions, one worktree = catastrophe.** Two Claude sessions touching the same checkout race git index + venv state. Use `git worktree add` per session; never share a tree. If you see "[gone]" branches, the `/clean_gone` slash command (from the `commit-commands` plugin) prunes them safely.
 
+15. **MCP sessions live on a dedicated daemon-thread event loop.** `MCPManager.start_background_loop()` spins up a `opencomputer-mcp-loop` thread; every `MCPConnection.connect()` spawns an *owner task* on that loop that enters AND exits `stdio_client` + `ClientSession` in the same task (anyio's cancel-scope guard refuses cross-task `__aexit__`). `MCPTool.execute` from a different event loop (per-turn `asyncio.run` in chat) dispatches across loops via `asyncio.run_coroutine_threadsafe` + `asyncio.wrap_future` — handled inside `_run_on_session_loop`. Test doubles built via `MCPTool.__new__(MCPTool)` survive because `session_loop` has a class-level `None` default that short-circuits the trampoline. Anywhere you reach for `asyncio.run(mcp_mgr.connect_all(...))` in sync code, use `connect_all_sync` / `start_in_background` / `submit_sync` instead — the bg-loop variants preserve session lifetimes across subsequent loops AND eliminate the cross-task wall that previously dumped to stderr on every chat start.
+
 ---
 
 ## 8. User preferences (learned across this project)

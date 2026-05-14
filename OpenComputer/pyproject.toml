@@ -273,4 +273,5 @@ addopts = "-m 'not benchmark and not integration'"
 markers = [
   "benchmark: opt-in slow benchmark tests requiring a live LLM provider (run via `pytest -m benchmark`)",
   "integration: opt-in PTY-driven integration smoke tests that spawn the real `oc` CLI binary (run via `pytest -m integration`). Requires `oc` on PATH and a usable tty / pty subsystem.",
+  "slow: opt-in tests that spawn real MCP subprocesses (npx/uvx) over the network. Skipped automatically when the required binary is missing; opt in with `pytest -m slow`.",
 ]

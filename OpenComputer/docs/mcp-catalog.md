@@ -8,6 +8,45 @@ small and avoids surprising users with auto-loaded servers.
 Configured servers persist to `~/.opencomputer/config.yaml` and connect on
 the next `opencomputer chat` / `opencomputer gateway` run.
 
+## Startup mode + the `/mcp` slash (2026-05-14)
+
+By default (`mcp.deferred: true` in `config.yaml`) MCP servers connect in
+the background — `oc chat` opens instantly and tools register as each
+server becomes ready. Chat startup prints a one-liner:
+
+```
+Connecting to N MCP server(s) in background — type /mcp for status.
+```
+
+The `/mcp` slash command gives live control inside a session:
+
+| Slash | What it does |
+|---|---|
+| `/mcp` (or `/mcp status`) | Rich table: name / status / tool count / version / last error. In-flight servers show "connecting…". Re-run to refresh. |
+| `/mcp connect <name>` | Bring up one server by name. Works even if `enabled: false` in config. Idempotent — reconnect replaces a stale session and waits for any in-flight deferred-connect of the same name. |
+| `/mcp disconnect <name>` | Drop the server's session + unregister its tools. |
+| `/mcp reload` | Full re-discover (alias for `/reload-mcp`). |
+
+Switch to legacy block-on-startup with `mcp.deferred: false` — useful for
+one-shot scripts where every tool must be registered before the first
+user prompt.
+
+### Implementation notes
+
+- `MCPManager` owns a dedicated daemon-thread event loop. Every
+  `stdio_client` / `ClientSession` is entered AND exited on that loop's
+  per-connection owner task — satisfies anyio's same-task cancel-scope
+  rule and eliminates the `RuntimeError: Attempted to exit cancel
+  scope...` wall that previously dumped to stderr on every chat startup.
+  Live regression test: `tests/test_mcp_cross_task_shutdown.py`.
+- `MCPTool.execute` from a different event loop (per-turn `asyncio.run`
+  in chat) dispatches through `asyncio.run_coroutine_threadsafe` +
+  `asyncio.wrap_future`. Test doubles built via
+  `MCPTool.__new__(MCPTool)` keep working through the class-level
+  `session_loop: None` default that short-circuits the trampoline.
+- `connect_all` runs in parallel via `asyncio.gather` — one slow `npx`
+  fetch can't gate the others.
+
 ## Reference: `opencomputer mcp` subcommands
 
 ```bash

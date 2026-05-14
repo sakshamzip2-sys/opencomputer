@@ -87,6 +87,21 @@ class SlashContext:
     #: ``{"servers_before": int, "servers_after": int, "tools_after": int,
     #: "error": str | None}``.
     on_reload_mcp: Callable[[], dict] = dict
+    #: ``/mcp`` (no args) — live status snapshot. Returns
+    #: ``{"servers": list[dict], "connecting": list[str]}`` where each
+    #: server dict mirrors :meth:`MCPManager.status_snapshot` (name /
+    #: connection_state / tool_count / version / last_error).
+    on_mcp_status: Callable[[], dict] = dict
+    #: ``/mcp connect <name>`` — connect a server by config name.
+    #: Returns ``(ok, message)``.
+    on_mcp_connect: Callable[[str], tuple[bool, str]] = lambda _name: (
+        False, "/mcp connect callback not wired"
+    )
+    #: ``/mcp disconnect <name>`` — disconnect by name.
+    #: Returns ``(ok, message)``.
+    on_mcp_disconnect: Callable[[str], tuple[bool, str]] = lambda _name: (
+        False, "/mcp disconnect callback not wired"
+    )
     #: ``/model <id>`` — swap the active model on the running AgentLoop.
     #: Returns ``(success, message)`` so the slash handler can echo why
     #: the swap failed (unknown alias, invalid model id, provider mismatch).
@@ -900,6 +915,93 @@ def _handle_reload_mcp(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_mcp(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/mcp`` — Claude-Code-parity MCP server panel.
+
+    No args (or ``status``) prints the live status table.
+    ``connect <name>`` / ``disconnect <name>`` manage individual servers.
+    ``reload`` is an alias for ``/reload-mcp`` (full re-discover).
+    """
+    sub = args[0].lower() if args else "status"
+
+    if sub in {"status", "list", "ls"}:
+        res = ctx.on_mcp_status()
+        if not res:
+            ctx.console.print(
+                "[red]/mcp not wired[/red] — chat loop didn't provide a status callback."
+            )
+            return SlashResult(handled=True)
+        servers = res.get("servers", [])
+        connecting = res.get("connecting", [])
+        if not servers and not connecting:
+            ctx.console.print("[dim]No MCP servers configured.[/dim]")
+            return SlashResult(handled=True)
+        table = Table(
+            title="MCP Servers", show_header=True, header_style="bold"
+        )
+        table.add_column("Name", style="cyan")
+        table.add_column("Status")
+        table.add_column("Tools", justify="right")
+        table.add_column("Version", style="dim")
+        for s in servers:
+            state = s.get("connection_state", "?")
+            color = {
+                "connected": "green",
+                "error": "red",
+                "disconnected": "dim",
+            }.get(state, "")
+            tools_count = str(s.get("tool_count", 0))
+            ver = s.get("version") or ""
+            badge = f"[{color}]{state}[/{color}]" if color else state
+            table.add_row(s.get("name", "?"), badge, tools_count, ver)
+            err = s.get("last_error")
+            if err:
+                table.add_row(
+                    "", f"  [dim red]{err}[/dim red]", "", ""
+                )
+        for name in connecting:
+            table.add_row(
+                name, "[yellow]connecting…[/yellow]", "-", ""
+            )
+        ctx.console.print(table)
+        if connecting:
+            ctx.console.print(
+                f"[dim]{len(connecting)} server(s) still connecting — "
+                f"re-run [bold]/mcp[/bold] to refresh.[/dim]"
+            )
+        return SlashResult(handled=True)
+
+    if sub == "connect":
+        if len(args) < 2:
+            ctx.console.print("[red]usage:[/red] /mcp connect <name>")
+            return SlashResult(handled=True)
+        name = args[1]
+        ok, msg = ctx.on_mcp_connect(name)
+        color = "green" if ok else "red"
+        ctx.console.print(f"[{color}]mcp connect:[/{color}] {msg}")
+        return SlashResult(handled=True)
+
+    if sub == "disconnect":
+        if len(args) < 2:
+            ctx.console.print("[red]usage:[/red] /mcp disconnect <name>")
+            return SlashResult(handled=True)
+        name = args[1]
+        ok, msg = ctx.on_mcp_disconnect(name)
+        color = "green" if ok else "red"
+        ctx.console.print(f"[{color}]mcp disconnect:[/{color}] {msg}")
+        return SlashResult(handled=True)
+
+    if sub == "reload":
+        # Full re-discover — same path as /reload-mcp.
+        return _handle_reload_mcp(ctx, [])
+
+    ctx.console.print(
+        f"[red]unknown subcommand:[/red] /mcp {sub}  "
+        f"(try: status / connect <name> / disconnect <name> / reload)"
+    )
+    return SlashResult(handled=True)
+
+
 def _handle_debug(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/debug`` — print a sanitized diagnostic dump to console.
 
@@ -1581,6 +1683,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "snapshot": _handle_snapshot,
     "reload": _handle_reload,
     "reload-mcp": _handle_reload_mcp,
+    "mcp": _handle_mcp,
     "debug": _handle_debug,
     "compress": _handle_compress,
     "config":   _handle_config,
