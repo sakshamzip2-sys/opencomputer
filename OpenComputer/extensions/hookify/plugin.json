@@ -1,0 +1,10 @@
+{
+  "id": "hookify",
+  "name": "Hookify",
+  "version": "0.1.0",
+  "description": "Auto-loading hook rules — write a markdown file in ~/.opencomputer/<profile>/hookify/ describing a rule (warn-rm-rf, block-env-edit, …) and the plugin registers it as a PreToolUse / PostToolUse / Stop / UserPromptSubmit hook automatically. Each rule has YAML frontmatter (event, action, conditions) plus a markdown message body. Rules can be enabled/disabled without deletion. Companion to the hookify-rules-helper skill that teaches how to write the rules.",
+  "author": "OpenComputer Contributors (port of Anthropic's hookify plugin)",
+  "license": "MIT",
+  "kind": "tool",
+  "entry": "plugin"
+}

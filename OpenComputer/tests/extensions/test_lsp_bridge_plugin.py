@@ -67,7 +67,10 @@ def test_server_lookup_typescript():
 
 
 def test_server_lookup_unsupported():
-    assert server_for_extension(".rs") is None
+    # An extension with no LSP server in the table — pick one that isn't
+    # in any known LSP catalogue. Update if we ever add support for this.
+    assert server_for_extension(".invalidext") is None
+    assert server_for_extension(".xyz") is None
 
 
 def test_servers_have_install_hints():
@@ -110,7 +113,7 @@ def test_unsupported_extension_is_user_error():
             ToolCall(
                 id="x",
                 name="LspDiagnostics",
-                arguments={"path": "/tmp/foo.rs"},
+                arguments={"path": "/tmp/foo.invalidext"},
             )
         )
     )
@@ -120,7 +123,32 @@ def test_unsupported_extension_is_user_error():
 
 @pytest.mark.parametrize(
     "ext",
-    [".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+    [
+        # pyright
+        ".py", ".pyi",
+        # typescript-language-server
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+        # gopls
+        ".go",
+        # rust-analyzer
+        ".rs",
+        # clangd
+        ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh",
+        # omnisharp
+        ".cs",
+        # jdtls
+        ".java",
+        # kotlin-language-server
+        ".kt", ".kts",
+        # lua-language-server
+        ".lua",
+        # intelephense
+        ".php",
+        # solargraph
+        ".rb",
+        # sourcekit-lsp
+        ".swift",
+    ],
 )
 def test_all_supported_extensions_resolve(ext):
     assert server_for_extension(ext) is not None
