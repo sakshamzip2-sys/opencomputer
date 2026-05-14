@@ -713,8 +713,12 @@ class TestCLAUDEmdUpdated:
             "Honcho memory was moved to the Built list in 10f.N; "
             "it should no longer appear in WON'T DO."
         )
-        # The follow-up paragraph should document the move.
-        assert "Honcho" in content
+        # The follow-up paragraph should document the move. Case-insensitive
+        # because later CLAUDE.md refactors lowered Honcho → honcho via
+        # references to the ``memory-honcho`` plugin id (which is the
+        # canonical mention now); the test's intent is "Honcho is still
+        # mentioned somewhere", not the exact capitalisation.
+        assert "honcho" in content.lower()
         assert "Phase 10f.K–N" in content or "memory-honcho" in content
 
 
