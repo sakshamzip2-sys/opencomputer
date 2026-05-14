@@ -108,7 +108,14 @@ async def test_loop_calls_dispatch_once_per_tick(tmp_path: Path, monkeypatch):
     with patch("opencomputer.kanban.db.dispatch_once", fake_dispatch_once), \
          patch("opencomputer.kanban.db.connect", fake_connect):
         task = asyncio.create_task(loop.run_forever())
-        await asyncio.sleep(0.18)
+        # Poll until we see at least 2 ticks rather than a fixed sleep —
+        # CI runners and slow asyncio schedulers (Python 3.13 on GHA
+        # ubuntu-latest in particular) can take >0.18s to fire two
+        # 0.05s-interval ticks. Cap at 2 s so a genuinely-broken loop
+        # still surfaces as a timeout.
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while len(calls) < 2 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.02)
         await loop.stop()
         await asyncio.wait_for(task, timeout=2.0)
 

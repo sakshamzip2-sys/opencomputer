@@ -207,7 +207,39 @@ class TestMaxContextFor:
         # IS the right answer here; we mirror the compactor exactly.
         assert max_context_for("totally-unknown-model") == 64_000
 
-    def test_openrouter_baidu_cobuddy_uses_catalog_context(self) -> None:
+    def test_openrouter_baidu_cobuddy_uses_catalog_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Without a populated context-window probe cache (which CI fresh
+        # checkouts and most dev boxes don't have), ``enable_probe=False``
+        # in ``max_context_for`` short-circuits step 3 of the resolution
+        # chain and the static table returns the 64k default. Stub the
+        # underlying resolver so this test exercises the catalog-hit
+        # path, not the cache-pre-warm prerequisite.
+        from opencomputer.cli_ui import status_line as _sl
+
+        def fake_window(model: str, **_kwargs) -> int:
+            if model == "baidu/cobuddy:free":
+                return 131_072
+            # Defer for any other id (in case this gets called transitively).
+            return 64_000
+
+        # status_line imports context_window_with_overrides inside the
+        # function body; patch it on the source module so the lazy
+        # import inside ``max_context_for`` picks up the stub.
+        from opencomputer.agent import compaction as _compaction
+
+        monkeypatch.setattr(
+            _compaction, "context_window_with_overrides", fake_window
+        )
+        # Defensive — also patch any already-imported binding on
+        # status_line's module namespace, in case a future refactor
+        # snapshots the symbol at import-time.
+        if hasattr(_sl, "context_window_with_overrides"):
+            monkeypatch.setattr(
+                _sl, "context_window_with_overrides", fake_window
+            )
+
         assert max_context_for("baidu/cobuddy:free") == 131_072
 
     def test_empty_string_returns_default(self) -> None:

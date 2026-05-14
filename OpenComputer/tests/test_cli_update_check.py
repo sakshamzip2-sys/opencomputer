@@ -89,6 +89,13 @@ def test_cached_fresh_result_skips_http(
 
     monkeypatch.setattr(cli_update_check, "_cache_path", lambda: cache_file)
     monkeypatch.delenv("OPENCOMPUTER_NO_UPDATE_CHECK", raising=False)
+    # When pytest runs without the editable install loaded (CI fresh
+    # checkout, dev box without ``pip install -e .``), ``__version__``
+    # resolves to ``"0.0.0+unknown"`` and the broken-install detector
+    # in ``_is_outdated`` suppresses the upgrade nag. Pin a real-shaped
+    # running version so the test asserts the cache → hint flow, not
+    # the broken-install short-circuit.
+    monkeypatch.setattr(cli_update_check, "__version__", "2026.1.1")
 
     fetch_called: list[bool] = []
     monkeypatch.setattr(
@@ -117,6 +124,11 @@ def test_stale_cache_triggers_http_fetch(
 
     monkeypatch.setattr(cli_update_check, "_cache_path", lambda: cache_file)
     monkeypatch.delenv("OPENCOMPUTER_NO_UPDATE_CHECK", raising=False)
+    # Same broken-install rationale as test_cached_fresh_result_skips_http:
+    # without ``pip install -e .`` loaded, ``__version__`` is
+    # ``"0.0.0+unknown"`` and ``_is_outdated`` returns False so the
+    # hint comes back None. Pin a real-shaped version.
+    monkeypatch.setattr(cli_update_check, "__version__", "2026.1.1")
 
     monkeypatch.setattr(
         cli_update_check, "_fetch_pypi_latest", lambda: "2030.1.1"
