@@ -28,7 +28,14 @@ def test_workspace_help_lists_subcommands() -> None:
     assert "doctor" in result.output
 
 
-def test_workspace_doctor_reports_missing_workspace_dir(tmp_path: Path) -> None:
+def test_workspace_doctor_reports_missing_workspace_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # OC_WORKSPACE_DIR short-circuits all other candidates in
+    # discover_workspace_dir, so clear it explicitly — otherwise a
+    # developer with the env var set in their shell sees the test go
+    # green even when no fallback would have worked.
+    monkeypatch.delenv("OC_WORKSPACE_DIR", raising=False)
     with patch(
         "opencomputer.cli_workspace._resolve_profile_home",
         return_value=tmp_path / "no-profile",
