@@ -157,6 +157,62 @@ def _gather_bundle_configs() -> list[tuple[str, MCPServerConfig]]:
     return out
 
 
+@mcp_app.command("sessions")
+def list_sessions() -> None:
+    """List per-session MCP runtimes (M2 — mcp-openclaw-port).
+
+    Only meaningful when ``MCPConfig.session_scoped=True`` and an
+    agent is running in this process. Out-of-process invocations
+    (``oc mcp sessions`` standalone) see an empty registry because the
+    runtime is bound to the running ``oc chat`` / ``oc gateway`` process.
+    """
+    # Late-import — the runtime module is only needed when the user
+    # explicitly invokes this subcommand.
+    from opencomputer.agent.config_store import load_config
+
+    cfg = load_config()
+    if not cfg.mcp.session_scoped:
+        console.print(
+            "[yellow]session_scoped MCP is disabled.[/yellow] "
+            "Enable in [bold]mcp.session_scoped: true[/bold] in your config.yaml "
+            "(opt-in feature flag)."
+        )
+        return
+    # Try to reach the registry — only populated when an agent is
+    # actually running in this process. CLI in standalone mode prints a
+    # helpful explainer instead of pretending to be empty.
+    from opencomputer.mcp.session_registry import current_runtime_manager
+
+    runtime = current_runtime_manager()
+    if runtime is None:
+        console.print(
+            "[dim]no active session-runtime in this process. "
+            "Session MCP runtimes are bound to the running `oc chat` / "
+            "`oc gateway` agent.[/dim]"
+        )
+        return
+    stats = runtime.stats_all()
+    if not stats:
+        console.print("[dim]no active per-session MCP runtimes.[/dim]")
+        return
+    table = Table(
+        show_header=True, header_style="bold cyan", title="per-session MCP runtimes",
+    )
+    table.add_column("session_id")
+    table.add_column("connections")
+    table.add_column("created_at")
+    table.add_column("last_used_at")
+    for s in stats:
+        from datetime import datetime
+        table.add_row(
+            s.session_id,
+            str(s.connection_count),
+            datetime.fromtimestamp(s.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.fromtimestamp(s.last_used_at).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    console.print(table)
+
+
 @mcp_app.command("bundles")
 def list_bundles() -> None:
     """List bundle-MCP servers shipped by active plugins.

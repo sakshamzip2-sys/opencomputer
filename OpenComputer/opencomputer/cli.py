@@ -1758,7 +1758,43 @@ def _run_chat_session(
 
     loop.goal_banner_callback = _print_goal_banner
 
-    mcp_mgr = MCPManager(tool_registry=registry)
+    # mcp-openclaw-port M2 — resolve session_id EARLY so the optional
+    # session-scoped MCP path can key on it. The legacy code below
+    # (resume == "last"/"pick" -> _resolve_resume_target) is replaced by
+    # this block; the later assignment becomes a no-op.
+    if resume in ("last", "pick"):
+        _resolved_resume = _resolve_resume_target(resume)
+        if _resolved_resume is None:
+            console.print("[dim]No prior sessions to resume; starting fresh.[/dim]")
+            resume = ""
+        else:
+            resume = _resolved_resume
+    session_id = resume or str(uuid.uuid4())
+
+    # mcp-openclaw-port M2 — when ``cfg.mcp.session_scoped=True``, route
+    # through :class:`SessionMcpRuntimeManager` so multi-user / multi-
+    # tenant deployments can scope MCP server sets per session id.
+    # Default OFF: the long-standing process-global path stays unchanged.
+    if cfg.mcp.session_scoped:
+        from opencomputer.mcp.session_registry import (
+            current_runtime_manager,
+            set_runtime_manager,
+        )
+        from opencomputer.mcp.session_runtime import (
+            SessionMcpRuntimeManager,
+            build_default_factory,
+        )
+        runtime_mgr = current_runtime_manager()
+        if runtime_mgr is None:
+            runtime_mgr = SessionMcpRuntimeManager(
+                mcp_manager_factory=build_default_factory(registry),
+                idle_ttl_seconds=cfg.mcp.session_idle_ttl_seconds,
+                max_sessions=cfg.mcp.session_max,
+            )
+            set_runtime_manager(runtime_mgr)
+        mcp_mgr = runtime_mgr.get_or_create(session_id)
+    else:
+        mcp_mgr = MCPManager(tool_registry=registry)
 
     # Wire the delegate factory so the model can spawn subagents.
     #
@@ -1907,12 +1943,11 @@ def _run_chat_session(
             # eager mode. ``stop_background_loop`` is idempotent.
             atexit.register(mcp_mgr.stop_background_loop)
 
-    if resume in ("last", "pick"):
-        resume = _resolve_resume_target(resume)
-        if resume is None:
-            console.print("[dim]No prior sessions to resume; starting fresh.[/dim]")
-            resume = ""
-    session_id = resume or str(uuid.uuid4())
+    # NOTE: ``session_id`` + the ``resume in ("last", "pick")`` resolution
+    # was moved upstream of MCP-manager construction by the mcp-openclaw-
+    # port M2 patch so the session-scoped runtime path can key on the
+    # final session id. This block intentionally left empty so the legacy
+    # call-site comments below stay anchored.
     # Phase D (2026-05-11) — ``oc chat -n <name>`` writes the session
     # title BEFORE the first turn fires. We don't apply ``--name`` on
     # the resume path (it would silently mutate a session the user might

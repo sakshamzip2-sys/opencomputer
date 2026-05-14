@@ -889,6 +889,23 @@ class MCPConfig:
     # explicit arg → OC_MCP_CATALOG_URL env → this field → bundled default.
     # Empty string / None means "use the default".
     catalog_url: str = ""
+    # mcp-openclaw-port M2 (2026-05-15) — opt-in per-session MCP runtimes.
+    # When ``True``, the agent constructs (or reuses) one ``MCPManager``
+    # instance per session id via
+    # :class:`opencomputer.mcp.session_runtime.SessionMcpRuntimeManager`.
+    # Idle TTL + LRU eviction sweep keeps the working-set bounded; see
+    # ``session_idle_ttl_seconds`` and ``session_max`` for tuning knobs.
+    # Default ``False`` keeps the long-standing process-global model so
+    # single-user installs pay no overhead.
+    session_scoped: bool = False
+    #: Idle-TTL (seconds) for per-session MCP runtimes. Eviction sweep
+    #: drops sessions that have not been used in this many seconds. Only
+    #: consulted when ``session_scoped=True``.
+    session_idle_ttl_seconds: float = 300.0
+    #: LRU cap for per-session MCP runtimes. Beyond this many active
+    #: sessions the least-recently-used is evicted regardless of TTL.
+    #: Only consulted when ``session_scoped=True``.
+    session_max: int = 20
 
 
 @dataclass(frozen=True, slots=True)
