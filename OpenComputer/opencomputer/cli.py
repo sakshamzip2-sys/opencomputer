@@ -1862,16 +1862,50 @@ def _run_chat_session(
             "social-traces wire failed (suppressed)", exc_info=True
         )
 
-    # Connect MCP servers synchronously in chat mode (simpler — no event loop yet)
+    # Connect MCP servers via the manager's dedicated background event
+    # loop (2026-05-14). The bg loop owns every ``stdio_client`` /
+    # ``ClientSession`` context for its full lifetime; per-turn
+    # ``asyncio.run`` callers dispatch tool calls to it via
+    # :func:`asyncio.run_coroutine_threadsafe`.
+    #
+    # 2026-05-14b — when ``cfg.mcp.deferred=True`` (default), startup is
+    # non-blocking: ``start_in_background`` fires connect_all on the bg
+    # loop and returns immediately. Tools register into the registry
+    # as each server comes online. Matches Claude Code's MCP UX: ``oc
+    # chat`` opens instantly; ``/mcp`` shows live connect status.
+    # Set ``mcp.deferred=false`` in config for the legacy block-on-
+    # startup behavior (one-shot scripts, deterministic tests).
     n_mcp_tools = 0
     if cfg.mcp.servers:
-        n_mcp_tools = asyncio.run(
-            mcp_mgr.connect_all(
-                list(cfg.mcp.servers),
-                osv_check_enabled=cfg.mcp.osv_check_enabled,
-                osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
-            )
-        )
+        servers_list = list(cfg.mcp.servers)
+        try:
+            if cfg.mcp.deferred:
+                # Fire-and-forget; tools will register as each server
+                # comes online. ``/mcp`` slash shows live status.
+                mcp_mgr.start_in_background(
+                    servers_list,
+                    osv_check_enabled=cfg.mcp.osv_check_enabled,
+                    osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
+                )
+                enabled_count = sum(1 for c in servers_list if c.enabled)
+                if enabled_count:
+                    console.print(
+                        f"[dim]Connecting to {enabled_count} MCP server(s) in "
+                        f"background — type [bold]/mcp[/bold] for status.[/dim]"
+                    )
+            else:
+                n_mcp_tools = mcp_mgr.connect_all_sync(
+                    servers_list,
+                    osv_check_enabled=cfg.mcp.osv_check_enabled,
+                    osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
+                )
+        except Exception as exc:  # noqa: BLE001 — MCP startup must never wedge chat
+            _log.warning("MCP startup failed: %s — continuing without MCP", exc)
+            n_mcp_tools = 0
+        else:
+            # Best-effort process-exit cleanup regardless of deferred /
+            # eager mode. ``stop_background_loop`` is idempotent.
+            atexit.register(mcp_mgr.stop_background_loop)
 
     if resume in ("last", "pick"):
         resume = _resolve_resume_target(resume)
@@ -1956,9 +1990,20 @@ def _run_chat_session(
     if no_compact:
         console.print("[dim]compaction disabled[/dim]")
     if cfg.mcp.servers:
-        console.print(
-            f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]"
-        )
+        if cfg.mcp.deferred:
+            # Deferred mode: connect_all is still running on the bg loop
+            # at banner-print time, so ``n_mcp_tools`` is 0 even when
+            # every server will eventually come up. Show the enabled
+            # count rather than a misleading "0 tool(s)" line.
+            enabled = sum(1 for s in cfg.mcp.servers if s.enabled)
+            console.print(
+                f"[dim]mcp:     {enabled} server(s) connecting in background — "
+                f"type /mcp for status[/dim]"
+            )
+        else:
+            console.print(
+                f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]"
+            )
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
     # Resume mode: render the prior conversation so the user sees what
@@ -2307,8 +2352,86 @@ def _run_chat_session(
             out["error"] = f"{type(e).__name__}: {e}"
         return out
 
+    def _on_mcp_status() -> dict:
+        """Live status snapshot for ``/mcp`` (no args).
+
+        Returns ``{"servers": [...], "connecting": [...]}``. ``servers``
+        is :meth:`MCPManager.status_snapshot` (one dict per
+        already-attempted connection). ``connecting`` lists server names
+        whose background connect is still in flight (deferred startup
+        mode pre-completion). The slash handler renders both as a Rich
+        table.
+        """
+        try:
+            return {
+                "servers": mcp_mgr.status_snapshot(),
+                "connecting": mcp_mgr.connecting_names(),
+            }
+        except Exception as exc:  # noqa: BLE001 — never wedge a slash
+            _log.warning("/mcp status snapshot failed: %s", exc)
+            return {"servers": [], "connecting": []}
+
+    def _on_mcp_connect(name: str) -> tuple[bool, str]:
+        """``/mcp connect <name>`` — connect one server by config name.
+
+        Looks the config up in ``cfg.mcp.servers``; the server doesn't
+        need to be ``enabled: true`` to be brought up via slash.
+        """
+        servers_cfg = getattr(cfg.mcp, "servers", None) or ()
+        target = next(
+            (s for s in servers_cfg if getattr(s, "name", None) == name),
+            None,
+        )
+        if target is None:
+            return (
+                False,
+                f"unknown server '{name}' — configure it under "
+                f"mcp.servers in config.yaml first.",
+            )
+        try:
+            ok = mcp_mgr.connect_one_sync(
+                target,
+                osv_check_enabled=cfg.mcp.osv_check_enabled,
+                osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"connect raised: {type(exc).__name__}: {exc}")
+        if not ok:
+            # connect_one_sync logs the underlying reason; surface a
+            # short hint and tell the user where to dig deeper.
+            conn = next(
+                (c for c in mcp_mgr.connections if c.config.name == name),
+                None,
+            )
+            reason = (
+                getattr(conn, "last_error", None) if conn else None
+            ) or "see logs"
+            return (False, f"{name}: {reason}")
+        tool_count = sum(
+            1
+            for c in mcp_mgr.connections
+            if c.config.name == name
+            for _ in c.tools
+        )
+        return (True, f"{name} connected — {tool_count} tool(s) registered.")
+
+    def _on_mcp_disconnect(name: str) -> tuple[bool, str]:
+        """``/mcp disconnect <name>`` — drop one server's session + tools."""
+        try:
+            ok = mcp_mgr.disconnect_one_sync(name)
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"disconnect raised: {type(exc).__name__}: {exc}")
+        if not ok:
+            return (False, f"{name} is not currently connected.")
+        return (True, f"{name} disconnected.")
+
     def _on_reload_mcp() -> dict:
-        """Disconnect every MCP server, re-discover, re-register tools."""
+        """Disconnect every MCP server, re-discover, re-register tools.
+
+        Both shutdown and reconnect run on :attr:`MCPManager.background_loop`
+        so the ``async with stdio_client`` exits land in the owner task —
+        no cross-task cancel-scope error even mid-chat.
+        """
         out: dict = {
             "servers_before": 0,
             "servers_after": 0,
@@ -2317,15 +2440,14 @@ def _run_chat_session(
         }
         try:
             out["servers_before"] = len(mcp_mgr.connections)
-            asyncio.run(mcp_mgr.shutdown())
+            # Both run on the manager's bg loop via submit_sync.
+            mcp_mgr.submit_sync(mcp_mgr.shutdown())
             servers = getattr(cfg, "mcp", None)
             server_list = list(getattr(servers, "servers", [])) if servers else []
-            n = asyncio.run(
-                mcp_mgr.connect_all(
-                    server_list,
-                    osv_check_enabled=getattr(servers, "osv_check_enabled", True) if servers else True,
-                    osv_check_fail_closed=getattr(servers, "osv_check_fail_closed", False) if servers else False,
-                )
+            n = mcp_mgr.connect_all_sync(
+                server_list,
+                osv_check_enabled=getattr(servers, "osv_check_enabled", True) if servers else True,
+                osv_check_fail_closed=getattr(servers, "osv_check_fail_closed", False) if servers else False,
             )
             out["servers_after"] = len(mcp_mgr.connections)
             out["tools_after"] = n
@@ -2798,6 +2920,9 @@ def _run_chat_session(
                 on_snapshot_prune=_on_snapshot_prune,
                 on_reload=_on_reload,
                 on_reload_mcp=_on_reload_mcp,
+                on_mcp_status=_on_mcp_status,
+                on_mcp_connect=_on_mcp_connect,
+                on_mcp_disconnect=_on_mcp_disconnect,
                 on_model_swap=_on_model_swap,
                 on_provider_swap=_on_provider_swap,
                 on_compress=_on_compress,

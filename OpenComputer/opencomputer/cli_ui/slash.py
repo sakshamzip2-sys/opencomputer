@@ -179,6 +179,19 @@ SLASH_REGISTRY: list[CommandDef] = [
         description="Disconnect + re-discover all MCP servers.",
         category="config",
     ),
+    # 2026-05-14 — Claude-Code-parity MCP management. Pair with the
+    # deferred-connect startup mode so the user can inspect "still
+    # connecting" state and reconnect specific servers without a full
+    # reload.
+    CommandDef(
+        name="mcp",
+        description=(
+            "MCP server status / connect / disconnect / reload. "
+            "No args shows the live status table."
+        ),
+        category="config",
+        args_hint="[connect <name>|disconnect <name>|reload|status]",
+    ),
     CommandDef(
         name="debug",
         description="Sanitized diagnostic dump for bug reports (no secrets).",
