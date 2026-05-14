@@ -9,9 +9,6 @@ spawning the daemon.
 
 from __future__ import annotations
 
-import json
-import sys
-
 import typer
 
 # Plugin-loader puts the plugin root on sys.path[0]; flat import works.
@@ -24,10 +21,20 @@ from lifecycle import (  # noqa: E402 — sys.path[0] populated by loader
     OpenDesignNotInstalledError,
     PortInUseError,
     resolve_open_design_home,
+)
+from lifecycle import (
     restart as lifecycle_restart,
+)
+from lifecycle import (
     start as lifecycle_start,
+)
+from lifecycle import (
     status as lifecycle_status,
+)
+from lifecycle import (
     status_json as lifecycle_status_json,
+)
+from lifecycle import (
     stop as lifecycle_stop,
 )
 

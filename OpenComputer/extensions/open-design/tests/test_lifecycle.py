@@ -9,12 +9,8 @@ nothing real is launched.
 from __future__ import annotations
 
 import importlib.util
-import os
-import signal
 import sys
-import time
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
