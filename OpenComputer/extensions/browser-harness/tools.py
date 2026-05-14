@@ -299,8 +299,11 @@ class BrowserTypeTool(BaseTool):
         return ToolSchema(
             name="BrowserType",
             description=(
-                "Focus an input element (by ref ID from BrowserSnapshot) "
-                "and type text into it."
+                "Focus an input element (identified by a ref ID like "
+                "``@e7`` returned from BrowserSnapshot) and type the given "
+                "text into it. Use this for filling forms, search boxes, "
+                "and other text-input fields after locating them via a "
+                "snapshot."
             ),
             parameters={
                 "type": "object",
