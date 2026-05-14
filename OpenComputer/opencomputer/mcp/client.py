@@ -1914,16 +1914,27 @@ class MCPManager:
             # ``MCPAliasTool`` Hermes-shape aliases, plus utility tools
             # (``_MCPListResourcesTool`` etc.) which expose their name
             # only via ``schema.name``, NOT a ``tool_name`` attribute.
-            # Use ``schema.name`` uniformly so the snapshot doesn't
-            # AttributeError on capability-advertising servers.
+            # Prefer the raw ``tool_name`` when present (preserves the
+            # "alpha"/"beta" shape that test_mcp_status expects); fall
+            # back to ``schema.name`` for utility tools, stripping the
+            # ``<server>__`` prefix so the display stays consistent.
             tool_names: list[str] = []
+            prefix = f"{cfg.name}__"
             for t in conn.tools:
-                try:
-                    tool_names.append(t.schema.name)
-                except AttributeError:  # defensive — schema is the
-                    # BaseTool contract; missing it means a misbuilt
-                    # test double, which the snapshot ignores.
-                    pass
+                name = getattr(t, "tool_name", None)
+                if name is None:
+                    try:
+                        schema_name = t.schema.name
+                    except AttributeError:
+                        # Misbuilt test double — skip it rather than
+                        # poisoning the snapshot.
+                        continue
+                    name = (
+                        schema_name[len(prefix):]
+                        if schema_name.startswith(prefix)
+                        else schema_name
+                    )
+                tool_names.append(name)
             snap.append(
                 {
                     "name": cfg.name,
