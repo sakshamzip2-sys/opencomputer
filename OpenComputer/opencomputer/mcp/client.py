@@ -1420,6 +1420,7 @@ class MCPManager:
         *,
         osv_check_enabled: bool = True,
         osv_check_fail_closed: bool = False,
+        include_bundle: bool = True,
     ) -> int:
         """Connect to every enabled server + register its tools. Returns tool count.
 
@@ -1433,8 +1434,35 @@ class MCPManager:
         straight through to each :meth:`MCPConnection.connect` call so
         callers can plumb :class:`MCPConfig` flags without per-server
         threading.
+
+        ``include_bundle`` (default ``True``): also walk
+        :data:`opencomputer.mcp.bundle.default_registry` to mount every
+        plugin-shipped bundle MCP server. Set ``False`` in tests that
+        want a clean process-global config baseline. mcp-openclaw-port M1.
         """
-        enabled = [cfg for cfg in servers if cfg.enabled]
+        merged: list[MCPServerConfig] = list(servers)
+        if include_bundle:
+            # Late import — keeps client.py's startup cheap when no
+            # plugins have bundled MCPs.
+            from opencomputer.mcp.bundle import default_registry
+
+            bundle_configs = default_registry.all_server_configs()
+            # Skip bundle entries whose ``name`` already appears in the
+            # user-configured list. This is defensive: a user could (in
+            # principle) hand-add a server named ``plug__mem`` that
+            # collides with a bundle. User config wins — they explicitly
+            # asked for it.
+            existing_names = {cfg.name for cfg in merged}
+            for cfg in bundle_configs:
+                if cfg.name in existing_names:
+                    logger.warning(
+                        "bundle MCP %s shadowed by user-configured server "
+                        "with same name; skipping bundle entry",
+                        cfg.name,
+                    )
+                    continue
+                merged.append(cfg)
+        enabled = [cfg for cfg in merged if cfg.enabled]
         if not enabled:
             return 0
 
@@ -1628,6 +1656,7 @@ class MCPManager:
         osv_check_enabled: bool = True,
         osv_check_fail_closed: bool = False,
         timeout: float = 120.0,
+        include_bundle: bool = True,
     ) -> int:
         """Sync wrapper around :meth:`connect_all` for non-async callers.
 
@@ -1641,6 +1670,7 @@ class MCPManager:
                 servers,
                 osv_check_enabled=osv_check_enabled,
                 osv_check_fail_closed=osv_check_fail_closed,
+                include_bundle=include_bundle,
             ),
             timeout=timeout,
         )
@@ -1651,6 +1681,7 @@ class MCPManager:
         *,
         osv_check_enabled: bool = True,
         osv_check_fail_closed: bool = False,
+        include_bundle: bool = True,
     ) -> None:
         """Fire-and-forget connect_all on the bg loop. Non-blocking.
 
@@ -1669,6 +1700,7 @@ class MCPManager:
                 servers,
                 osv_check_enabled=osv_check_enabled,
                 osv_check_fail_closed=osv_check_fail_closed,
+                include_bundle=include_bundle,
             ),
             self._bg_loop,
         )

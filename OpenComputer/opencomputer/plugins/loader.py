@@ -1518,6 +1518,21 @@ def load_plugin(
                 exc_info=True,
             )
 
+    # mcp-openclaw-port M1 (2026-05-15): bundle MCP servers the plugin
+    # ships in its own tree. Register on the process-global
+    # ``BundleMcpRegistry`` so :class:`MCPManager` can mount them
+    # alongside user-configured servers. Errors logged + swallowed:
+    # bundle-MCP startup must never block plugin load.
+    if manifest.bundle_mcp:
+        try:
+            _register_bundle_mcps(candidate)
+        except Exception:  # noqa: BLE001 — diagnostic, never block load
+            logger.debug(
+                "bundle MCP registration raised for plugin '%s'; swallowing",
+                manifest.id,
+                exc_info=True,
+            )
+
     logger.info("loaded plugin '%s' v%s", manifest.id, manifest.version)
     return LoadedPlugin(
         candidate=candidate,
@@ -1525,6 +1540,59 @@ def load_plugin(
         registrations=registrations,
         api=api,
     )
+
+
+def _register_bundle_mcps(
+    candidate: PluginCandidate,
+    *,
+    registry: Any = None,
+) -> int:
+    """Register a plugin's bundle MCP servers (mcp-openclaw-port M1).
+
+    The plugin manifest's ``bundle_mcp`` field lists servers shipped
+    inside the plugin tree. Each entry produces an MCPServerConfig named
+    ``<plugin_id>__<server.name>`` and lands in the
+    :class:`opencomputer.mcp.bundle.BundleMcpRegistry` keyed by plugin
+    id; the MCP manager merges this view with user-configured servers
+    on connect.
+
+    Returns the number of servers actually registered (path-escape or
+    invalid-transport entries are skipped by the registry's safety
+    check, logged at WARNING).
+
+    Late-imports :mod:`opencomputer.mcp.bundle` so the loader's import
+    surface stays narrow and the bundle module is only paid for when
+    a plugin actually declares ``bundle_mcp``.
+    """
+    if not candidate.manifest.bundle_mcp:
+        return 0
+    from opencomputer.mcp.bundle import default_registry
+
+    reg = registry if registry is not None else default_registry
+    return reg.register_plugin_servers(
+        candidate.manifest.id,
+        candidate.root_dir.resolve(),
+        candidate.manifest.bundle_mcp,
+    )
+
+
+def _unregister_bundle_mcps(
+    plugin_id: str,
+    *,
+    registry: Any = None,
+) -> int:
+    """Drop bundle MCP entries for ``plugin_id`` (mcp-openclaw-port M1).
+
+    Symmetric to :func:`_register_bundle_mcps`. Returns the count
+    removed; zero is fine and is the no-op case (plugin never bundled
+    any MCPs). The MCP manager handles process-level subprocess
+    shutdown separately — this function only touches the config
+    registry.
+    """
+    from opencomputer.mcp.bundle import default_registry
+
+    reg = registry if registry is not None else default_registry
+    return reg.unregister_plugin(plugin_id)
 
 
 def _install_mcp_servers_from_manifest(manifest) -> None:  # type: ignore[no-untyped-def]
@@ -1709,6 +1777,20 @@ def teardown_loaded_plugin(
         if regs.registered_memory_provider:
             target_api.memory_provider = None
 
+    # mcp-openclaw-port M1 (2026-05-15) — drop bundle MCP registrations
+    # symmetric to load_plugin's _register_bundle_mcps call. The
+    # MCPManager handles subprocess shutdown via its own connect/disconnect
+    # cycle; this clears the *config* registry so a subsequent connect
+    # doesn't try to re-spawn a now-disabled plugin's bundles.
+    try:
+        _unregister_bundle_mcps(plugin_id)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "bundle MCP unregister raised for plugin '%s'; swallowing",
+            plugin_id,
+            exc_info=True,
+        )
+
     # Step 3 — drop the synthetic module + common sibling names from
     # sys.modules so a later reload sees a clean graph. Synthetic name
     # is deterministic (see load_plugin below).
@@ -1785,4 +1867,6 @@ __all__ = [
     "teardown_loaded_plugin",
     "reload_plugin",
     "SingleInstanceError",
+    "_register_bundle_mcps",
+    "_unregister_bundle_mcps",
 ]

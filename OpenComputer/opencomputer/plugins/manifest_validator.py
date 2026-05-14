@@ -167,6 +167,45 @@ class PluginActivationSchema(BaseModel):
         return v
 
 
+class BundleMcpServerSchema(BaseModel):
+    """Validator mirror of ``plugin_sdk.core.BundleMcpServer``.
+
+    mcp-openclaw-port M1 (2026-05-15). Each entry in a plugin's
+    ``bundle_mcp`` array must declare a ``name`` and a ``transport``
+    (defaulting to ``stdio``). ``command`` is mandatory for stdio and
+    irrelevant for sse/http; we validate the cross-field rule on the
+    parent schema (``model_validator``) to keep error messages clear.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    transport: Literal["stdio", "sse", "http"] = Field(default="stdio")
+    command: str = Field(default="", max_length=1024)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str = Field(default="", max_length=1024)
+    url: str = Field(default="", max_length=1024)
+    headers: dict[str, str] = Field(default_factory=dict)
+    connection_timeout_seconds: float = Field(default=30.0, gt=0.0, le=600.0)
+    lazy: bool = Field(default=True)
+    tools_allow: list[str] | None = Field(default=None)
+    tools_deny: list[str] = Field(default_factory=list)
+    osv_check: bool = Field(default=True)
+
+    @field_validator("name")
+    @classmethod
+    def _name_alphanumeric_underscore_dash(cls, v: str) -> str:
+        # Keep the namespacing predictable; tool names must be safe to
+        # paste into MCP wire envelopes. Allow letters, digits, dash,
+        # underscore.
+        if not v.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(
+                f"bundle_mcp.name {v!r} must be alphanumeric / dash / underscore"
+            )
+        return v
+
+
 class PluginManifestSchema(BaseModel):
     """Typed mirror of `plugin_sdk.core.PluginManifest` for validation only."""
 
@@ -230,6 +269,12 @@ class PluginManifestSchema(BaseModel):
     # POSIX-shell-safe non-empty strings below.
     cli_commands: list[str] = Field(default_factory=list)
     cli_commands_profiles: list[str] | None = Field(default=None)
+    # mcp-openclaw-port M1 (2026-05-15) — bundle MCP servers a plugin
+    # ships in its tree. Distinct from ``mcp_servers`` (which references
+    # user-facing preset slugs for the profile's MCP config) — bundle
+    # entries are wholly internal to the plugin and mount only while
+    # the plugin is loaded.
+    bundle_mcp: list[BundleMcpServerSchema] = Field(default_factory=list)
 
     @field_validator("cli_commands")
     @classmethod
@@ -325,6 +370,7 @@ def validate_manifest(data: dict[str, Any]) -> tuple[PluginManifestSchema | None
 
 __all__ = [
     "AuthChoiceSchema",
+    "BundleMcpServerSchema",
     "ModelSupportSchema",
     "PluginActivationSchema",
     "PluginKind",

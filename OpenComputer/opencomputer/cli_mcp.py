@@ -84,22 +84,118 @@ def _enforce_osv_malware_check(
 
 @mcp_app.command("list")
 def list_servers() -> None:
-    """List every configured MCP server."""
+    """List every configured MCP server (user-configured + plugin-bundled)."""
     cfg = load_config()
-    if not cfg.mcp.servers:
+    bundle_configs = _gather_bundle_configs()
+    if not cfg.mcp.servers and not bundle_configs:
         console.print("[dim]no MCP servers configured.[/dim]")
         console.print(
             "[dim]add one with: opencomputer mcp add NAME --transport stdio --command CMD ...[/dim]"
         )
         return
-    table = Table(show_header=True, header_style="bold cyan")
+    if cfg.mcp.servers:
+        table = Table(show_header=True, header_style="bold cyan", title="user")
+        table.add_column("name")
+        table.add_column("transport")
+        table.add_column("target")
+        table.add_column("enabled")
+        for s in cfg.mcp.servers:
+            target = (
+                f"{s.command} {' '.join(s.args)}".strip()
+                if s.transport == "stdio"
+                else s.url
+            )
+            table.add_row(
+                s.name,
+                s.transport,
+                target or "[dim](unset)[/dim]",
+                "[green]yes[/green]" if s.enabled else "[red]no[/red]",
+            )
+        console.print(table)
+    if bundle_configs:
+        # Bundle servers are grouped by plugin id (parsed from the
+        # ``<plugin>__<server>`` name prefix). One sub-section per plugin.
+        groups: dict[str, list] = {}
+        for plugin_id, cfg_entry in bundle_configs:
+            groups.setdefault(plugin_id, []).append(cfg_entry)
+        for plugin_id, entries in sorted(groups.items()):
+            bundle_table = Table(
+                show_header=True, header_style="bold magenta",
+                title=f"bundled — plugin {plugin_id!r}",
+            )
+            bundle_table.add_column("name")
+            bundle_table.add_column("transport")
+            bundle_table.add_column("target")
+            bundle_table.add_column("enabled")
+            for s in entries:
+                target = (
+                    f"{s.command} {' '.join(s.args)}".strip()
+                    if s.transport == "stdio"
+                    else s.url
+                )
+                bundle_table.add_row(
+                    s.name,
+                    s.transport,
+                    target or "[dim](unset)[/dim]",
+                    "[green]yes[/green]" if s.enabled else "[red]no[/red]",
+                )
+            console.print(bundle_table)
+
+
+def _gather_bundle_configs() -> list[tuple[str, MCPServerConfig]]:
+    """Return ``[(plugin_id, server_config), ...]`` from the bundle registry.
+
+    Imports the registry lazily so plain ``oc mcp list`` doesn't pay
+    for the bundle module unless any plugins have actually bundled MCPs.
+    """
+    from opencomputer.mcp.bundle import default_registry
+
+    out: list[tuple[str, MCPServerConfig]] = []
+    for plugin_id in default_registry.plugin_ids():
+        for cfg in default_registry.servers_for_plugin(plugin_id):
+            out.append((plugin_id, cfg))
+    return out
+
+
+@mcp_app.command("bundles")
+def list_bundles() -> None:
+    """List bundle-MCP servers shipped by active plugins.
+
+    mcp-openclaw-port M1 (2026-05-15). Bundle MCPs are MCP servers a
+    plugin declares in its own manifest's ``bundle_mcp`` field; they
+    are mounted only while the plugin is loaded and namespaced as
+    ``<plugin_id>__<server>__<tool>``. Distinct from user-configured
+    presets shown by ``oc mcp list``.
+
+    NOTE: this CLI runs out-of-process from the active agent, so the
+    registry is empty unless the agent has already loaded the plugins.
+    Run ``oc plugins`` to see which plugins are active; bundles only
+    register on plugin activation.
+    """
+    configs = _gather_bundle_configs()
+    if not configs:
+        console.print(
+            "[dim]no bundle MCPs registered. "
+            "Plugins declare them via the [bold]bundle_mcp[/bold] field in plugin.json.[/dim]"
+        )
+        console.print(
+            "[dim]see docs/plugin-bundle-mcp.md for the authoring guide.[/dim]"
+        )
+        return
+    table = Table(show_header=True, header_style="bold magenta", title="bundle MCPs")
+    table.add_column("plugin")
     table.add_column("name")
     table.add_column("transport")
     table.add_column("target")
     table.add_column("enabled")
-    for s in cfg.mcp.servers:
-        target = f"{s.command} {' '.join(s.args)}".strip() if s.transport == "stdio" else s.url
+    for plugin_id, s in configs:
+        target = (
+            f"{s.command} {' '.join(s.args)}".strip()
+            if s.transport == "stdio"
+            else s.url
+        )
         table.add_row(
+            plugin_id,
             s.name,
             s.transport,
             target or "[dim](unset)[/dim]",

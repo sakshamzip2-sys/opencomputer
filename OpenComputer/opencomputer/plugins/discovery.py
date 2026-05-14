@@ -23,6 +23,7 @@ from typing import Literal
 from opencomputer.plugins.security import _path_is_inside, validate_plugin_root
 from plugin_sdk.core import (
     AuthChoice,
+    BundleMcpServer,
     ModelSupport,
     PluginActivation,
     PluginManifest,
@@ -205,6 +206,29 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         if schema.activation is not None
         else None
     )
+    # mcp-openclaw-port M1 — flatten BundleMcpServerSchema → BundleMcpServer.
+    # Validator dict + list types convert to BundleMcpServer's frozen
+    # tuple + dict types via the dataclass's __post_init__ normaliser.
+    bundle_mcp = tuple(
+        BundleMcpServer(
+            name=b.name,
+            transport=b.transport,
+            command=b.command,
+            args=tuple(b.args),
+            env=dict(b.env),
+            cwd=b.cwd,
+            url=b.url,
+            headers=dict(b.headers),
+            connection_timeout_seconds=b.connection_timeout_seconds,
+            lazy=b.lazy,
+            tools_allow=(
+                tuple(b.tools_allow) if b.tools_allow is not None else None
+            ),
+            tools_deny=tuple(b.tools_deny),
+            osv_check=b.osv_check,
+        )
+        for b in schema.bundle_mcp
+    )
     return PluginManifest(
         id=schema.id,
         name=schema.name,
@@ -243,6 +267,8 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
             if schema.cli_commands_profiles is not None
             else None
         ),
+        # mcp-openclaw-port M1 — bundle MCP servers the plugin ships.
+        bundle_mcp=bundle_mcp,
     )
 
 

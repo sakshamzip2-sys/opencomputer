@@ -25,6 +25,7 @@ from plugin_sdk.consent import (
 )
 from plugin_sdk.core import (
     AuthChoice,
+    BundleMcpServer,
     Message,
     MessageEvent,
     ModelSupport,
@@ -190,6 +191,7 @@ __all__ = [
     "MessageEvent",
     "SendResult",
     "ModelSupport",
+    "BundleMcpServer",
     "PluginManifest",
     "PluginActivation",
     "PluginActivationSource",
