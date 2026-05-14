@@ -31,6 +31,14 @@ dependencies = [
   "prompt_toolkit>=3.0",
   "typer>=0.12",
   "httpx>=0.27",
+  # `extensions/browser-harness/dispatcher.py` (vendored from upstream
+  # hermes-agent) uses `import requests` for synchronous Cloud-browser HTTP.
+  # httpx is preferred elsewhere; the browser-harness path is the only
+  # site that pulls in `requests`. Without this declaration, fresh
+  # editable installs raise `ModuleNotFoundError: No module named 'requests'`
+  # the moment `oc workspace` (or any code path that imports the harness)
+  # runs.
+  "requests>=2.31",
   "tenacity>=9.0",
   "pyyaml>=6.0",
   "mcp>=1.0",
