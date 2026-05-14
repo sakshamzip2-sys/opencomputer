@@ -191,6 +191,27 @@ def _run_impl(
     ws_dir = _resolve_workspace_dir(workspace_dir)
     profile_home = _resolve_profile_home()
 
+    # 1b. Plugin discovery — without this, the embedded dashboard's
+    # `/v1/chat/completions` handler returns 500 with
+    # `provider 'anthropic' is not registered. Installed: ['none']`
+    # because the agent-side plugin registry is empty in this process.
+    # `oc chat` calls `_discover_plugins()` from `cli.py` on startup;
+    # `oc workspace` previously skipped it because the workspace was
+    # meant to talk to a separately-running hermes-agent. Now that the
+    # embedded OC dashboard serves chat directly we have to load the
+    # provider/tool plugins here too.
+    try:
+        from opencomputer.cli import _discover_plugins
+
+        loaded = _discover_plugins()
+        logger.info("oc workspace: loaded %d plugin(s)", loaded)
+    except Exception as exc:  # noqa: BLE001
+        # Plugin discovery failure is non-fatal — the workspace UI
+        # still boots (sessions, memory, files, terminal all work)
+        # and chat will surface its own 'provider not registered'
+        # error if the user tries to send a message.
+        logger.warning("oc workspace: plugin discovery failed: %s", exc)
+
     # 2. Prerequisites.
     prereqs = check_prerequisites()
     if not prereqs.ok:

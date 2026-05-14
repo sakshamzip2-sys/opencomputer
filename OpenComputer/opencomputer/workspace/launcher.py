@@ -154,6 +154,118 @@ def _port_in_use(host: str, port: int) -> bool:
             return False
 
 
+def _find_orphan_workspace_holder(
+    workspace_dir: Path, port: int  # noqa: ARG001 — kept for signature stability
+) -> tuple[int, str] | None:
+    """Return (pid, cmdline) of an orphaned workspace server matching us.
+
+    Caller has already confirmed ``port`` is bound; this function identifies
+    whether the holder is a stale ``node server-entry.js`` from OUR workspace
+    directory so we can safely reclaim the port. We deliberately do NOT call
+    :func:`psutil.net_connections` — macOS sandboxes that to root and would
+    raise :class:`psutil.AccessDenied` on every non-priv call. Instead we
+    iterate processes and match on cmdline + cwd, which needs no special
+    capabilities for processes owned by the current user.
+
+    Returns ``None`` if no qualifying process is found OR if psutil isn't
+    importable (we degrade silently rather than mask the underlying error).
+    """
+    try:
+        import psutil  # local import keeps cold-start cost off the hot path
+    except Exception:  # noqa: BLE001
+        return None
+
+    workspace_path = workspace_dir.resolve()
+    candidates: list[tuple[int, str]] = []
+    for proc in psutil.process_iter(attrs=["pid", "name", "cmdline", "ppid"]):
+        try:
+            cmdline_parts = proc.info.get("cmdline") or []
+            if not cmdline_parts:
+                continue
+            name = (proc.info.get("name") or "").lower()
+            if "node" not in name and not any(
+                "node" in part.lower() for part in cmdline_parts[:1]
+            ):
+                continue
+            cmdline = " ".join(cmdline_parts)
+            # Must be a node server-entry.js — anything else (e.g. a user's
+            # own dev server) we leave well alone.
+            if "server-entry.js" not in cmdline:
+                continue
+            # Match cwd to our workspace_dir so we never kill an unrelated
+            # workspace running from a different checkout.
+            try:
+                cwd = Path(proc.cwd()).resolve()
+            except (psutil.AccessDenied, OSError):
+                # Can't verify cwd → skip rather than risk killing the
+                # wrong process. This is the safer failure mode.
+                continue
+            if cwd != workspace_path:
+                continue
+            # CRITICAL: only flag as "orphan" if the parent is gone. A node
+            # workspace with a live `oc workspace` python parent is a
+            # HEALTHY session (e.g. running in another terminal); killing
+            # it would be a footgun. Orphans are reparented to launchd
+            # (PID 1) when their python parent dies without cleanup.
+            ppid = proc.info.get("ppid")
+            if ppid is None:
+                # Can't determine parentage → skip rather than risk
+                # killing a live session.
+                continue
+            if ppid != 1:
+                # Has a live parent — not an orphan. Don't touch it.
+                # The user has another `oc workspace` running; they need
+                # to stop it themselves or use a different --port.
+                continue
+            candidates.append((proc.info["pid"], cmdline))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if not candidates:
+        return None
+    # Multiple matches would mean multiple stale servers from the same
+    # workspace dir — return the first; the caller's terminate path will be
+    # called again on the next port-in-use check if any survive.
+    return candidates[0]
+
+
+def _terminate_orphan(pid: int, timeout: float = 3.0) -> bool:
+    """Politely terminate the orphan, escalating to SIGKILL if it lingers.
+
+    Returns True if the process is gone (or never existed) at the end.
+    """
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001
+        try:
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(0.5)
+            os.kill(pid, 0)  # raises if dead
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return True
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout)
+        return True
+    except psutil.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=2.0)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return True
+
+
 def _build_env(spec: LaunchSpec) -> dict[str, str]:
     env = os.environ.copy()
     env["PORT"] = str(spec.port)
@@ -261,10 +373,53 @@ def spawn_workspace(spec: LaunchSpec) -> WorkspaceProcess:
         )
 
     if _port_in_use(spec.host, spec.port):
-        raise RuntimeError(
-            f"port {spec.port} on {spec.host} is already in use — pass "
-            "--port to choose a different one"
+        # Most of the "port already in use" reports trace back to a previous
+        # ``oc workspace`` shell that didn't run cleanup — see
+        # ``lifecycle._install_signal_handlers`` for the SIGHUP fix that
+        # prevents new orphans. For pre-existing orphans (and future
+        # SIGKILL'd parents) we identify and offer to clean ours up so the
+        # user isn't stuck running ``lsof | grep 3000 | kill`` by hand.
+        orphan = _find_orphan_workspace_holder(spec.workspace_dir, spec.port)
+        if orphan is None:
+            raise RuntimeError(
+                f"port {spec.port} on {spec.host} is already in use — pass "
+                "--port to choose a different one"
+            )
+        pid, cmdline = orphan
+        kill_orphan = os.environ.get("OC_WORKSPACE_KILL_ORPHAN", "").lower() in (
+            "1",
+            "true",
+            "yes",
         )
+        if not kill_orphan:
+            raise RuntimeError(
+                f"port {spec.port} on {spec.host} is held by a stale workspace "
+                f"server (pid={pid}: {cmdline[:80]}). This is almost certainly a "
+                f"leftover from a previous `oc workspace` shell that closed "
+                f"without cleanup. Re-run with OC_WORKSPACE_KILL_ORPHAN=1 to "
+                f"reclaim the port automatically, or run "
+                f"`kill {pid}` first."
+            )
+        logger.warning(
+            "workspace: reclaiming port %d from stale server pid=%d",
+            spec.port,
+            pid,
+        )
+        if not _terminate_orphan(pid):
+            raise RuntimeError(
+                f"failed to terminate stale workspace server pid={pid} on port "
+                f"{spec.port}; kill it manually with `kill -9 {pid}` and retry"
+            )
+        # Give the kernel a moment to release the socket.
+        for _ in range(10):
+            if not _port_in_use(spec.host, spec.port):
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError(
+                f"port {spec.port} still bound after terminating pid={pid}; "
+                f"another process may be racing for it"
+            )
 
     entry = spec.workspace_dir / "server-entry.js"
     if not entry.is_file():
