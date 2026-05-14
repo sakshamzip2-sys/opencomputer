@@ -12,9 +12,6 @@ from __future__ import annotations
 
 import logging
 
-from plugin_sdk.runtime_context import RuntimeContext
-from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
-
 # Plugin-loader puts the plugin root on sys.path[0]; flat import works.
 # The hyphenated dir name (extensions/open-design/) cannot be imported
 # as a Python package, so there is no fallback path — tests import via
@@ -23,11 +20,22 @@ from lifecycle import (  # noqa: E402 — sys.path[0] populated by loader
     DaemonAlreadyRunningError,
     OpenDesignNotInstalledError,
     PortInUseError,
+)
+from lifecycle import (
     restart as lifecycle_restart,
+)
+from lifecycle import (
     start as lifecycle_start,
+)
+from lifecycle import (
     status as lifecycle_status,
+)
+from lifecycle import (
     stop as lifecycle_stop,
 )
+
+from plugin_sdk.runtime_context import RuntimeContext
+from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 
 _log = logging.getLogger("opencomputer.open_design.slash")
 

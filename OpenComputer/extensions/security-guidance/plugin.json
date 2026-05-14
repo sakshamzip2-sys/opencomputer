@@ -1,0 +1,10 @@
+{
+  "id": "security-guidance",
+  "name": "Security Guidance",
+  "version": "0.1.0",
+  "description": "PreToolUse hook that warns the agent before edits introduce common security risks (eval/exec injection, dangerouslySetInnerHTML/innerHTML XSS, document.write, pickle deserialization, os.system, child_process.exec, GitHub Actions injection sinks). Each unique (file, rule) warning fires once per session — not on every edit. Disable with ENABLE_SECURITY_REMINDER=0.",
+  "author": "OpenComputer Contributors (port of Anthropic's security-guidance plugin)",
+  "license": "MIT",
+  "kind": "tool",
+  "entry": "plugin"
+}

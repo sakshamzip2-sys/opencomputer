@@ -240,9 +240,7 @@ def _is_alive(pid: int) -> bool:
         # Process exists but is not ours — treat as alive (don't double-spawn)
         return True
     except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            return False
-        return True
+        return exc.errno != errno.ESRCH
 
 
 def _rotate_log_if_needed() -> None:

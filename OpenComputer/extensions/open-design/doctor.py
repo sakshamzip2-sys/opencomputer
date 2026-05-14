@@ -24,14 +24,15 @@ import re
 import shutil
 import subprocess
 
-from plugin_sdk.doctor import HealthContribution, RepairResult
-
 from lifecycle import (  # noqa: E402 — sys.path[0] populated by loader
     WEB_INDEX_REL_PATH,
     resolve_open_design_home,
+)
+from lifecycle import (
     status as lifecycle_status,
 )
 
+from plugin_sdk.doctor import HealthContribution, RepairResult
 
 #: Minimum Node major version we accept. open-design pins ~24 in its
 #: package.json engines field, but the daemon binary runs fine on Node
