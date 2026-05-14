@@ -33,3 +33,16 @@
 # Claude Code per-session artifacts (transcripts, memory, etc.) live
 # alongside the repo but shouldn't be tracked.
 /.claude/
+
+# Nested git checkouts living inside the parent repo for local experiments
+# / vendored UIs. They have their own remotes and PR flows — committing
+# them as embedded repos would shadow .gitmodules-style submodule semantics
+# without any of the tracking, and tooling like `oc workspace doctor` /
+# discovery fallbacks treat their presence as a signal anyway.
+/OpenComputer/oc-workspace/
+/claude-plugins-official/
+/open-design/
+
+# Playwright MCP browser cache + Finder-style duplicate work dirs.
+.playwright-mcp/
+/design_handoff_prompt_bar 2/
