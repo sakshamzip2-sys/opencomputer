@@ -1990,9 +1990,20 @@ def _run_chat_session(
     if no_compact:
         console.print("[dim]compaction disabled[/dim]")
     if cfg.mcp.servers:
-        console.print(
-            f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]"
-        )
+        if cfg.mcp.deferred:
+            # Deferred mode: connect_all is still running on the bg loop
+            # at banner-print time, so ``n_mcp_tools`` is 0 even when
+            # every server will eventually come up. Show the enabled
+            # count rather than a misleading "0 tool(s)" line.
+            enabled = sum(1 for s in cfg.mcp.servers if s.enabled)
+            console.print(
+                f"[dim]mcp:     {enabled} server(s) connecting in background — "
+                f"type /mcp for status[/dim]"
+            )
+        else:
+            console.print(
+                f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]"
+            )
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
     # Resume mode: render the prior conversation so the user sees what
