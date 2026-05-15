@@ -89,12 +89,22 @@ class SessionMcpRuntimeManager:
         *,
         idle_ttl_seconds: float = 300.0,
         max_sessions: int = 20,
+        lease_registry: Any = None,
     ) -> None:
         self._factory = mcp_manager_factory
         self.idle_ttl_seconds = float(idle_ttl_seconds)
         self.max_sessions = int(max_sessions)
         self._lock = threading.RLock()
         self._slots: dict[str, _Slot] = {}
+        # Gap F (M4) — lease counting. When provided, ``sweep_idle``
+        # skips sessions with active leases (an in-flight tool call).
+        # Default ``None`` keeps back-compat with callers built before
+        # this milestone shipped.
+        if lease_registry is None:
+            from opencomputer.mcp.lease import LeaseRegistry
+
+            lease_registry = LeaseRegistry()
+        self.lease_registry = lease_registry
 
     # ── lookup / creation ──────────────────────────────────────────
 
@@ -179,6 +189,11 @@ class SessionMcpRuntimeManager:
 
         Returns the list of session ids that were evicted. Designed
         to be called from a periodic timer (every ~60s in production).
+
+        Gap F (M4) — sessions with active leases (in-flight tool
+        calls) are SKIPPED. The caller acquires a lease via
+        ``self.lease_registry.acquire(session_id)`` before dispatch
+        and releases after; idle-TTL eviction respects the lease.
         """
         now = time.time()
         cutoff = now - self.idle_ttl_seconds
@@ -186,9 +201,16 @@ class SessionMcpRuntimeManager:
         with self._lock:
             for sid in list(self._slots.keys()):
                 slot = self._slots[sid]
-                if slot.last_used_at < cutoff:
-                    evicted.append((sid, slot.manager))
-                    del self._slots[sid]
+                if slot.last_used_at >= cutoff:
+                    continue
+                # Gap F — skip sessions with active leases.
+                if self.lease_registry.has_active_lease(sid):
+                    logger.debug(
+                        "session MCP runtime %s skipped (active lease)", sid,
+                    )
+                    continue
+                evicted.append((sid, slot.manager))
+                del self._slots[sid]
         for sid, mgr in evicted:
             logger.info(
                 "session MCP runtime evicted (idle): session_id=%s", sid,
