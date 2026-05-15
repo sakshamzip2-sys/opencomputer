@@ -37,9 +37,8 @@
 # Nested git checkouts living inside the parent repo for local experiments
 # / vendored UIs. They have their own remotes and PR flows — committing
 # them as embedded repos would shadow .gitmodules-style submodule semantics
-# without any of the tracking, and tooling like `oc workspace doctor` /
-# discovery fallbacks treat their presence as a signal anyway.
-/OpenComputer/oc-workspace/
+# without any of the tracking. (oc-workspace was consolidated into this
+# monorepo on 2026-05-15 — it is now tracked here directly, not ignored.)
 /claude-plugins-official/
 /open-design/
 

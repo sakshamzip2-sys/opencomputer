@@ -18,7 +18,7 @@ consumer of these modules. Plugin authors do NOT import from
 from __future__ import annotations
 
 from opencomputer.workspace.discovery import (
-    DEFAULT_DEV_SOURCES_PATH,
+    IN_REPO_WORKSPACE_PATH,
     WorkspaceNotFoundError,
     discover_workspace_dir,
 )
@@ -28,7 +28,7 @@ from opencomputer.workspace.prerequisites import (
 )
 
 __all__ = [
-    "DEFAULT_DEV_SOURCES_PATH",
+    "IN_REPO_WORKSPACE_PATH",
     "PrerequisiteStatus",
     "WorkspaceNotFoundError",
     "check_prerequisites",
