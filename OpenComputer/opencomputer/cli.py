@@ -5269,6 +5269,11 @@ from opencomputer.cli_context import context_app  # noqa: E402
 
 app.add_typer(context_app, name="context")
 
+# HostProfile (2026-05-15) — startup host-environment fingerprint surface.
+from opencomputer.cli_host import host_app  # noqa: E402
+
+app.add_typer(host_app, name="host")
+
 # PR-1 — evolution self-improvement CLI
 from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
 

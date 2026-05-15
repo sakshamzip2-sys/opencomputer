@@ -269,7 +269,16 @@ The above are files the user has pinned via `oc pin <path>` so the agent doesn't
 
 - Working directory: {{ cwd }}
 - User home: {{ user_home }}
-- Operating system: {{ os_name or "unknown" }}
+- Operating system: {{ os_pretty or os_name or "unknown" }}{% if arch %} ({{ arch }}){% endif %}
+{% if cpu_logical or total_ram_gb -%}
+- Hardware: {{ cpu_logical or "?" }} logical CPUs, {{ total_ram_gb or "?" }} GiB RAM
+{% endif -%}
+{% if display_server and display_server not in ("aqua", "windows") -%}
+- Display: {{ display_server }}{% if is_headless %} (headless — no display server){% endif %}
+{% endif -%}
+{% if is_container -%}
+- Environment: running inside a container
+{% endif -%}
 - Current time: {{ now }}
 
 These values are captured at session start and frozen for the rest of the session — they do not refresh between turns. If the user changes directory or the wall clock matters for the task, recompute via the `Bash` tool.
