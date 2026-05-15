@@ -36,7 +36,6 @@ from opencomputer.mcp.schema_validation import (
 )
 from plugin_sdk.core import ToolCall
 
-
 # ─── pure validator ──────────────────────────────────────────────
 
 

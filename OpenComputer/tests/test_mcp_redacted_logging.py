@@ -20,7 +20,6 @@ or by including them in error messages. Gap E adds:
 
 from __future__ import annotations
 
-
 from opencomputer.mcp.redaction import redact_mcp_log_text
 
 

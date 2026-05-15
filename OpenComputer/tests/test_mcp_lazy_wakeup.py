@@ -34,7 +34,6 @@ from opencomputer.mcp.lazy_wakeup import (
 from opencomputer.plugins.discovery import _parse_manifest
 from plugin_sdk.core import BundleMcpServer, BundleMcpToolDecl, ToolCall
 
-
 # ─── BundleMcpToolDecl dataclass shape ───────────────────────────
 
 

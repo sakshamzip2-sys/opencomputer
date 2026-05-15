@@ -29,7 +29,6 @@ from opencomputer.mcp.naming import (
     truncate_mcp_tool_name,
 )
 
-
 # ─── sanitize ─────────────────────────────────────────────────────
 
 

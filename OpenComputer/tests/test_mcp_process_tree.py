@@ -31,7 +31,6 @@ from opencomputer.mcp.process_tree import (
     kill_mcp_descendants,
 )
 
-
 # ─── command signature detection ─────────────────────────────────
 
 
@@ -48,7 +47,7 @@ def test_python_module_is_mcp_command_when_mcp_module() -> None:
     assert is_mcp_command(["python", "-m", "mcp.server"])
 
 
-def test_python_module_NOT_mcp_command_when_unrelated() -> None:
+def test_python_module_not_mcp_command_when_unrelated() -> None:
     assert not is_mcp_command(["python3", "-m", "http.server"])
 
 

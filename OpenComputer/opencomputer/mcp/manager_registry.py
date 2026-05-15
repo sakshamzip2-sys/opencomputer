@@ -20,10 +20,10 @@ if TYPE_CHECKING:
     from opencomputer.mcp.client import MCPManager
 
 _lock = threading.RLock()
-_active: "MCPManager | None" = None
+_active: MCPManager | None = None
 
 
-def set_active_manager(manager: "MCPManager | None") -> None:
+def set_active_manager(manager: MCPManager | None) -> None:
     """Install (or clear) the process-global MCPManager handle.
 
     Pass ``None`` to clear (test fixtures, shutdown). Idempotent;
@@ -34,7 +34,7 @@ def set_active_manager(manager: "MCPManager | None") -> None:
         _active = manager
 
 
-def current_active_manager() -> "MCPManager | None":
+def current_active_manager() -> MCPManager | None:
     """Return the active MCPManager, or ``None`` when unset.
 
     Consumers (lazy-wakeup stubs) handle ``None`` by returning a
