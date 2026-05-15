@@ -100,17 +100,20 @@ def resolve_bundle_command(
     if not server.command:
         return ""
     expanded = expand_plugin_root_placeholder(server.command, plugin_root)
-    # Path-y? Anchor + resolve + check it's still inside the plugin root.
+    # Path-y? Anchor + safety-check.
     if "/" in expanded or "\\" in expanded:
-        # Absolute path NOT relative to plugin_root → trust it (the
-        # plugin author explicitly aimed at a system binary).
-        absolute = Path(expanded)
-        if not absolute.is_absolute():
-            absolute = (plugin_root / expanded).resolve()
-        else:
-            absolute = absolute.resolve()
-        # If the original placeholder was set, enforce containment.
+        # When the original command contained the ${PLUGIN_ROOT}
+        # placeholder, run a path-escape safety check: the substituted
+        # path MUST resolve to somewhere inside plugin_root. This is
+        # the ONLY case we resolve symlinks — defense against an
+        # attacker writing a symlink inside the plugin root that
+        # points outward.
         if PLUGIN_ROOT_PLACEHOLDER in server.command:
+            absolute = Path(expanded)
+            if not absolute.is_absolute():
+                absolute = (plugin_root / expanded).resolve()
+            else:
+                absolute = absolute.resolve()
             try:
                 _ = absolute.relative_to(plugin_root.resolve())
             except ValueError as e:
@@ -118,7 +121,16 @@ def resolve_bundle_command(
                     f"bundle MCP command {server.command!r} escapes plugin "
                     f"root {plugin_root!s}: resolved to {absolute!s}"
                 ) from e
-        return str(absolute)
+            return str(absolute)
+        # NOT a ${PLUGIN_ROOT}-relative command — the plugin author
+        # explicitly aimed at a system binary (``/usr/bin/python3``,
+        # ``/opt/foo/bin/x``). Return verbatim WITHOUT resolving
+        # symlinks: ``/usr/bin/python3`` and ``/usr/bin/python3.12``
+        # have different ABI guarantees, and following the symlink
+        # would silently pin the bundle to the wrong Python on CI /
+        # multi-Python boxes. The runtime-level env whitelist +
+        # install-time OSV scan are the security layers here.
+        return expanded
     # Bare name — PATH lookup, return verbatim.
     return expanded
 
