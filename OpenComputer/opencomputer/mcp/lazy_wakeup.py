@@ -67,6 +67,13 @@ class LazyBundleStubTool(BaseTool):
 
     parallel_safe = False
 
+    #: Risk 3 (mcp-openclaw-port follow-up) — hard cap on a single
+    #: wakeup attempt. ``MCPManager.connect_one_sync`` has its own
+    #: 30s in-flight poll; we cap at a tighter window so a failing
+    #: bundle doesn't wedge concurrent dispatchers for a full half-
+    #: minute. The dispatch path's executor-await also enforces this.
+    DEFAULT_WAKEUP_TIMEOUT_SECONDS: float = 15.0
+
     def __init__(
         self,
         plugin_id: str,
@@ -74,6 +81,8 @@ class LazyBundleStubTool(BaseTool):
         decl: BundleMcpToolDecl,
         wakeup_fn: Callable[[], None],
         registry_lookup: Callable[[str], BaseTool | None],
+        *,
+        wakeup_timeout_seconds: float | None = None,
     ) -> None:
         self.plugin_id = plugin_id
         self.server_name = server_name
@@ -82,7 +91,13 @@ class LazyBundleStubTool(BaseTool):
         self.registry_lookup = registry_lookup
         self._wakeup_lock = threading.Lock()
         self._wakeup_done = False
+        self._wakeup_error: BundleWakeupError | None = None
         self._cached_real_tool: BaseTool | None = None
+        self.wakeup_timeout_seconds = (
+            wakeup_timeout_seconds
+            if wakeup_timeout_seconds is not None
+            else self.DEFAULT_WAKEUP_TIMEOUT_SECONDS
+        )
 
     @property
     def schema(self) -> ToolSchema:
@@ -106,21 +121,56 @@ class LazyBundleStubTool(BaseTool):
         )
 
     def _ensure_woken(self) -> None:
-        """Idempotent wakeup. Caller holds the asyncio loop; we hop
-        through ``threading.Lock`` to serialise concurrent dispatches.
+        """Idempotent wakeup. NON-BLOCKING on lock contention: when a
+        concurrent thread already holds the wakeup lock, this raises
+        :class:`BundleWakeupError` immediately rather than queueing up
+        to 30 seconds behind a slow first wakeup.
+
+        Caller holds the asyncio loop; we hop through ``threading.Lock``
+        to serialise concurrent dispatches. The previous wakeup error
+        (if any) is cached so retries don't re-spawn a broken bundle
+        on every dispatch.
         """
-        with self._wakeup_lock:
+        # Hot path — wakeup already completed.
+        if self._wakeup_done:
+            return
+        # Surface a prior failure deterministically without re-spawning.
+        # The LLM can retry on a future turn; if the underlying problem
+        # was transient (network blip) it'll wake fine then. To force a
+        # retry from scratch, the registry / plugin needs to rebuild
+        # the stub.
+        if self._wakeup_error is not None:
+            raise self._wakeup_error
+        acquired = self._wakeup_lock.acquire(blocking=False)
+        if not acquired:
+            # Another dispatch is in the middle of wakeup. Surface a
+            # clear, retryable error to the LLM instead of blocking the
+            # event loop on the slow first call.
+            raise BundleWakeupError(
+                f"wakeup already in progress for "
+                f"{self.plugin_id}__{self.server_name}__{self.decl.name}; "
+                "retry shortly"
+            )
+        try:
+            # Re-check inside the lock to handle the race where another
+            # thread completed wakeup between our hot-path check and
+            # our acquire.
             if self._wakeup_done:
                 return
             try:
                 self.wakeup_fn()
-            except BundleWakeupError:
+            except BundleWakeupError as exc:
+                self._wakeup_error = exc
                 raise
             except Exception as exc:  # noqa: BLE001
-                raise BundleWakeupError(
+                wrapped = BundleWakeupError(
                     f"unexpected wakeup error: {type(exc).__name__}: {exc}"
-                ) from exc
+                )
+                self._wakeup_error = wrapped
+                raise wrapped from exc
             self._wakeup_done = True
+        finally:
+            self._wakeup_lock.release()
 
     async def execute(self, call: ToolCall) -> ToolResult:
         # Lookup cached real tool first — hot path after first call.
@@ -129,9 +179,28 @@ class LazyBundleStubTool(BaseTool):
             try:
                 # Run wakeup in a thread so a sync wakeup_fn that does
                 # real work (subprocess spawn, MCP handshake) doesn't
-                # block the asyncio loop.
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._ensure_woken,
+                # block the asyncio loop. Wrap with ``asyncio.wait_for``
+                # so a slow / hung wakeup raises after the timeout
+                # rather than holding the LLM forever. The thread keeps
+                # running in the background — on success, _wakeup_done
+                # is set and a future call hot-paths; on failure,
+                # _wakeup_error caches the result.
+                await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, self._ensure_woken,
+                    ),
+                    timeout=self.wakeup_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=(
+                        f"bundle MCP wakeup timed out after "
+                        f"{self.wakeup_timeout_seconds}s for "
+                        f"{self.plugin_id}__{self.server_name}__"
+                        f"{self.decl.name}; retry shortly"
+                    ),
+                    is_error=True,
                 )
             except BundleWakeupError as exc:
                 return ToolResult(

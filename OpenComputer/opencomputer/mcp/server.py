@@ -54,7 +54,12 @@ from mcp.server.fastmcp import Context, FastMCP
 from opencomputer.agent.config import _home
 from opencomputer.agent.state import SessionDB
 
-logger = logging.getLogger("opencomputer.mcp.server")
+# Gap E (mcp-openclaw-port follow-up) — redact %s args in MCP log
+# calls so URL tokens / bearer headers / API keys never reach the
+# log file even when an exception message includes them.
+from opencomputer.mcp.redaction import redacting as _redacting
+
+logger = _redacting(logging.getLogger("opencomputer.mcp.server"))
 
 
 #: Allowlist for ``permissions_respond``'s ``granted_by`` arg (M3).

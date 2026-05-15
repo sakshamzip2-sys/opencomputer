@@ -231,6 +231,135 @@ def test_stub_tool_wakeup_failure_returns_error_result() -> None:
     assert "spawn failed" in result.content.lower() or "wakeup" in result.content.lower()
 
 
+def test_stub_tool_lock_non_blocking_on_concurrent_dispatch() -> None:
+    """Risk 3 fix — when a wakeup is in progress on thread A, thread B's
+    dispatch returns a clear ``BundleWakeupError`` immediately instead
+    of blocking up to 30 seconds behind A.
+
+    Implementation detail: ``LazyBundleStubTool._ensure_woken`` uses
+    ``self._wakeup_lock.acquire(blocking=False)`` and raises on contention.
+    """
+    import threading
+    import time
+
+    wakeup_started = threading.Event()
+    wakeup_can_finish = threading.Event()
+
+    def slow_wakeup():
+        wakeup_started.set()
+        wakeup_can_finish.wait(timeout=5.0)
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=slow_wakeup,
+        registry_lookup=lambda name: None,
+    )
+
+    import asyncio
+
+    async def _first_call():
+        return await stub.execute(ToolCall(id="c1", name="x", arguments={}))
+
+    async def _second_call():
+        return await stub.execute(ToolCall(id="c2", name="x", arguments={}))
+
+    async def _run():
+        # Start the first call but don't await its completion.
+        task_a = asyncio.create_task(_first_call())
+        # Wait for the wakeup_fn to actually start (proves the lock is held).
+        while not wakeup_started.is_set():
+            await asyncio.sleep(0.01)
+        # Now the second call: the lock is held by thread A, so this
+        # should hit the non-blocking branch and return error quickly.
+        before = time.monotonic()
+        result_b = await asyncio.wait_for(_second_call(), timeout=2.0)
+        elapsed = time.monotonic() - before
+        # The second call must NOT have blocked for ~5s.
+        assert elapsed < 1.0, (
+            f"second call blocked {elapsed:.2f}s — non-blocking lock broke"
+        )
+        assert result_b.is_error
+        assert "in progress" in result_b.content.lower()
+        # Now release the first wakeup so the test can clean up.
+        wakeup_can_finish.set()
+        await task_a
+        return result_b
+
+    asyncio.run(_run())
+
+
+def test_stub_tool_wakeup_timeout_returns_error() -> None:
+    """Risk 3 fix — if wakeup_fn doesn't complete within
+    ``wakeup_timeout_seconds``, execute() returns a timeout error
+    ToolResult instead of blocking forever.
+    """
+    import threading
+    import time
+
+    wakeup_can_finish = threading.Event()
+
+    def slow_wakeup():
+        # Short wait so the background thread exits soon after the
+        # async-side timeout fires — keeps the test fast.
+        wakeup_can_finish.wait(timeout=1.0)
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=slow_wakeup,
+        registry_lookup=lambda name: None,
+        wakeup_timeout_seconds=0.2,  # tight cap for the test
+    )
+
+    import asyncio
+    result = asyncio.run(stub.execute(
+        ToolCall(id="c1", name="x", arguments={})
+    ))
+    # The timeout path returns an error result with a "timed out" hint.
+    # We assert the RESULT shape, not wall-time elapsed — Python can't
+    # cancel an executor thread mid-flight, so total asyncio.run wall
+    # time includes the executor's natural settle (≤1s here).
+    assert result.is_error
+    assert "timed out" in result.content.lower()
+    # Release the background thread for clean teardown.
+    wakeup_can_finish.set()
+
+
+def test_stub_tool_caches_wakeup_error_no_retry_thrash() -> None:
+    """Risk 3 fix — a failed wakeup is cached so the LLM's retries
+    don't re-spawn the broken bundle. Force a manual reset via
+    new stub instance if the underlying problem was transient.
+    """
+    import asyncio
+
+    n_calls: list[int] = []
+
+    def failing_wakeup():
+        n_calls.append(1)
+        raise BundleWakeupError("MCP server spawn failed: ENOENT npx")
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=failing_wakeup,
+        registry_lookup=lambda name: None,
+    )
+    # First call: wakeup_fn fires + raises
+    result1 = asyncio.run(stub.execute(ToolCall(id="c1", name="x", arguments={})))
+    assert result1.is_error
+    assert len(n_calls) == 1
+    # Second call: cached error returned WITHOUT calling wakeup_fn again
+    result2 = asyncio.run(stub.execute(ToolCall(id="c2", name="x", arguments={})))
+    assert result2.is_error
+    assert len(n_calls) == 1, (
+        f"wakeup_fn was retried unnecessarily — bundle thrashing risk"
+    )
+
+
 def test_stub_tool_no_real_tool_after_wakeup_returns_error() -> None:
     """If wakeup runs but no real tool surfaces, return clear error."""
     wakeup_called: list[bool] = []

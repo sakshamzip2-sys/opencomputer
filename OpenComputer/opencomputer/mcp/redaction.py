@@ -21,10 +21,16 @@ error logs, response bodies surfaced into log messages.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
-from typing import Final
+from typing import Any, Final
 
 from opencomputer.security.redact import redact_runtime_text
+
+#: Sentinel type for path-like objects so the redacting adapter can
+#: catch ``pathlib.Path`` etc. without explicitly importing each.
+_PathLike = os.PathLike
 
 #: Query-string params we strip values for. Conservative set — adding
 #: a new param here is a one-line change.
@@ -100,6 +106,67 @@ def redact_mcp_log_text(text: str) -> str:
     return out
 
 
+class _RedactingLoggerAdapter:
+    """Thin wrapper that runs every ``%s`` arg through redaction.
+
+    Usage: ``log = redacting(logger)`` then ``log.warning("msg: %s", exc)``
+    behaves like the underlying logger but the rendered message has all
+    secret-bearing patterns stripped.
+
+    Why this layer (instead of redacting at log-handler / formatter
+    level) — formatter-level redaction would catch every log site in the
+    project, which is too broad. This adapter is opt-in per-module:
+    MCP code uses it; the rest of OC keeps the central
+    ``redact_runtime_text`` for LLM-facing strings.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: logging.Logger) -> None:
+        self._inner = inner
+
+    @staticmethod
+    def _redact_args(args: tuple[Any, ...]) -> tuple[Any, ...]:
+        """Redact every arg that ``logging``'s ``%s`` formatter would
+        stringify. Exception objects, Path objects, anything whose
+        ``__str__`` could carry secret-bearing text — all get
+        normalised to str + redacted. Numeric / bool / None args pass
+        through unchanged (they can't carry secrets and need to
+        preserve their type for ``%d`` / ``%r`` style format specs).
+        """
+        out: list[Any] = []
+        for a in args:
+            if isinstance(a, (str, BaseException, _PathLike)):
+                out.append(redact_mcp_log_text(str(a)))
+            else:
+                out.append(a)
+        return tuple(out)
+
+    def debug(self, msg: str, *args: Any, **kw: Any) -> None:
+        self._inner.debug(msg, *self._redact_args(args), **kw)
+
+    def info(self, msg: str, *args: Any, **kw: Any) -> None:
+        self._inner.info(msg, *self._redact_args(args), **kw)
+
+    def warning(self, msg: str, *args: Any, **kw: Any) -> None:
+        self._inner.warning(msg, *self._redact_args(args), **kw)
+
+    def error(self, msg: str, *args: Any, **kw: Any) -> None:
+        self._inner.error(msg, *self._redact_args(args), **kw)
+
+    def exception(self, msg: str, *args: Any, **kw: Any) -> None:
+        self._inner.exception(msg, *self._redact_args(args), **kw)
+
+    def log(self, level: int, msg: str, *args: Any, **kw: Any) -> None:
+        self._inner.log(level, msg, *self._redact_args(args), **kw)
+
+
+def redacting(logger: logging.Logger) -> _RedactingLoggerAdapter:
+    """Wrap ``logger`` so every ``%s`` arg gets redacted on log."""
+    return _RedactingLoggerAdapter(logger)
+
+
 __all__ = [
     "redact_mcp_log_text",
+    "redacting",
 ]

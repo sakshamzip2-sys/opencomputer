@@ -36,7 +36,14 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 #: Kimi CLI's ``MCPServerSnapshot.status`` values.
 ConnectionState = Literal["connected", "disconnected", "error"]
 
-logger = logging.getLogger("opencomputer.mcp.client")
+# Gap E (mcp-openclaw-port follow-up) — the MCP code path can log
+# exception text that contains URLs, tokens, headers. Pipe every log
+# call through ``redacting`` so secrets never reach the log file
+# regardless of how the exception was constructed. The adapter only
+# touches ``%s`` arguments; the format string stays verbatim.
+from opencomputer.mcp.redaction import redacting as _redacting
+
+logger = _redacting(logging.getLogger("opencomputer.mcp.client"))
 
 #: TypeVar used by :meth:`MCPManager.submit_sync` to preserve the
 #: caller's coroutine return type. The :func:`_run_on_session_loop`
@@ -897,10 +904,7 @@ class MCPConnection:
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            from opencomputer.mcp.redaction import redact_mcp_log_text as _red
-            logger.warning(
-                "OSV bus publish failed (continuing): %s", _red(str(exc)),
-            )
+            logger.warning("OSV bus publish failed (continuing): %s", exc)
         if high and fail_closed:
             return (
                 f"OSV blocked launch: {ecosystem}/{package} "
@@ -1607,12 +1611,8 @@ class MCPManager:
                         osv_check_fail_closed=osv_check_fail_closed,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    from opencomputer.mcp.redaction import (
-                        redact_mcp_log_text as _red,
-                    )
                     logger.warning(
-                        "MCP server '%s' connect raised: %s",
-                        cfg.name, _red(str(exc)),
+                        "MCP server '%s' connect raised: %s", cfg.name, exc,
                     )
                     return 0
                 if not ok:
