@@ -46,7 +46,18 @@ class ConsentGrant:
     scope_filter: str | None
     granted_at: float
     expires_at: float | None
-    granted_by: Literal["user", "auto", "promoted"]
+    granted_by: Literal["user", "auto", "promoted", "mcp_client", "gateway"]
+    """Who recorded the grant. Sources:
+
+    * ``"user"`` — interactive CLI/TUI driver (typed `/permissions allow ...`).
+    * ``"auto"`` — auto-grant policy (e.g. tier-promotion default).
+    * ``"promoted"`` — promoted from a lower tier by the agent.
+    * ``"mcp_client"`` — external MCP client over OC's stdio MCP server
+      (mcp-openclaw-port M3). Distinguishes external-driver grants in
+      the audit log without schema migration.
+    * ``"gateway"`` — a channel adapter / gateway action recorded the
+      grant on behalf of the user (e.g. inline-reply in Telegram).
+    """
 
 
 @dataclass(frozen=True, slots=True)

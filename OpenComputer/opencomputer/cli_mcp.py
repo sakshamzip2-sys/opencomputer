@@ -488,7 +488,17 @@ def test_server(
 
 
 @mcp_app.command("serve")
-def mcp_serve() -> None:
+def mcp_serve(
+    enable_approvals: bool = typer.Option(
+        False,
+        "--enable-approvals",
+        help=(
+            "M3 (mcp-openclaw-port): expose the permissions_request_subscribe "
+            "long-poll tool so external MCP clients can drive OC consent. "
+            "Default OFF — consent state is sensitive."
+        ),
+    ),
+) -> None:
     """Start an MCP server exposing OpenComputer's session history over stdio.
 
     Run this from another MCP client (Claude Code, Cursor, …) to query OC's
@@ -496,7 +506,10 @@ def mcp_serve() -> None:
     entries.
 
     Tools exposed: ``sessions_list``, ``session_get``, ``messages_read``,
-    ``recall_search``, ``consent_history``.
+    ``recall_search``, ``consent_history``, ``permissions_list_open``,
+    ``messages_send``, ``messages_send_status``, ``events_poll``,
+    ``events_wait``, ``permissions_respond``. With ``--enable-approvals``,
+    also exposes ``permissions_request_subscribe`` (long-poll).
 
     Saksham use case: Claude Code while coding can call ``recall_search``
     to surface past Telegram discussions about a stock or codebase decision.
@@ -505,7 +518,7 @@ def mcp_serve() -> None:
     """
     from opencomputer.mcp.server import main as serve_main
 
-    serve_main()
+    serve_main(enable_approvals=enable_approvals)
 
 
 @mcp_app.command("presets")
