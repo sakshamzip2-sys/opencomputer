@@ -104,11 +104,13 @@ def test_memory_manager_writes_skill() -> None:
     from opencomputer.agent.memory import MemoryManager
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Pass explicit empty bundled_skills_paths to isolate from the bundled skills
+        # Pass explicit empty bundled_skills_paths + extensions_path=None to
+        # isolate from the bundled and plugin-shipped skill corpora.
         mm = MemoryManager(
             declarative_path=Path(tmp) / "MEMORY.md",
             skills_path=Path(tmp) / "skills",
             bundled_skills_paths=[],
+            extensions_path=None,
         )
         mm.write_skill(
             skill_id="debug-nginx",

@@ -20,6 +20,7 @@ Write-path invariants for MEMORY.md / USER.md:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import logging
 import os
@@ -921,12 +922,29 @@ def _load_references_dir(
 # ─── memory manager ───────────────────────────────────────────────────
 
 
+class _Sentinel:
+    """Marker for "argument not supplied" — distinct from an explicit ``None``."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover — debug aid only
+        return "<unset>"
+
+
+#: Default for ``MemoryManager.__init__(extensions_path=...)``. ``_SENTINEL``
+#: means "auto-derive the repo ``extensions/`` tree"; an explicit ``None``
+#: means "no plugin-skill root" (used by tests that want isolated corpora).
+_SENTINEL = _Sentinel()
+
+
 class MemoryManager:
     """Reads + mutates declarative memory; lists procedural (skill) memory.
 
     Skills are searched across multiple roots (kimi-cli pattern):
       1. User skills: ~/.opencomputer/skills/   (write target for new skills)
       2. Bundled skills: <repo>/opencomputer/skills/ (read-only, shipped defaults)
+      3. Skills-Hub installs: <skills_path>/.hub/<source>/
+      4. Plugin-bundled skills: <repo>/extensions/<plugin>/skills/
 
     Higher-priority roots shadow lower-priority ones by skill id.
     """
@@ -942,6 +960,7 @@ class MemoryManager:
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         bundled_skills_paths: list[Path] | None = None,
+        extensions_path: Path | None | _Sentinel = _SENTINEL,
     ) -> None:
         self.declarative_path = declarative_path
         self.user_path = user_path if user_path is not None else declarative_path.parent / "USER.md"
@@ -983,6 +1002,26 @@ class MemoryManager:
             bundled = Path(__file__).resolve().parent.parent / "skills"
             bundled_skills_paths = [bundled] if bundled.exists() else []
         self.bundled_skills_paths = bundled_skills_paths
+        # Plugin-bundled skills root. Plugins ship skills at
+        # ``extensions/<plugin>/skills/<skill-name>/SKILL.md`` — a sibling
+        # of ``opencomputer/`` (memory.py is at ``opencomputer/agent/``, so
+        # ``parent.parent.parent`` is the repo root). When a plugin ships a
+        # ``skills/`` dir, ``list_skills`` walks it as a fourth root and
+        # tags each skill with its owning plugin id so the existing
+        # ``requires:`` gate can drop it from the prompt when the plugin
+        # is disabled. Resolves to ``None`` when running from an installed
+        # wheel where the ``extensions/`` tree is absent. Callers (and
+        # tests) may pass an explicit path or ``None`` to override; the
+        # default ``_SENTINEL`` triggers repo auto-derivation.
+        if isinstance(extensions_path, _Sentinel):
+            extensions_root = (
+                Path(__file__).resolve().parent.parent.parent / "extensions"
+            )
+            self.extensions_path: Path | None = (
+                extensions_root if extensions_root.is_dir() else None
+            )
+        else:
+            self.extensions_path = extensions_path
 
         # v1.1 plan-3 M6.1 — BM25 index over MEMORY.md.  Lazy-built; cache
         # under <profile_home>/cache/.  Invalidated on every successful
@@ -1313,6 +1352,18 @@ class MemoryManager:
         Hub roots are appended after user + bundled roots, so user skills
         still shadow on id collision.
 
+        Plugin-bundled skills (fourth root): each plugin that ships a
+        ``skills/`` directory at ``extensions/<plugin>/skills/`` contributes
+        its ``skills/<skill-name>/SKILL.md`` files. These roots are appended
+        AFTER user + bundled + hub roots, so user/bundled skills still
+        shadow a plugin skill on id collision. Each plugin-shipped skill is
+        gated on its owning plugin: an implicit ``requires.plugins`` entry
+        for the plugin id is merged into whatever the skill itself declares,
+        so the EXISTING ``requires:`` gate computes ``unmet_requirements``
+        and the EXISTING prompt filter drops it when the plugin is disabled.
+        The skill still appears in this listing (visible in ``oc skills``)
+        regardless of plugin state — only the prompt-injection lane filters.
+
         OpenClaw parity (``requires:`` gating): each :class:`SkillMeta`
         carries ``requires`` (declared) and ``unmet_requirements``
         (computed). The loader does not filter — callers (e.g. the
@@ -1329,11 +1380,24 @@ class MemoryManager:
             for source_dir in sorted(hub_root.iterdir()):
                 if source_dir.is_dir():
                     roots.append(source_dir)
+        # Fourth root — plugin-bundled skills. ``plugin_skill_roots`` maps a
+        # ``skills/`` dir to its owning plugin id; that id becomes an
+        # implicit ``requires.plugins`` gate for every skill found under it.
+        plugin_skill_roots: dict[Path, str] = {}
+        if self.extensions_path is not None:
+            for plugin_dir in sorted(self.extensions_path.iterdir()):
+                if not plugin_dir.is_dir():
+                    continue
+                plugin_skills = plugin_dir / "skills"
+                if plugin_skills.is_dir():
+                    plugin_skill_roots[plugin_skills] = plugin_dir.name
+                    roots.append(plugin_skills)
         seen_ids: set[str] = set()
         out: list[SkillMeta] = []
         for root in roots:
             if not root.exists():
                 continue
+            owning_plugin = plugin_skill_roots.get(root)
             for skill_dir in root.iterdir():
                 if not skill_dir.is_dir() or skill_dir.name in seen_ids:
                     continue
@@ -1381,6 +1445,17 @@ class MemoryManager:
                 # that lists plugins isn't hidden just because the
                 # caller hasn't supplied an index yet.
                 requires = _parse_skill_requires(meta.get("requires"))
+                # Fourth-root gating: a plugin-bundled skill implicitly
+                # requires its owning plugin. Merge the plugin id into the
+                # declared ``requires.plugins`` so the EXISTING evaluator
+                # gates it — no parallel filtering path. The skill still
+                # surfaces in this listing; only the prompt builder drops
+                # it (via ``unmet_requirements``) when the plugin is off.
+                if owning_plugin and owning_plugin not in requires.plugins:
+                    requires = dataclasses.replace(
+                        requires,
+                        plugins=(*requires.plugins, owning_plugin),
+                    )
                 unmet = _evaluate_skill_requirements(
                     requires, installed_plugin_ids=installed_plugin_ids,
                 )

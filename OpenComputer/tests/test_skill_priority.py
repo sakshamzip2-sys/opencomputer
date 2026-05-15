@@ -33,6 +33,7 @@ def test_unweighted_skills_remain_alphabetical(tmp_path):
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     ids = [s.id for s in mm.list_skills()]
     assert ids == ["alpha", "mango", "zebra"]
@@ -49,6 +50,7 @@ def test_high_priority_skill_surfaces_first(tmp_path):
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     ids = [s.id for s in mm.list_skills()]
     # priority=10 first, priority=1 next, unweighted last (alphabetical
@@ -67,6 +69,7 @@ def test_priority_field_round_trips(tmp_path):
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     skill = mm.list_skills()[0]
     assert skill.priority == 42.5
@@ -85,6 +88,7 @@ def test_invalid_priority_treated_as_none(tmp_path):
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     skill = mm.list_skills()[0]
     assert skill.priority is None

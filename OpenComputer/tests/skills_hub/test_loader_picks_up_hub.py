@@ -38,6 +38,7 @@ def _make_manager(tmp_path: Path) -> MemoryManager:
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=tmp_path / "skills",
         bundled_skills_paths=[],
+        extensions_path=None,
     )
 
 
