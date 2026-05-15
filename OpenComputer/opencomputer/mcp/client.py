@@ -283,12 +283,23 @@ class MCPTool(BaseTool):
         #: set to ``MCPManager._bg_loop`` so ``execute`` can dispatch
         #: across loops via :func:`_run_on_session_loop`.
         self.session_loop = session_loop
+        #: Gap D (mcp-openclaw-port follow-up) — display-name override
+        #: set by :meth:`MCPManager._connect_one` after the canonical
+        #: name is computed via ``compose_mcp_tool_name`` (sanitize +
+        #: truncate + collision suffix). ``None`` falls back to the
+        #: legacy ``<server>__<tool>`` form.
+        self._display_name_override: str | None = None
 
     @property
     def schema(self) -> ToolSchema:
-        # Namespace MCP tools with the server name so there's no collision
-        # between multiple servers exposing a tool with the same name.
-        display_name = f"{self.server_name}__{self.tool_name}"
+        # Gap D — when MCPManager has set an override, use it. Falls
+        # back to the legacy direct join for code paths (tests, ad-hoc
+        # construction) that build an MCPTool without going through
+        # the manager's compose pipeline.
+        if self._display_name_override is not None:
+            display_name = self._display_name_override
+        else:
+            display_name = f"{self.server_name}__{self.tool_name}"
         return ToolSchema(
             name=display_name,
             description=self.description,
@@ -1539,14 +1550,54 @@ class MCPManager:
                     return 0
                 self.connections.append(conn)
                 added = 0
+                # Gap D (mcp-openclaw-port follow-up) — assign canonical
+                # names via the compose pipeline (sanitize + truncate to
+                # 64 + collision suffix). Replaces the legacy "register
+                # raises ValueError on collision → log + skip" path with
+                # "compose resolves the collision before register".
+                from opencomputer.mcp.naming import compose_mcp_tool_name
+
+                existing_names: set[str] = set(self.tool_registry.names())
                 for tool in conn.tools:
+                    # ``server_name`` already includes the plugin prefix
+                    # for bundle MCPs (``<plugin>__<server>``); compose
+                    # with plugin_id="" splices it into the single
+                    # ``<server>__<tool>`` join, then sanitize +
+                    # truncate + collide-suffix.
+                    if not isinstance(tool, MCPTool):
+                        # Utility tools (list_resources etc.) — register
+                        # directly without renaming.
+                        try:
+                            self.tool_registry.register(tool)
+                            added += 1
+                        except ValueError:
+                            logger.warning(
+                                "MCP utility tool name collision (skipped): %s",
+                                tool.schema.name,
+                            )
+                        continue
+                    try:
+                        final_name = compose_mcp_tool_name(
+                            "", tool.server_name, tool.tool_name, existing_names,
+                        )
+                    except ValueError as exc:
+                        logger.warning(
+                            "MCP tool name compose exhausted suffixes: %s — "
+                            "skipping registration", exc,
+                        )
+                        continue
+                    tool._display_name_override = final_name
                     try:
                         self.tool_registry.register(tool)
                         added += 1
                     except ValueError:
+                        # Compose already resolved against the registry
+                        # snapshot, so a collision HERE means a race —
+                        # another connection registered the same name
+                        # between snapshot and register. Log + skip.
                         logger.warning(
-                            "MCP tool name collision (skipped): %s",
-                            tool.schema.name,
+                            "MCP tool name collision race (skipped): %s",
+                            final_name,
                         )
                 return added
             finally:
