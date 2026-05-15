@@ -66,9 +66,13 @@ def test_slash_menu_limit_keeps_existing_command_capacity():
     assert _SLASH_MENU_LIMIT >= 20
 
 
-def test_slash_dropdown_only_opens_for_command_position_prefix():
-    assert not _slash_token_uses_dropdown("", 0)
+def test_slash_dropdown_opens_at_command_position():
+    # A bare ``/`` at the start (empty prefix) IS the canonical
+    # "show me every command" gesture — matches Claude Code, which pops
+    # the full command list the instant you type one slash.
+    assert _slash_token_uses_dropdown("", 0)
     assert _slash_token_uses_dropdown("su", 0)
+    # A mid-message slash (``how are you /su``) must NOT open the menu.
     assert not _slash_token_uses_dropdown("su", len("how are you "))
 
 

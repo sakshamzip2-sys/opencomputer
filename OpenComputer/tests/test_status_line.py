@@ -272,14 +272,14 @@ class TestRenderStatusLine:
             "session_started_at": anchor,
         })
         text = _flatten(render_status_line(rt))
-        # Exact format the user requested. Leading + trailing pad are
-        # part of the rendered line; the visible "core" is the segment
-        # in between.
+        # Exact rendered format after the 2026-05-12 status-line
+        # redesign (◆ prefix, ``  ·  `` separator, unbracketed bar).
+        # Leading + trailing pad are part of the rendered line.
         # Wave 3 (2026-05-08) — Opus 4.6/4.7 default to 1M context;
         # 12.4K / 1M = 1% (rounded down from 1.24%).
         assert (
             text
-            == " ⚕ claude-opus-4-7 │ ctx 12.4K/1M │ [█░░░░░░░░░] 1% │ $0.06 │ 15m "
+            == " ◆ claude-opus-4-7  ·  ctx 12.4K/1M █░░░░░░░░░ 1%  ·  $0.06  ·  15m "
         )
 
     def test_cold_start_snapshot(self) -> None:
@@ -289,7 +289,7 @@ class TestRenderStatusLine:
         # Cost segment is omitted (None → ""); elapsed shows "0s" so the
         # field's existence is visible from the first frame. Empty model id
         # renders as "default" while still using DEFAULT_MAX_CONTEXT (200K).
-        assert text == " ⚕ default │ ctx 0/200K │ [░░░░░░░░░░] 0% │ 0s "
+        assert text == " ◆ default  ·  ctx 0/200K ░░░░░░░░░░ 0%  ·  0s "
 
     def test_model_id_seeded_before_first_turn_removes_unknown(self) -> None:
         rt = _FakeRuntime({"model_id": "claude-opus-4-7"})
@@ -319,7 +319,7 @@ class TestRenderStatusLine:
     def test_runtime_none_renders_cold_start(self) -> None:
         # Defensive — test fixtures sometimes pass None.
         text = _flatten(render_status_line(None))
-        assert text.startswith(" ⚕ ")
+        assert text.startswith(" ◆ ")
         # No model_id when runtime is None → falls through to
         # DEFAULT_MAX_CONTEXT (200K) since the override layers and
         # static table both need a real model id to resolve.
@@ -356,14 +356,16 @@ class TestRenderStatusLine:
         assert "$" not in text
         assert "0s" in text
 
-    def test_separator_uses_unicode_pipe(self) -> None:
-        # Guard against accidental ASCII-pipe regressions — the user
-        # explicitly called out U+2502.
+    def test_separator_uses_middle_dot(self) -> None:
+        # 2026-05-12 redesign — the separator is the U+00B7 middle dot
+        # (``  ·  ``), not the pre-redesign U+2502 vertical bar. Guard
+        # against an accidental ASCII-pipe regression.
         rt = _FakeRuntime({"model_id": "claude-opus-4-7"})
         text = _flatten(render_status_line(rt))
-        assert SEPARATOR == " │ "
-        assert " │ " in text
+        assert SEPARATOR == "  ·  "
+        assert "  ·  " in text
         assert " | " not in text  # no ASCII pipe
+        assert " │ " not in text  # no box-drawing pipe (pre-redesign)
 
 
 def test_cli_token_tally_sync_updates_status_line_bar() -> None:
@@ -489,14 +491,16 @@ class TestNoColor:
 
 
 def test_module_constants_match_user_spec() -> None:
-    """Lock the U+xxxx code points the user explicitly required.
+    """Lock the U+xxxx code points the status line depends on.
 
     A drive-by refactor that swaps these for ASCII would break the
     Claude-Code-style visual without any other test failing — keep them
-    pinned to their unicode origins.
+    pinned to their unicode origins. PREFIX / SEPARATOR reflect the
+    2026-05-12 redesign (caduceus → black diamond for Windows-font
+    compatibility; vertical bar → middle dot).
     """
-    assert PREFIX == "⚕ "  # caduceus + space
-    assert SEPARATOR == " │ "  # box-drawings light vertical
+    assert PREFIX == "◆ "  # U+25C6 black diamond + space
+    assert SEPARATOR == "  ·  "  # U+00B7 middle dot, double-space pads
     assert BAR_FILL == "█"  # full block
     assert BAR_EMPTY == "░"  # light shade
     assert BAR_WIDTH == 10
