@@ -56,14 +56,14 @@ def _reset_fake_connection() -> Generator[None, None, None]:
 
 
 @pytest.mark.asyncio
-async def test_connect_all_merges_bundle_servers(tmp_path: Path) -> None:
-    """``include_bundle=True`` includes bundle configs in the merge."""
+async def test_connect_all_merges_eager_bundle_servers(tmp_path: Path) -> None:
+    """``include_bundle=True`` includes eager (lazy=False) bundle configs."""
     plug_root = tmp_path / "plug-a"
     plug_root.mkdir()
     default_registry.register_plugin_servers(
         "plug-a",
         plug_root,
-        (BundleMcpServer(name="memory", command="npx"),),
+        (BundleMcpServer(name="memory", command="npx", lazy=False),),
     )
 
     mgr = MCPManager(tool_registry=ToolRegistry())
@@ -80,6 +80,35 @@ async def test_connect_all_merges_bundle_servers(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_connect_all_lazy_bundle_servers_not_auto_mounted(
+    tmp_path: Path,
+) -> None:
+    """M1 lazy semantics: lazy=True (default) bundle servers stay disabled
+    in the derived MCPServerConfig, so connect_all skips them entirely."""
+    plug_root = tmp_path / "plug-a"
+    plug_root.mkdir()
+    default_registry.register_plugin_servers(
+        "plug-a",
+        plug_root,
+        # Default lazy=True
+        (BundleMcpServer(name="memory", command="npx"),),
+    )
+
+    mgr = MCPManager(tool_registry=ToolRegistry())
+    user_cfg = MCPServerConfig(name="my-server", command="echo", enabled=True)
+
+    from opencomputer.mcp import client as client_mod
+
+    with patch.object(client_mod, "MCPConnection", _FakeConnection):
+        await mgr.connect_all([user_cfg], include_bundle=True)
+
+    names = {c.config.name for c in _FakeConnection.instances}
+    assert "my-server" in names
+    # Lazy bundle not auto-spawned.
+    assert "plug-a__memory" not in names
+
+
+@pytest.mark.asyncio
 async def test_connect_all_skips_bundle_when_include_bundle_false(
     tmp_path: Path,
 ) -> None:
@@ -88,7 +117,7 @@ async def test_connect_all_skips_bundle_when_include_bundle_false(
     default_registry.register_plugin_servers(
         "plug-a",
         plug_root,
-        (BundleMcpServer(name="memory", command="npx"),),
+        (BundleMcpServer(name="memory", command="npx", lazy=False),),
     )
     mgr = MCPManager(tool_registry=ToolRegistry())
     user_cfg = MCPServerConfig(name="my-server", command="echo", enabled=True)
@@ -114,7 +143,8 @@ async def test_connect_all_user_config_shadows_bundle_name(
     default_registry.register_plugin_servers(
         "plug-a",
         plug_root,
-        (BundleMcpServer(name="memory", command="npx"),),
+        # Use lazy=False so the bundle actually shows up in the merge.
+        (BundleMcpServer(name="memory", command="npx", lazy=False),),
     )
     mgr = MCPManager(tool_registry=ToolRegistry())
     # Same final name "plug-a__memory" — user wins.

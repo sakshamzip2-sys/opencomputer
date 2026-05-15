@@ -160,11 +160,14 @@ def test_resolve_bundle_command_non_stdio_returns_empty(tmp_path: Path) -> None:
 def test_bundle_to_mcp_server_config_stdio(tmp_path: Path) -> None:
     plugin_root = tmp_path / "myplug"
     plugin_root.mkdir()
+    # Eager bundle (lazy=False) — MCPServerConfig.enabled=True so the
+    # MCPManager spawns it at chat start.
     server = BundleMcpServer(
         name="memory",
         command="npx",
         args=("-y", "@modelcontextprotocol/server-memory"),
         env={"FOO": "bar"},
+        lazy=False,
     )
     cfg = bundle_mcp_to_mcp_server_config(
         "test-plugin", server, plugin_root,
@@ -174,6 +177,30 @@ def test_bundle_to_mcp_server_config_stdio(tmp_path: Path) -> None:
     assert cfg.command == "npx"
     assert cfg.args == ("-y", "@modelcontextprotocol/server-memory")
     assert cfg.env == {"FOO": "bar"}
+    assert cfg.enabled is True
+
+
+def test_bundle_lazy_true_yields_enabled_false(tmp_path: Path) -> None:
+    """M1 lazy semantics: lazy=True (default) → enabled=False in the
+    derived MCPServerConfig, so connect_all skips the spawn at chat
+    start. Users opt-in to mounting via ``oc mcp enable``."""
+    plugin_root = tmp_path / "p"
+    plugin_root.mkdir()
+    server = BundleMcpServer(
+        name="memory",
+        command="npx",
+        # lazy defaults to True
+    )
+    cfg = bundle_mcp_to_mcp_server_config("plug", server, plugin_root)
+    assert cfg.enabled is False
+
+
+def test_bundle_lazy_false_yields_enabled_true(tmp_path: Path) -> None:
+    """M1 lazy semantics: lazy=False (eager opt-in) → enabled=True."""
+    plugin_root = tmp_path / "p"
+    plugin_root.mkdir()
+    server = BundleMcpServer(name="memory", command="npx", lazy=False)
+    cfg = bundle_mcp_to_mcp_server_config("plug", server, plugin_root)
     assert cfg.enabled is True
 
 

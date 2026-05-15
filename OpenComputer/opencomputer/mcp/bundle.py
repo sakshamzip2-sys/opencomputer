@@ -133,6 +133,16 @@ def bundle_mcp_to_mcp_server_config(
     ``<plugin_id>__<server>__<tool>`` — guaranteed not to collide with
     user-configured presets (which never use a double underscore in
     their natural name).
+
+    ``lazy`` semantics in M1: when ``server.lazy`` is True (the default),
+    the produced config has ``enabled=False`` — the MCPManager skips it
+    in ``connect_all`` so plugin activation never blocks on the bundle
+    spawning. Users wake a lazy bundle by either explicit ``oc mcp
+    enable <name>`` (then ``oc mcp reconnect``) or by setting
+    ``lazy: false`` in the plugin manifest for eager-mount bundles.
+    Future M1.A work will add first-tool-call wakeup so the agent can
+    transparently mount a lazy bundle on demand without operator
+    intervention.
     """
     if server.transport not in _VALID_TRANSPORTS:
         raise BundleMcpSafetyError(
@@ -156,7 +166,9 @@ def bundle_mcp_to_mcp_server_config(
         url=server.url,
         env=expanded_env,
         headers=dict(server.headers),
-        enabled=True,
+        # lazy=True → enabled=False so connect_all skips it (no spawn at
+        # chat start). lazy=False (opt-in) → enabled=True (eager spawn).
+        enabled=not server.lazy,
         tools_allow=server.tools_allow,
         tools_deny=server.tools_deny,
         prompts_enabled=True,

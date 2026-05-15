@@ -117,18 +117,34 @@ those.
 
 ## Lazy vs eager spawn
 
-`lazy: true` (default) means the MCP subprocess spawns when the first
-tool from that server is called, not at plugin activation. This keeps
-`oc chat` cold-start fast even with many bundled-MCP plugins installed.
+`lazy: true` (default) registers the bundle in OC's process-global
+`BundleMcpRegistry` but produces an `MCPServerConfig` with
+`enabled=False`. The MCPManager's `connect_all` skips disabled
+servers, so a lazy bundle does NOT auto-mount at chat start. This
+keeps `oc chat` cold-start time uncoupled from how many bundled-MCP
+plugins are installed.
 
-Set `lazy: false` only when:
+`lazy: false` (eager opt-in) produces `enabled=True` — the MCPManager
+spawns the subprocess at `connect_all` time alongside user-configured
+servers. Choose this when:
 
 - The MCP server is fast to start AND needed immediately.
 - Eager registration gives meaningfully better UX (e.g. tab-completion
   of tool names at chat startup).
 
-The default lazy choice is the right system-wide default — leave it
-alone unless you have a strong reason.
+**M1 limitation:** waking a lazy bundle currently requires explicit
+operator action — `oc mcp enable <plugin_id>__<server_name>` followed
+by `oc mcp reconnect` (or restarting `oc chat`). The plan
+(`docs/plans/mcp-openclaw-port.md`, follow-up M1.A) calls for adding
+**first-tool-call wakeup** so the agent can transparently mount a
+lazy bundle on demand when it routes the first invocation to its
+namespace. Until that lands, prefer `lazy: false` for any bundle whose
+tools you want immediately accessible without operator intervention.
+
+The default `lazy: true` choice keeps plugin install ergonomically
+cheap — bundle MCPs don't slow down chat startup. The cost is the
+manual wake step; the trade-off makes sense for plugins that ship
+several rarely-used MCP servers.
 
 ---
 
@@ -140,13 +156,15 @@ plugin activated
         └─ for each entry in manifest.bundle_mcp:
              • expand ${PLUGIN_ROOT} in command / args / env / cwd
              • assert command stays inside plugin root (raises on escape)
-             • produce MCPServerConfig(name="<plugin_id>__<server.name>", ...)
+             • produce MCPServerConfig(name="<plugin_id>__<server.name>",
+                                       enabled=(not server.lazy))
              • register in BundleMcpRegistry keyed by plugin_id
 
 agent starts (oc chat / oc gateway / etc.)
    └─ MCPManager.connect_all (include_bundle=True)
         • merge user-configured servers + default_registry.all_server_configs()
-        • for each enabled config: connect (lazy=True ⇒ first-call only)
+        • filter to enabled=True — lazy bundles are skipped
+        • for each remaining server: connect via stdio/sse/http
         • register tools as <plugin_id>__<server>__<tool>
 
 plugin deactivated / unloaded
