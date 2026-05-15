@@ -167,6 +167,20 @@ class PluginActivationSchema(BaseModel):
         return v
 
 
+class BundleMcpToolDeclSchema(BaseModel):
+    """Validator mirror of ``plugin_sdk.core.BundleMcpToolDecl``.
+
+    mcp-openclaw-port Gap G. Tools a bundle declares ahead-of-time
+    so first-tool-call wakeup can register stubs at activation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=2048)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
 class BundleMcpServerSchema(BaseModel):
     """Validator mirror of ``plugin_sdk.core.BundleMcpServer``.
 
@@ -192,6 +206,8 @@ class BundleMcpServerSchema(BaseModel):
     tools_allow: list[str] | None = Field(default=None)
     tools_deny: list[str] = Field(default_factory=list)
     osv_check: bool = Field(default=True)
+    #: Gap G — declared tool catalog for first-tool-call wakeup.
+    tools: list[BundleMcpToolDeclSchema] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -371,6 +387,7 @@ def validate_manifest(data: dict[str, Any]) -> tuple[PluginManifestSchema | None
 __all__ = [
     "AuthChoiceSchema",
     "BundleMcpServerSchema",
+    "BundleMcpToolDeclSchema",
     "ModelSupportSchema",
     "PluginActivationSchema",
     "PluginKind",

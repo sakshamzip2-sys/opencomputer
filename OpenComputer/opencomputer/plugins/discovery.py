@@ -24,6 +24,7 @@ from opencomputer.plugins.security import _path_is_inside, validate_plugin_root
 from plugin_sdk.core import (
     AuthChoice,
     BundleMcpServer,
+    BundleMcpToolDecl,
     ModelSupport,
     PluginActivation,
     PluginManifest,
@@ -226,6 +227,15 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
             ),
             tools_deny=tuple(b.tools_deny),
             osv_check=b.osv_check,
+            # Gap G — flatten BundleMcpToolDeclSchema → BundleMcpToolDecl.
+            tools=tuple(
+                BundleMcpToolDecl(
+                    name=t.name,
+                    description=t.description,
+                    input_schema=dict(t.input_schema),
+                )
+                for t in b.tools
+            ),
         )
         for b in schema.bundle_mcp
     )

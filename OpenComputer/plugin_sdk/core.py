@@ -353,6 +353,35 @@ class AuthChoice:
 
 
 @dataclass(frozen=True, slots=True)
+class BundleMcpToolDecl:
+    """One MCP tool a bundle declares ahead-of-time (mcp-openclaw-port Gap G).
+
+    Plugins ship ``BundleMcpServer.tools`` so the loader can register
+    stub :class:`opencomputer.mcp.lazy_wakeup.LazyBundleStubTool`
+    instances at activation time. The stubs satisfy tool-listing
+    immediately; on first dispatch they trigger MCP server wakeup,
+    look up the real tool by name, and route the call through.
+
+    Without this decl, ``lazy=True`` bundles wouldn't surface their
+    tools to the LLM until manually woken — first-tool-call wakeup
+    needs the catalog to know what to register.
+
+    Fields:
+
+    * ``name`` — bare tool name (e.g. ``"read_file"``). The composed
+      registry name is ``<plugin>__<server>__<tool>``.
+    * ``description`` — passed through to the tool schema.
+    * ``input_schema`` — JSON Schema (Draft 7) dict the LLM uses to
+      build arguments. Empty dict means "no schema declared" —
+      permissive (matches the MCP server's actual schema once awake).
+    """
+
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class BundleMcpServer:
     """One MCP server bundled with a plugin (Role 3 — see ``docs/plans/mcp-openclaw-port.md``).
 
@@ -396,6 +425,14 @@ class BundleMcpServer:
     tools_allow: tuple[str, ...] | None = None
     tools_deny: tuple[str, ...] = ()
     osv_check: bool = True
+    #: Gap G (mcp-openclaw-port follow-up) — declared tool catalog so
+    #: the loader can register stub tools at activation time. With
+    #: ``lazy=True`` AND a non-empty ``tools`` tuple, the agent sees
+    #: the tools as available immediately; first dispatch triggers
+    #: the actual MCP server spawn + routes the call to the real tool.
+    #: Empty tuple (default) preserves the legacy lazy-True semantics
+    #: (the bundle stays disabled until ``oc mcp enable``).
+    tools: tuple[BundleMcpToolDecl, ...] = ()
 
     def __post_init__(self) -> None:
         # YAML auto-parsers + JSON loaders deliver tuple-typed fields as
@@ -409,6 +446,8 @@ class BundleMcpServer:
             object.__setattr__(self, "tools_allow", tuple(self.tools_allow))
         if isinstance(self.tools_deny, list):
             object.__setattr__(self, "tools_deny", tuple(self.tools_deny))
+        if isinstance(self.tools, list):
+            object.__setattr__(self, "tools", tuple(self.tools))
 
 
 @dataclass(frozen=True, slots=True)
@@ -648,6 +687,7 @@ __all__ = [
     "SendResult",
     "ModelSupport",
     "BundleMcpServer",
+    "BundleMcpToolDecl",
     "PluginManifest",
     "PluginActivationSource",
     "PluginSetup",
