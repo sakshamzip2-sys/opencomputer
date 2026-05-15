@@ -1796,6 +1796,15 @@ def _run_chat_session(
     else:
         mcp_mgr = MCPManager(tool_registry=registry)
 
+    # Gap G — publish the active MCPManager so LazyBundleStubTool can
+    # find it at first-tool-call wakeup. Set once per chat session.
+    try:
+        from opencomputer.mcp.manager_registry import set_active_manager
+
+        set_active_manager(mcp_mgr)
+    except Exception:  # noqa: BLE001 — wakeup is opt-in; never block
+        pass
+
     # Wire the delegate factory so the model can spawn subagents.
     #
     # 2026-05-11 — closures bind ``loop`` (the parent AgentLoop instance)

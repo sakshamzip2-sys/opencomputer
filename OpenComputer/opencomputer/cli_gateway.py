@@ -173,6 +173,14 @@ def _run_foreground(install_daemon: bool = False, daemon_profile: str = "default
             "docs/plans/mcp-openclaw-port.md §3.M2 for the constraint."
         )
     mcp_mgr = MCPManager(tool_registry=tool_registry)
+    # Gap G — publish the active MCPManager so LazyBundleStubTool can
+    # find it at first-tool-call wakeup.
+    try:
+        from opencomputer.mcp.manager_registry import set_active_manager
+
+        set_active_manager(mcp_mgr)
+    except Exception:  # noqa: BLE001 — wakeup is opt-in; never block
+        pass
 
     gw = Gateway(loop=loop, config=cfg.gateway)
     # Wire the new gates if present (Gateway forwards to its Dispatch).
