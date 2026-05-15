@@ -771,6 +771,11 @@ class MCPConnection:
     #: Event loop that owns the connection — also tagged onto every
     #: tool's ``session_loop`` so cross-loop calls dispatch correctly.
     _owner_loop: asyncio.AbstractEventLoop | None = None
+    #: Gap B (mcp-openclaw-port follow-up) — per-server stderr log
+    #: handle. ``None`` for non-stdio transports + the fallback path
+    #: where opening the log failed. Closed on disconnect to release
+    #: the file descriptor.
+    _stderr_log_handle: Any = None
 
     def _osv_pre_flight(self, *, fail_closed: bool) -> str | None:
         """Run the OSV pre-flight check; return an error string if blocking.
@@ -971,7 +976,25 @@ class MCPConnection:
                     args=list(self.config.args),
                     env=spawn_env,
                 )
-                transport_ctx = stdio_client(params)
+                # Gap B (mcp-openclaw-port follow-up) — per-server stderr
+                # capture to ``<profile>/logs/mcp/<server>.log``. Falls
+                # back to inheriting parent's stderr on any error so a
+                # broken log path never blocks MCP startup.
+                try:
+                    from opencomputer.mcp.stderr_capture import open_mcp_stderr_log
+
+                    self._stderr_log_handle = open_mcp_stderr_log(self.config.name)
+                    transport_ctx = stdio_client(
+                        params, errlog=self._stderr_log_handle,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "MCP server '%s' stderr-capture failed (%s) — "
+                        "falling back to parent stderr",
+                        self.config.name, exc,
+                    )
+                    self._stderr_log_handle = None
+                    transport_ctx = stdio_client(params)
             elif self.config.transport == "sse":
                 if not self.config.url:
                     raise ValueError(
@@ -1293,6 +1316,13 @@ class MCPConnection:
         self._owner_done = None
         self._owner_error = None
         self._owner_loop = None
+        # Gap B — close per-server stderr log handle.
+        if self._stderr_log_handle is not None:
+            try:
+                self._stderr_log_handle.close()
+            except Exception:  # noqa: BLE001 — close on best-effort
+                pass
+            self._stderr_log_handle = None
         # Legacy ``exit_stack`` kept ``None`` for compat with status
         # introspection — owner-task pattern doesn't need it.
         self.exit_stack = None
@@ -1543,6 +1573,21 @@ class MCPManager:
                 self.tool_registry.unregister(tool.schema.name)
             await conn.disconnect()
         self.connections.clear()
+        # Gap A defence-in-depth — after the SDK's per-connection
+        # kill-tree path runs, scan once for any straggler MCP
+        # subprocess that survived (crash-path, owner-task force
+        # cancellation, etc.) and terminate it. No-op when clean.
+        try:
+            from opencomputer.mcp.process_tree import kill_mcp_descendants
+
+            n_term, n_kill = kill_mcp_descendants(os.getpid())
+            if n_term or n_kill:
+                logger.info(
+                    "MCP shutdown orphan sweep: terminated=%d killed=%d",
+                    n_term, n_kill,
+                )
+        except Exception as exc:  # noqa: BLE001 — sweep must never block shutdown
+            logger.warning("MCP shutdown orphan sweep raised: %s", exc)
 
     # ── background-loop lifecycle (2026-05-14 anyio fix) ──────────────
 
