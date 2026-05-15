@@ -45,8 +45,8 @@ def test_workspace_doctor_reports_missing_workspace_dir(
         try:
             Path.home = staticmethod(lambda: tmp_path / "no-home")  # type: ignore[assignment]
             with patch(
-                "opencomputer.workspace.discovery.DEFAULT_DEV_SOURCES_PATH",
-                tmp_path / "no-dev",
+                "opencomputer.workspace.discovery.IN_REPO_WORKSPACE_PATH",
+                tmp_path / "no-in-repo-ws",
             ):
                 result = runner.invoke(workspace_app, ["doctor"])
         finally:

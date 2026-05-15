@@ -1,4 +1,4 @@
-"""Locate the hermes-workspace directory on disk.
+"""Locate the workspace directory on disk.
 
 Mirrors ``oc webui``'s search order (see ``opencomputer.cli:webui``) so
 operators familiar with one command find the other intuitive.
@@ -9,9 +9,9 @@ Search order:
 2. ``$OC_WORKSPACE_DIR`` env var
 3. ``<profile_home>/workspace/``
 4. ``~/.opencomputer/workspace/``
-5. ``/Users/saksham/Vscode/claude/sources/hermes-workspace/`` (dev-only
-   sibling; included for the author's local setup where the source repo
-   already lives at that path)
+5. :data:`IN_REPO_WORKSPACE_PATH` — the ``oc-workspace/`` directory
+   bundled in this monorepo. Resolves in any source checkout; absent
+   from a pip-installed package, where discovery skips to step 6.
 6. Fail loud with the searched paths
 """
 
@@ -21,19 +21,19 @@ import os
 from pathlib import Path
 
 __all__ = [
-    "DEFAULT_DEV_SOURCES_PATH",
+    "IN_REPO_WORKSPACE_PATH",
     "WorkspaceNotFoundError",
     "discover_workspace_dir",
     "is_valid_workspace_dir",
 ]
 
 
-#: Dev fallback path. Present on the author's machine; missing on most
-#: deployments. Discovery treats a missing path as "skip, continue to next
-#: candidate" — never as an error.
-DEFAULT_DEV_SOURCES_PATH = Path(
-    "/Users/saksham/Vscode/claude/sources/hermes-workspace"
-)
+#: In-repo workspace path — the ``oc-workspace/`` directory bundled
+#: alongside the ``opencomputer`` package in this monorepo. Computed from
+#: this file's location so it is never machine-specific. Present in any
+#: source checkout; absent from a pip-installed package, where discovery
+#: treats the missing path as "skip" (never an error).
+IN_REPO_WORKSPACE_PATH = Path(__file__).resolve().parents[2] / "oc-workspace"
 
 
 class WorkspaceNotFoundError(RuntimeError):
@@ -120,7 +120,7 @@ def discover_workspace_dir(
     if profile_home is not None:
         candidates.append(profile_home / "workspace")
     candidates.append(Path.home() / ".opencomputer" / "workspace")
-    candidates.append(DEFAULT_DEV_SOURCES_PATH)
+    candidates.append(IN_REPO_WORKSPACE_PATH)
 
     for cand in candidates:
         resolved = _resolve(cand)

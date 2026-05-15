@@ -75,12 +75,10 @@ def _resolve_workspace_dir(workspace_dir: str | None) -> Path:
     except (WorkspaceNotFoundError, ValueError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         console.print(
-            "\nFix: clone hermes-workspace and point at it via "
-            "[bold]--workspace-dir[/bold] or [bold]$OC_WORKSPACE_DIR[/bold]."
-        )
-        console.print(
-            "  [dim]git clone https://github.com/outsourc-e/hermes-workspace"
-            f" {Path.home() / '.opencomputer' / 'workspace'}[/dim]"
+            "\nFix: the workspace ships in-repo at "
+            "[bold]OpenComputer/oc-workspace/[/bold] — run from a source "
+            "checkout, or point at a copy via [bold]--workspace-dir[/bold] "
+            "or [bold]$OC_WORKSPACE_DIR[/bold]."
         )
         raise typer.Exit(code=1) from exc
 
@@ -136,9 +134,9 @@ def _workspace_root(
         None,
         "--workspace-dir",
         help=(
-            "Path to hermes-workspace checkout. Defaults to discovery: "
+            "Path to a workspace checkout. Defaults to discovery: "
             "$OC_WORKSPACE_DIR → <profile>/workspace/ → "
-            "~/.opencomputer/workspace/ → sources/hermes-workspace/."
+            "~/.opencomputer/workspace/ → in-repo OpenComputer/oc-workspace/."
         ),
     ),
 ) -> None:
