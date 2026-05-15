@@ -27,9 +27,10 @@ from typing import TYPE_CHECKING
 from opencomputer import __version__
 from opencomputer.cli_banner_art import (
     OPEN_COMPUTER_CADUCEUS_PINK,
+    OPEN_COMPUTER_LOGO_HERMES_STACKED,
+    OPEN_COMPUTER_LOGO_HERMES_STACKED_WIDTH,
     OPEN_COMPUTER_LOGO_HERMES_STYLE,
     OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH,
-    OPENCOMPUTER_BLOCK_LOGO,
     OPENCOMPUTER_LOGO_FALLBACK,
 )
 
@@ -482,9 +483,11 @@ def _build_right_column(
 
 
 def _render_wordmark(console: Console, term_width: int) -> None:
-    """Render the colored ``OPEN-COMPUTER`` ansi_shadow wordmark above the
-    panel. Narrow-terminal fallback: drop to the half-block logo, then to
-    plain text.
+    """Render the colored Hermes-style ``ansi_shadow`` wordmark above the
+    panel. Wide terminals get the one-line ``OPEN-COMPUTER`` logo;
+    narrower ones get the same chunky font stacked ``OPEN`` over
+    ``COMPUTER``; a pathologically narrow terminal falls back to plain
+    text.
     """
     from rich.text import Text
 
@@ -497,17 +500,16 @@ def _render_wordmark(console: Console, term_width: int) -> None:
         )
         return
 
-    # Half-block fallback at moderate widths (≥73 cols).
-    block_rows = OPENCOMPUTER_BLOCK_LOGO.rstrip("\n").splitlines()
-    block_width = max((len(r) for r in block_rows), default=0)
-    if term_width >= block_width + 2:
-        for row in block_rows:
-            console.print(
-                Text(row, style=_TITLE, no_wrap=True, overflow="ignore"),
-                soft_wrap=True,
-                no_wrap=True,
-                overflow="ignore",
-            )
+    # Stacked Hermes-style fallback — same ``ansi_shadow`` font, OPEN
+    # over COMPUTER, so the chunky wordmark still fits terminals too
+    # narrow for the 110-col one-line logo (≥72 cols).
+    if term_width >= OPEN_COMPUTER_LOGO_HERMES_STACKED_WIDTH + 2:
+        console.print(
+            Text.from_markup(OPEN_COMPUTER_LOGO_HERMES_STACKED),
+            no_wrap=True,
+            overflow="ignore",
+            soft_wrap=False,
+        )
         return
 
     # Pathological narrow: plain bold "OPENCOMPUTER".
@@ -638,8 +640,9 @@ def build_welcome_banner(
 
     Layout (top to bottom):
 
-      1. Pink ``OPEN-COMPUTER`` ansi_shadow wordmark (≥112 cols), with
-         half-block fallback (≥73 cols) and plain-text fallback below.
+      1. Pink Hermes-style ``ansi_shadow`` wordmark — one-line
+         ``OPEN-COMPUTER`` (≥112 cols) or stacked ``OPEN``/``COMPUTER``
+         (≥72 cols), with a plain-text fallback below.
       2. Rounded panel titled ``OpenComputer v{ver} · {sha}``:
          - left column: Braille caduceus (centered) over a left-aligned
            runtime block: ``{model}`` (accent) ``· {provider}`` (dim),

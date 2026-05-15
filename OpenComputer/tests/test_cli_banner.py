@@ -52,6 +52,7 @@ def test_ascii_art_constants_exist():
     """
     from opencomputer.cli_banner_art import (
         OPEN_COMPUTER_CADUCEUS_PINK,
+        OPEN_COMPUTER_LOGO_HERMES_STACKED,
         OPEN_COMPUTER_LOGO_HERMES_STYLE,
         OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH,
         OPENCOMPUTER_BLOCK_LOGO,
@@ -73,6 +74,10 @@ def test_ascii_art_constants_exist():
     assert "OPEN-COMPUTER" not in OPEN_COMPUTER_LOGO_HERMES_STYLE  # rendered as art, not text
     assert "██" in OPEN_COMPUTER_LOGO_HERMES_STYLE  # solid-block letterforms
     assert OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH > 100
+    # Stacked Hermes wordmark — narrow-terminal variant, same ansi_shadow font.
+    assert isinstance(OPEN_COMPUTER_LOGO_HERMES_STACKED, str)
+    assert "██" in OPEN_COMPUTER_LOGO_HERMES_STACKED  # solid-block letterforms
+    assert len(OPEN_COMPUTER_LOGO_HERMES_STACKED.splitlines()) == 12  # OPEN / COMPUTER
     assert isinstance(OPEN_COMPUTER_CADUCEUS_PINK, str)
     assert "⠀" in OPEN_COMPUTER_CADUCEUS_PINK or "⣿" in OPEN_COMPUTER_CADUCEUS_PINK
 
@@ -404,13 +409,20 @@ def test_accepts_all_legacy_kwargs_without_error(monkeypatch):
     )
 
 
-def test_narrow_terminal_falls_back_gracefully(monkeypatch):
-    """Below ``_WORDMARK_MIN_WIDTH`` we drop the ansi_shadow art and use
-    a smaller fallback. Splash must not crash and must still print the
-    OpenComputer name.
+def test_narrow_terminal_renders_stacked_hermes_wordmark(monkeypatch):
+    """Below ``_WORDMARK_MIN_WIDTH`` but ≥72 cols, the splash renders the
+    stacked Hermes-style ``ansi_shadow`` wordmark — same chunky font as
+    the wide one-liner, just OPEN stacked over COMPUTER. The legacy
+    half-block fallback must not regress back in.
     """
     out = _render(monkeypatch, width=80)
-    assert "OpenComputer" in out or "OPENCOMPUTER" in out
+    assert "OpenComputer" in out  # panel title still renders
+    # Stacked ansi_shadow blocks present...
+    assert "██╗" in out
+    assert "╔" in out
+    assert "╚" in out
+    # ...and the legacy half-block art does NOT.
+    assert "▄▀▀▀▄" not in out
 
 
 def test_pathologically_narrow_does_not_crash(monkeypatch):
