@@ -158,7 +158,29 @@ def _run_foreground(install_daemon: bool = False, daemon_profile: str = "default
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
+    # mcp-openclaw-port M2 — session_scoped MCP is intentionally NOT wired
+    # into gateway mode. The gateway dispatches one AgentLoop across many
+    # sessions through one shared tool registry; per-session MCP would
+    # require a per-session tool registry refactor (out of M2 scope).
+    # Document the constraint loudly so a user who flipped the flag in
+    # config.yaml expecting gateway behaviour doesn't get a silent no-op.
+    if cfg.mcp.session_scoped:
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli_gateway").warning(
+            "MCPConfig.session_scoped=True is set but gateway mode does not "
+            "honor per-session MCP runtimes today (chat mode only). All "
+            "gateway sessions share one process-global MCPManager. See "
+            "docs/plans/mcp-openclaw-port.md §3.M2 for the constraint."
+        )
     mcp_mgr = MCPManager(tool_registry=tool_registry)
+    # Gap G — publish the active MCPManager so LazyBundleStubTool can
+    # find it at first-tool-call wakeup.
+    try:
+        from opencomputer.mcp.manager_registry import set_active_manager
+
+        set_active_manager(mcp_mgr)
+    except Exception:  # noqa: BLE001 — wakeup is opt-in; never block
+        pass
 
     gw = Gateway(loop=loop, config=cfg.gateway)
     # Wire the new gates if present (Gateway forwards to its Dispatch).

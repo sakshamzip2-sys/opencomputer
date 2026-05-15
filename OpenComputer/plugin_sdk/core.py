@@ -353,6 +353,104 @@ class AuthChoice:
 
 
 @dataclass(frozen=True, slots=True)
+class BundleMcpToolDecl:
+    """One MCP tool a bundle declares ahead-of-time (mcp-openclaw-port Gap G).
+
+    Plugins ship ``BundleMcpServer.tools`` so the loader can register
+    stub :class:`opencomputer.mcp.lazy_wakeup.LazyBundleStubTool`
+    instances at activation time. The stubs satisfy tool-listing
+    immediately; on first dispatch they trigger MCP server wakeup,
+    look up the real tool by name, and route the call through.
+
+    Without this decl, ``lazy=True`` bundles wouldn't surface their
+    tools to the LLM until manually woken — first-tool-call wakeup
+    needs the catalog to know what to register.
+
+    Fields:
+
+    * ``name`` — bare tool name (e.g. ``"read_file"``). The composed
+      registry name is ``<plugin>__<server>__<tool>``.
+    * ``description`` — passed through to the tool schema.
+    * ``input_schema`` — JSON Schema (Draft 7) dict the LLM uses to
+      build arguments. Empty dict means "no schema declared" —
+      permissive (matches the MCP server's actual schema once awake).
+    """
+
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class BundleMcpServer:
+    """One MCP server bundled with a plugin (Role 3 — see ``docs/plans/mcp-openclaw-port.md``).
+
+    Lets a plugin ship its own MCP server (Node, Python, Go, anything that
+    speaks the MCP wire protocol). At plugin activation the loader
+    registers each entry in :class:`opencomputer.mcp.bundle.BundleMcpRegistry`;
+    at agent start the manager mounts every registered bundle alongside
+    user-configured MCPs under the namespaced ``<plugin_id>__<server>__<tool>``
+    tool-name prefix.
+
+    The ``command`` / ``args`` / ``env`` / ``cwd`` fields support a
+    single placeholder, ``${PLUGIN_ROOT}``, expanded to the plugin's
+    on-disk root at config-resolution time. The expanded ``command``
+    is checked: if it resolves to a path inside the plugin root that
+    path is used verbatim; if it resolves OUTSIDE the plugin root the
+    loader refuses the launch. Absolute commands (``/usr/bin/python3``)
+    and PATH lookups (``npx``, ``uvx``) are allowed unchanged.
+
+    ``lazy=True`` (default) keeps plugin activation fast — the subprocess
+    spawns when the first tool from this server is called, not at
+    activation. Set ``lazy=False`` for plugins whose MCP server boots
+    quickly and is needed immediately.
+
+    Mirrors OpenClaw's ``BundleMcpServer`` shape at
+    ``sources/openclaw/src/plugins/bundle-mcp.ts`` but renamed
+    ``${CLAUDE_PLUGIN_ROOT}`` → ``${PLUGIN_ROOT}`` so OC's surface
+    stays OC-native (a plugin that wants to target both can declare
+    both placeholders verbatim).
+    """
+
+    name: str
+    transport: Literal["stdio", "sse", "http"] = "stdio"
+    command: str = ""
+    args: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+    cwd: str = ""
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    connection_timeout_seconds: float = 30.0
+    lazy: bool = True
+    tools_allow: tuple[str, ...] | None = None
+    tools_deny: tuple[str, ...] = ()
+    osv_check: bool = True
+    #: Gap G (mcp-openclaw-port follow-up) — declared tool catalog so
+    #: the loader can register stub tools at activation time. With
+    #: ``lazy=True`` AND a non-empty ``tools`` tuple, the agent sees
+    #: the tools as available immediately; first dispatch triggers
+    #: the actual MCP server spawn + routes the call to the real tool.
+    #: Empty tuple (default) preserves the legacy lazy-True semantics
+    #: (the bundle stays disabled until ``oc mcp enable``).
+    tools: tuple[BundleMcpToolDecl, ...] = ()
+
+    def __post_init__(self) -> None:
+        # YAML auto-parsers + JSON loaders deliver tuple-typed fields as
+        # ``list`` (and ``tools_allow`` bypasses the default-driven
+        # tuplification because its default is ``None``). Normalise here
+        # so the frozen-dataclass contract is honored regardless of how
+        # the instance was built.
+        if isinstance(self.args, list):
+            object.__setattr__(self, "args", tuple(self.args))
+        if isinstance(self.tools_allow, list):
+            object.__setattr__(self, "tools_allow", tuple(self.tools_allow))
+        if isinstance(self.tools_deny, list):
+            object.__setattr__(self, "tools_deny", tuple(self.tools_deny))
+        if isinstance(self.tools, list):
+            object.__setattr__(self, "tools", tuple(self.tools))
+
+
+@dataclass(frozen=True, slots=True)
 class PluginManifest:
     """Metadata for a plugin — parsed from plugin.json at discovery time."""
 
@@ -462,6 +560,16 @@ class PluginManifest:
     # adapters under any profile can still keep its `oc <name>` subcommand
     # restricted to a working profile.
     cli_commands_profiles: tuple[str, ...] | None = None
+    # mcp-openclaw-port M1 (2026-05-15) — bundle MCP servers a plugin
+    # ships in its tree. Distinct from ``mcp_servers`` (which references
+    # *user-facing presets* by slug for the profile's MCP config): this
+    # field is wholly internal to the plugin and is mounted ONLY while
+    # the plugin is loaded. Each entry produces an ``MCPServerConfig``
+    # named ``<plugin_id>__<server.name>`` so tools surface as
+    # ``<plugin_id>__<server>__<tool>`` — collision-impossible by
+    # construction. Default ``()`` keeps every existing plugin
+    # backwards-compatible.
+    bundle_mcp: tuple[BundleMcpServer, ...] = ()
 
 
 # ─── Plugin activation source (Task I.7) ───────────────────────────────
@@ -578,6 +686,8 @@ __all__ = [
     "MessageEvent",
     "SendResult",
     "ModelSupport",
+    "BundleMcpServer",
+    "BundleMcpToolDecl",
     "PluginManifest",
     "PluginActivationSource",
     "PluginSetup",

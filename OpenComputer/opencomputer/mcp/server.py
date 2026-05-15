@@ -49,20 +49,40 @@ import logging
 import sqlite3
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from opencomputer.agent.config import _home
 from opencomputer.agent.state import SessionDB
 
-logger = logging.getLogger("opencomputer.mcp.server")
+# Gap E (mcp-openclaw-port follow-up) — redact %s args in MCP log
+# calls so URL tokens / bearer headers / API keys never reach the
+# log file even when an exception message includes them. ``noqa: E402``
+# because ruff doesn't know we need ``logging`` imported first.
+from opencomputer.mcp.redaction import redacting as _redacting  # noqa: E402
+
+logger = _redacting(logging.getLogger("opencomputer.mcp.server"))
 
 
-def build_server() -> FastMCP:
+#: Allowlist for ``permissions_respond``'s ``granted_by`` arg (M3).
+#: Wider than just "user" so MCP-driven grants and gateway-driven grants
+#: surface distinctly in the audit log without schema migration. New
+#: sources must be added here intentionally so a misconfigured caller
+#: can't synthesize arbitrary attribution.
+_VALID_GRANTED_BY: frozenset[str] = frozenset({"user", "mcp_client", "gateway"})
+
+
+def build_server(enable_approvals: bool = False) -> FastMCP:
     """Construct the OpenComputer MCP server with all tools registered.
 
     The server is constructed each time so it picks up the active profile
     via ``_home()`` — ``opencomputer -p <profile> mcp serve`` works as
     expected.
+
+    mcp-openclaw-port M3 (2026-05-15) — when ``enable_approvals=True``,
+    register the long-poll ``permissions_request_subscribe`` tool so
+    external MCP clients (Claude Code, Cursor, IDE plugins) can drive
+    OC's consent prompt queue. Default ``False`` (security-conservative):
+    consent state is sensitive and must be opt-in to expose remotely.
     """
     server = FastMCP(
         name="opencomputer",
@@ -597,6 +617,7 @@ def build_server() -> FastMCP:
         scope: str | None = None,
         tier: int = 1,
         expires_in_seconds: int | None = None,
+        granted_by: str = "user",
     ) -> dict[str, Any]:
         """Grant or revoke an F1 capability consent (10th of 10 Hermes tools).
 
@@ -609,6 +630,12 @@ def build_server() -> FastMCP:
                 2=PER_ACTION, 3=DELEGATED).
             expires_in_seconds: Optional grant lifetime. ``None`` =
                 no expiry (revocable). Otherwise added to ``time.time()``.
+            granted_by: M3 (mcp-openclaw-port). Source attribution
+                recorded in the consent_grants table. Must be one of
+                ``"user"`` (CLI/TUI driver), ``"mcp_client"`` (external
+                MCP client over this server's stdio surface), or
+                ``"gateway"`` (channel adapter). Defaults to ``"user"``
+                so back-compat call sites keep working.
 
         Returns:
             ``{"ok": True, "action": "granted"|"revoked", "capability_id":
@@ -625,6 +652,17 @@ def build_server() -> FastMCP:
             return {
                 "ok": False,
                 "error": f"decision must be 'allow' or 'deny', got {decision!r}",
+            }
+        # M3 — granted_by attribution validation. Reject unknown values
+        # so a buggy caller can't synthesize forged audit-source labels.
+        granted_by_norm = (granted_by or "user").strip()
+        if granted_by_norm not in _VALID_GRANTED_BY:
+            return {
+                "ok": False,
+                "error": (
+                    f"granted_by must be one of {sorted(_VALID_GRANTED_BY)}, "
+                    f"got {granted_by!r}"
+                ),
             }
         try:
             tier_enum = ConsentTier(int(tier))
@@ -651,7 +689,7 @@ def build_server() -> FastMCP:
                         tier=tier_enum,
                         granted_at=now,
                         expires_at=expires_at,
-                        granted_by="user",
+                        granted_by=granted_by_norm,
                     )
                     store.upsert(grant)
                     action = "granted"
@@ -661,28 +699,125 @@ def build_server() -> FastMCP:
                 "capability_id": capability_id,
                 "scope": scope,
                 "tier": int(tier_enum),
+                "granted_by": granted_by_norm,
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
+    # ── M3 (mcp-openclaw-port): permission long-poll subscription ──
+    # Opt-in via ``enable_approvals`` — external MCP clients can drive
+    # OC's consent flow. Default OFF (consent state is sensitive; must
+    # be intentionally exposed via ``oc mcp serve --enable-approvals``).
+    if enable_approvals:
+
+        @server.tool()
+        async def permissions_request_subscribe(
+            ctx: Context,
+            timeout_s: float = 30.0,
+            poll_interval_s: float = 1.0,
+        ) -> list[dict[str, Any]]:
+            """Long-poll for pending F1 consent requests (M3 + Gap H push).
+
+            Wraps the same query as :func:`permissions_list_open` in a
+            sleep loop so external MCP clients (Claude Code, Cursor,
+            IDE plugins) can block on permission events instead of
+            busy-polling.
+
+            Gap H push semantics (mcp-openclaw-port follow-up): when a
+            new pending request is detected during the poll, the server
+            ALSO emits a ``notifications/message`` (LoggingMessageNotification)
+            with ``logger="openclaw.permission"`` and the request data
+            in the payload. Clients that listen for MCP log
+            notifications get out-of-band push UX even while another
+            tool call is in flight.
+
+            Args:
+                timeout_s: Max seconds to wait. Default 30, capped at
+                    120 to avoid pathological MCP timeouts; clients
+                    wanting longer holds should call again.
+                poll_interval_s: How often to check (default 1s).
+                ctx: FastMCP Context auto-injected by the SDK when
+                    available. Used for the push-notification path.
+
+            Returns:
+                List of pending consent-request dicts (capability_id,
+                scope, requested_at, requested_by). Empty list on
+                timeout with no entries.
+            """
+            bounded_timeout = max(0.05, min(timeout_s, 120.0))
+            bounded_poll = max(0.05, min(poll_interval_s, 5.0))
+            deadline = asyncio.get_event_loop().time() + bounded_timeout
+            db_path = _home() / "sessions.db"
+            while True:
+                if db_path.exists():
+                    try:
+                        with sqlite3.connect(str(db_path)) as conn:
+                            conn.row_factory = sqlite3.Row
+                            rows = conn.execute(
+                                "SELECT capability_id, scope, requested_at, "
+                                "requested_by "
+                                "FROM consent_requests WHERE state = 'pending' "
+                                "ORDER BY requested_at DESC LIMIT 50"
+                            ).fetchall()
+                    except sqlite3.OperationalError:
+                        rows = []
+                    if rows:
+                        # Gap H — emit push notification BEFORE returning
+                        # so the client receives the event out-of-band
+                        # via its log-message subscription (in addition
+                        # to the long-poll return value below). Best-
+                        # effort: any transport error here is swallowed
+                        # so the long-poll response still returns.
+                        try:
+                            for row in rows:
+                                await ctx.session.send_log_message(
+                                    level="info",
+                                    data={
+                                        "event": "openclaw.permission.requested",
+                                        "capability_id": row["capability_id"],
+                                        "scope": row["scope"],
+                                        "requested_at": row["requested_at"],
+                                        "requested_by": row["requested_by"],
+                                    },
+                                    logger="openclaw.permission",
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "permission-requested push notification "
+                                "failed; long-poll response unaffected",
+                                exc_info=True,
+                            )
+                        return [dict(r) for r in rows]
+                now = asyncio.get_event_loop().time()
+                if now >= deadline:
+                    return []
+                await asyncio.sleep(min(bounded_poll, max(0.0, deadline - now)))
+
     return server
 
 
-async def run_server() -> None:
+async def run_server(*, enable_approvals: bool = False) -> None:
     """Start the MCP server on stdio and run until the client disconnects.
 
     Used by ``opencomputer mcp serve``. Blocks until stdio closes.
+
+    ``enable_approvals`` toggles the M3 long-poll
+    ``permissions_request_subscribe`` tool. Default OFF for security
+    (consent state is sensitive — only expose intentionally).
     """
-    server = build_server()
-    logger.info("opencomputer MCP server starting on stdio")
+    server = build_server(enable_approvals=enable_approvals)
+    logger.info(
+        "opencomputer MCP server starting on stdio (approvals=%s)",
+        "ON" if enable_approvals else "OFF",
+    )
     # FastMCP's stdio runner handles the async transport lifecycle.
     await server.run_stdio_async()
 
 
-def main() -> None:
+def main(*, enable_approvals: bool = False) -> None:
     """Synchronous entry point for ``opencomputer mcp serve``."""
     try:
-        asyncio.run(run_server())
+        asyncio.run(run_server(enable_approvals=enable_approvals))
     except KeyboardInterrupt:
         logger.info("opencomputer MCP server stopped (KeyboardInterrupt)")
 

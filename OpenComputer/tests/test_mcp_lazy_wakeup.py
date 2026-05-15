@@ -1,0 +1,382 @@
+"""Gap G — first-tool-call lazy wakeup for bundle MCP servers.
+
+mcp-openclaw-port follow-up. With lazy=True, a bundle MCP doesn't
+auto-mount at chat start — users had to manually ``oc mcp enable``.
+This module adds the OpenClaw / Hermes pattern:
+
+1. Plugin manifest's ``bundle_mcp[i].tools`` declares the tools the
+   server exposes (name + description + input_schema).
+2. At plugin activation, the loader registers ``LazyBundleStubTool``
+   instances by those names in the tool registry. Stubs satisfy
+   tool-listing immediately — the LLM sees the tool available.
+3. First dispatch through a stub: connect the bundle MCP, look up
+   the real tool, and route the call to it. Subsequent calls reuse
+   the cached real tool.
+
+Covers:
+- BundleMcpToolDecl dataclass shape + manifest roundtrip
+- LazyBundleStubTool wakeup + dispatch + caching
+- Wakeup failure returns a clean error ToolResult
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from opencomputer.mcp.lazy_wakeup import (
+    BundleWakeupError,
+    LazyBundleStubTool,
+)
+from opencomputer.plugins.discovery import _parse_manifest
+from plugin_sdk.core import BundleMcpServer, BundleMcpToolDecl, ToolCall
+
+# ─── BundleMcpToolDecl dataclass shape ───────────────────────────
+
+
+def test_bundle_mcp_tool_decl_frozen() -> None:
+    decl = BundleMcpToolDecl(name="read_file", description="Read a file")
+    with pytest.raises(Exception):
+        decl.name = "evil"  # type: ignore[misc]
+
+
+def test_bundle_mcp_tool_decl_defaults() -> None:
+    decl = BundleMcpToolDecl(name="x")
+    assert decl.description == ""
+    assert decl.input_schema == {}
+
+
+def test_bundle_mcp_server_tools_default_empty() -> None:
+    srv = BundleMcpServer(name="memory")
+    assert srv.tools == ()
+
+
+def test_bundle_mcp_server_with_tools() -> None:
+    srv = BundleMcpServer(
+        name="memory",
+        tools=(
+            BundleMcpToolDecl(name="store"),
+            BundleMcpToolDecl(name="recall"),
+        ),
+    )
+    assert len(srv.tools) == 2
+    assert srv.tools[0].name == "store"
+
+
+# ─── manifest roundtrip ──────────────────────────────────────────
+
+
+def test_manifest_parses_tools_under_bundle_mcp(tmp_path: Path) -> None:
+    plug_dir = tmp_path / "p"
+    plug_dir.mkdir()
+    manifest_data = {
+        "id": "p",
+        "name": "P",
+        "version": "1.0.0",
+        "entry": "plugin",
+        "bundle_mcp": [
+            {
+                "name": "memory",
+                "command": "npx",
+                "lazy": True,
+                "tools": [
+                    {
+                        "name": "store",
+                        "description": "Store a memory",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"key": {"type": "string"}},
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    (plug_dir / "plugin.json").write_text(json.dumps(manifest_data))
+    manifest = _parse_manifest(plug_dir / "plugin.json")
+    assert manifest is not None
+    assert len(manifest.bundle_mcp) == 1
+    bm = manifest.bundle_mcp[0]
+    assert len(bm.tools) == 1
+    assert bm.tools[0].name == "store"
+    assert bm.tools[0].description == "Store a memory"
+    assert bm.tools[0].input_schema["type"] == "object"
+
+
+def test_manifest_without_tools_still_loads(tmp_path: Path) -> None:
+    """Backwards-compat: bundle_mcp entries without ``tools`` still parse."""
+    plug_dir = tmp_path / "p"
+    plug_dir.mkdir()
+    manifest_data = {
+        "id": "p",
+        "name": "P",
+        "version": "1.0.0",
+        "entry": "plugin",
+        "bundle_mcp": [
+            {"name": "memory", "command": "npx"},
+        ],
+    }
+    (plug_dir / "plugin.json").write_text(json.dumps(manifest_data))
+    manifest = _parse_manifest(plug_dir / "plugin.json")
+    assert manifest is not None
+    assert manifest.bundle_mcp[0].tools == ()
+
+
+# ─── LazyBundleStubTool wakeup + dispatch ───────────────────────
+
+
+def test_stub_tool_schema_exposes_declared_shape() -> None:
+    decl = BundleMcpToolDecl(
+        name="read_file",
+        description="Read a file",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+    )
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=decl,
+        wakeup_fn=lambda: None,
+        registry_lookup=lambda name: None,
+    )
+    schema = stub.schema
+    assert schema.name == "plug__memory__read_file"
+    assert schema.description == "Read a file"
+    assert schema.parameters == {
+        "type": "object", "properties": {"path": {"type": "string"}},
+    }
+
+
+def test_stub_tool_first_call_triggers_wakeup() -> None:
+    wakeup_called: list[bool] = []
+    real_tool = MagicMock()
+
+    async def _real_execute(call: ToolCall):
+        from plugin_sdk.core import ToolResult
+        return ToolResult(tool_call_id=call.id, content="real result", is_error=False)
+
+    real_tool.execute = _real_execute
+
+    def wakeup():
+        wakeup_called.append(True)
+
+    def lookup(name: str):
+        if name == "plug__memory__read_file" and wakeup_called:
+            return real_tool
+        return None
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=wakeup,
+        registry_lookup=lookup,
+    )
+    import asyncio
+    result = asyncio.run(stub.execute(ToolCall(
+        id="c1", name="plug__memory__read_file", arguments={},
+    )))
+    assert wakeup_called == [True]
+    assert "real result" in result.content
+
+
+def test_stub_tool_second_call_reuses_real_tool() -> None:
+    """After first wakeup, subsequent calls don't re-trigger wakeup."""
+    wakeup_called: list[bool] = []
+    real_tool = MagicMock()
+
+    async def _real_execute(call: ToolCall):
+        from plugin_sdk.core import ToolResult
+        return ToolResult(tool_call_id=call.id, content="ok", is_error=False)
+
+    real_tool.execute = _real_execute
+
+    def wakeup():
+        wakeup_called.append(True)
+
+    def lookup(name: str):
+        return real_tool if wakeup_called else None
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=wakeup,
+        registry_lookup=lookup,
+    )
+    import asyncio
+    asyncio.run(stub.execute(ToolCall(id="c1", name="x", arguments={})))
+    asyncio.run(stub.execute(ToolCall(id="c2", name="x", arguments={})))
+    # Wakeup ran ONCE
+    assert len(wakeup_called) == 1
+
+
+def test_stub_tool_wakeup_failure_returns_error_result() -> None:
+    """A failed wakeup yields ToolResult(is_error=True) — no exception."""
+    def wakeup():
+        raise BundleWakeupError("MCP server spawn failed: ENOENT npx")
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=wakeup,
+        registry_lookup=lambda name: None,
+    )
+    import asyncio
+    result = asyncio.run(stub.execute(ToolCall(id="c1", name="x", arguments={})))
+    assert result.is_error
+    assert "spawn failed" in result.content.lower() or "wakeup" in result.content.lower()
+
+
+def test_stub_tool_lock_non_blocking_on_concurrent_dispatch() -> None:
+    """Risk 3 fix — when a wakeup is in progress on thread A, thread B's
+    dispatch returns a clear ``BundleWakeupError`` immediately instead
+    of blocking up to 30 seconds behind A.
+
+    Implementation detail: ``LazyBundleStubTool._ensure_woken`` uses
+    ``self._wakeup_lock.acquire(blocking=False)`` and raises on contention.
+    """
+    import threading
+    import time
+
+    wakeup_started = threading.Event()
+    wakeup_can_finish = threading.Event()
+
+    def slow_wakeup():
+        wakeup_started.set()
+        wakeup_can_finish.wait(timeout=5.0)
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=slow_wakeup,
+        registry_lookup=lambda name: None,
+    )
+
+    import asyncio
+
+    async def _first_call():
+        return await stub.execute(ToolCall(id="c1", name="x", arguments={}))
+
+    async def _second_call():
+        return await stub.execute(ToolCall(id="c2", name="x", arguments={}))
+
+    async def _run():
+        # Start the first call but don't await its completion.
+        task_a = asyncio.create_task(_first_call())
+        # Wait for the wakeup_fn to actually start (proves the lock is held).
+        while not wakeup_started.is_set():
+            await asyncio.sleep(0.01)
+        # Now the second call: the lock is held by thread A, so this
+        # should hit the non-blocking branch and return error quickly.
+        before = time.monotonic()
+        result_b = await asyncio.wait_for(_second_call(), timeout=2.0)
+        elapsed = time.monotonic() - before
+        # The second call must NOT have blocked for ~5s.
+        assert elapsed < 1.0, (
+            f"second call blocked {elapsed:.2f}s — non-blocking lock broke"
+        )
+        assert result_b.is_error
+        assert "in progress" in result_b.content.lower()
+        # Now release the first wakeup so the test can clean up.
+        wakeup_can_finish.set()
+        await task_a
+        return result_b
+
+    asyncio.run(_run())
+
+
+def test_stub_tool_wakeup_timeout_returns_error() -> None:
+    """Risk 3 fix — if wakeup_fn doesn't complete within
+    ``wakeup_timeout_seconds``, execute() returns a timeout error
+    ToolResult instead of blocking forever.
+    """
+    import threading
+    import time
+
+    wakeup_can_finish = threading.Event()
+
+    def slow_wakeup():
+        # Short wait so the background thread exits soon after the
+        # async-side timeout fires — keeps the test fast.
+        wakeup_can_finish.wait(timeout=1.0)
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=slow_wakeup,
+        registry_lookup=lambda name: None,
+        wakeup_timeout_seconds=0.2,  # tight cap for the test
+    )
+
+    import asyncio
+    result = asyncio.run(stub.execute(
+        ToolCall(id="c1", name="x", arguments={})
+    ))
+    # The timeout path returns an error result with a "timed out" hint.
+    # We assert the RESULT shape, not wall-time elapsed — Python can't
+    # cancel an executor thread mid-flight, so total asyncio.run wall
+    # time includes the executor's natural settle (≤1s here).
+    assert result.is_error
+    assert "timed out" in result.content.lower()
+    # Release the background thread for clean teardown.
+    wakeup_can_finish.set()
+
+
+def test_stub_tool_caches_wakeup_error_no_retry_thrash() -> None:
+    """Risk 3 fix — a failed wakeup is cached so the LLM's retries
+    don't re-spawn the broken bundle. Force a manual reset via
+    new stub instance if the underlying problem was transient.
+    """
+    import asyncio
+
+    n_calls: list[int] = []
+
+    def failing_wakeup():
+        n_calls.append(1)
+        raise BundleWakeupError("MCP server spawn failed: ENOENT npx")
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=failing_wakeup,
+        registry_lookup=lambda name: None,
+    )
+    # First call: wakeup_fn fires + raises
+    result1 = asyncio.run(stub.execute(ToolCall(id="c1", name="x", arguments={})))
+    assert result1.is_error
+    assert len(n_calls) == 1
+    # Second call: cached error returned WITHOUT calling wakeup_fn again
+    result2 = asyncio.run(stub.execute(ToolCall(id="c2", name="x", arguments={})))
+    assert result2.is_error
+    assert len(n_calls) == 1, (
+        "wakeup_fn was retried unnecessarily — bundle thrashing risk"
+    )
+
+
+def test_stub_tool_no_real_tool_after_wakeup_returns_error() -> None:
+    """If wakeup runs but no real tool surfaces, return clear error."""
+    wakeup_called: list[bool] = []
+
+    def wakeup():
+        wakeup_called.append(True)  # but no tool registered
+
+    stub = LazyBundleStubTool(
+        plugin_id="plug",
+        server_name="memory",
+        decl=BundleMcpToolDecl(name="read_file"),
+        wakeup_fn=wakeup,
+        registry_lookup=lambda name: None,
+    )
+    import asyncio
+    result = asyncio.run(stub.execute(ToolCall(id="c1", name="x", arguments={})))
+    assert result.is_error
+    assert "not registered" in result.content.lower() or (
+        "wakeup" in result.content.lower()
+    )

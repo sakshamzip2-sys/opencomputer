@@ -36,7 +36,17 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 #: Kimi CLI's ``MCPServerSnapshot.status`` values.
 ConnectionState = Literal["connected", "disconnected", "error"]
 
-logger = logging.getLogger("opencomputer.mcp.client")
+# Gap E (mcp-openclaw-port follow-up) — the MCP code path can log
+# exception text that contains URLs, tokens, headers. Pipe every log
+# call through ``redacting`` so secrets never reach the log file
+# regardless of how the exception was constructed. The adapter only
+# touches ``%s`` arguments; the format string stays verbatim. Import
+# here (after other module-level imports) so the wrapper is in scope
+# for the ``logger`` binding below. ``noqa: E402`` because ruff doesn't
+# know we need ``logging`` imported first.
+from opencomputer.mcp.redaction import redacting as _redacting  # noqa: E402
+
+logger = _redacting(logging.getLogger("opencomputer.mcp.client"))
 
 #: TypeVar used by :meth:`MCPManager.submit_sync` to preserve the
 #: caller's coroutine return type. The :func:`_run_on_session_loop`
@@ -260,6 +270,16 @@ class MCPTool(BaseTool):
     #: dispatch path. ``None`` means :func:`_run_on_session_loop` skips
     #: cross-loop trampolining and awaits the session call directly.
     session_loop: asyncio.AbstractEventLoop | None = None
+    #: Gap D — class-level default so MCPTool.__new__(MCPTool) test
+    #: doubles don't AttributeError on ``self.schema`` access. The
+    #: instance attribute set in ``__init__`` shadows this.
+    _display_name_override: str | None = None
+    #: Gap F — class-level defaults so test doubles via ``MCPTool.__new__``
+    #: still get a usable lease-counting path. ``None`` on either means
+    #: ``execute`` dispatches without acquiring a lease (back-compat for
+    #: process-global MCPManager + every existing test).
+    _lease_session_id: str | None = None
+    _lease_registry: Any = None
 
     def __init__(
         self,
@@ -283,12 +303,23 @@ class MCPTool(BaseTool):
         #: set to ``MCPManager._bg_loop`` so ``execute`` can dispatch
         #: across loops via :func:`_run_on_session_loop`.
         self.session_loop = session_loop
+        #: Gap D (mcp-openclaw-port follow-up) — display-name override
+        #: set by :meth:`MCPManager._connect_one` after the canonical
+        #: name is computed via ``compose_mcp_tool_name`` (sanitize +
+        #: truncate + collision suffix). ``None`` falls back to the
+        #: legacy ``<server>__<tool>`` form.
+        self._display_name_override: str | None = None
 
     @property
     def schema(self) -> ToolSchema:
-        # Namespace MCP tools with the server name so there's no collision
-        # between multiple servers exposing a tool with the same name.
-        display_name = f"{self.server_name}__{self.tool_name}"
+        # Gap D — when MCPManager has set an override, use it. Falls
+        # back to the legacy direct join for code paths (tests, ad-hoc
+        # construction) that build an MCPTool without going through
+        # the manager's compose pipeline.
+        if self._display_name_override is not None:
+            display_name = self._display_name_override
+        else:
+            display_name = f"{self.server_name}__{self.tool_name}"
         return ToolSchema(
             name=display_name,
             description=self.description,
@@ -301,6 +332,51 @@ class MCPTool(BaseTool):
         # bearer tokens, postgres URLs etc. Pipe everything through the
         # central redaction module BEFORE returning to the LLM.
         from opencomputer.security.redact import redact_runtime_text
+
+        # Gap C (mcp-openclaw-port follow-up) — validate args against
+        # the tool's inputSchema BEFORE round-tripping to the server.
+        # Surfaces field-path errors to the LLM instead of a generic
+        # MCP -32602; saves an RTT when the LLM produces obviously bad
+        # arguments. Permissive on missing/non-object schemas.
+        try:
+            from opencomputer.mcp.schema_validation import (
+                SchemaValidationError,
+                validate_tool_arguments,
+            )
+
+            validate_tool_arguments(call.arguments, self.parameters)
+        except SchemaValidationError as e:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(str(e)),
+                is_error=True,
+            )
+        except Exception:  # noqa: BLE001 — schema-validation must never crash dispatch
+            # Fall through to the MCP server; it'll surface any error.
+            pass
+
+        # Gap F (M4) — acquire a lease for the duration of this dispatch
+        # if the tool was bound to a session-scoped lease registry. The
+        # SessionMcpRuntimeManager's sweep_idle path checks the lease
+        # count BEFORE evicting, so an in-flight call can't be torn down.
+        # No-op when ``_lease_registry`` / ``_lease_session_id`` is None
+        # (the process-global MCPManager path), keeping every existing
+        # test + production call site backward-compatible.
+        lease_release: Any = None
+        if (
+            self._lease_registry is not None
+            and self._lease_session_id is not None
+        ):
+            try:
+                lease_release = self._lease_registry.acquire(
+                    self._lease_session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Lease acquisition failure must NOT break dispatch.
+                logger.debug(
+                    "lease acquire failed for session=%s tool=%s: %s",
+                    self._lease_session_id, self.tool_name, exc,
+                )
 
         try:
             # G10 (Hermes parity, 2026-05-09): cap the per-tool-call wait
@@ -341,6 +417,13 @@ class MCPTool(BaseTool):
                 content=redact_runtime_text(err),
                 is_error=True,
             )
+        finally:
+            # Gap F — release the lease no matter the outcome.
+            if lease_release is not None:
+                try:
+                    lease_release()
+                except Exception:  # noqa: BLE001 — release is best-effort
+                    pass
 
 
 def hermes_alias_name(server_name: str, tool_name: str) -> str:
@@ -771,6 +854,11 @@ class MCPConnection:
     #: Event loop that owns the connection — also tagged onto every
     #: tool's ``session_loop`` so cross-loop calls dispatch correctly.
     _owner_loop: asyncio.AbstractEventLoop | None = None
+    #: Gap B (mcp-openclaw-port follow-up) — per-server stderr log
+    #: handle. ``None`` for non-stdio transports + the fallback path
+    #: where opening the log failed. Closed on disconnect to release
+    #: the file descriptor.
+    _stderr_log_handle: Any = None
 
     def _osv_pre_flight(self, *, fail_closed: bool) -> str | None:
         """Run the OSV pre-flight check; return an error string if blocking.
@@ -971,7 +1059,25 @@ class MCPConnection:
                     args=list(self.config.args),
                     env=spawn_env,
                 )
-                transport_ctx = stdio_client(params)
+                # Gap B (mcp-openclaw-port follow-up) — per-server stderr
+                # capture to ``<profile>/logs/mcp/<server>.log``. Falls
+                # back to inheriting parent's stderr on any error so a
+                # broken log path never blocks MCP startup.
+                try:
+                    from opencomputer.mcp.stderr_capture import open_mcp_stderr_log
+
+                    self._stderr_log_handle = open_mcp_stderr_log(self.config.name)
+                    transport_ctx = stdio_client(
+                        params, errlog=self._stderr_log_handle,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "MCP server '%s' stderr-capture failed (%s) — "
+                        "falling back to parent stderr",
+                        self.config.name, exc,
+                    )
+                    self._stderr_log_handle = None
+                    transport_ctx = stdio_client(params)
             elif self.config.transport == "sse":
                 if not self.config.url:
                     raise ValueError(
@@ -1293,6 +1399,13 @@ class MCPConnection:
         self._owner_done = None
         self._owner_error = None
         self._owner_loop = None
+        # Gap B — close per-server stderr log handle.
+        if self._stderr_log_handle is not None:
+            try:
+                self._stderr_log_handle.close()
+            except Exception:  # noqa: BLE001 — close on best-effort
+                pass
+            self._stderr_log_handle = None
         # Legacy ``exit_stack`` kept ``None`` for compat with status
         # introspection — owner-task pattern doesn't need it.
         self.exit_stack = None
@@ -1413,6 +1526,28 @@ class MCPManager:
         self._bg_loop: asyncio.AbstractEventLoop | None = None
         self._bg_thread: threading.Thread | None = None
         self._bg_ready: threading.Event = threading.Event()
+        # Gap F — when bound by ``SessionMcpRuntimeManager``, each
+        # MCPTool produced by this manager acquires a lease on this
+        # registry for the duration of its dispatch. ``None`` means
+        # no lease accounting (process-global MCPManager path).
+        self.lease_registry: Any = None
+        self.lease_session_id: str | None = None
+        # Gap A — startup orphan sweep. Best-effort psutil walk + SIGTERM
+        # against any MCP-named descendant left over from a prior crashed
+        # OC run. Empty on the clean common case.
+        try:
+            from opencomputer.mcp.process_tree import kill_mcp_descendants
+
+            n_term, n_kill = kill_mcp_descendants(os.getpid())
+            if n_term or n_kill:
+                logger.info(
+                    "MCP startup orphan sweep: terminated=%d killed=%d",
+                    n_term, n_kill,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "MCP startup orphan sweep raised (continuing): %s", exc,
+            )
 
     async def connect_all(
         self,
@@ -1420,6 +1555,7 @@ class MCPManager:
         *,
         osv_check_enabled: bool = True,
         osv_check_fail_closed: bool = False,
+        include_bundle: bool = True,
     ) -> int:
         """Connect to every enabled server + register its tools. Returns tool count.
 
@@ -1433,8 +1569,35 @@ class MCPManager:
         straight through to each :meth:`MCPConnection.connect` call so
         callers can plumb :class:`MCPConfig` flags without per-server
         threading.
+
+        ``include_bundle`` (default ``True``): also walk
+        :data:`opencomputer.mcp.bundle.default_registry` to mount every
+        plugin-shipped bundle MCP server. Set ``False`` in tests that
+        want a clean process-global config baseline. mcp-openclaw-port M1.
         """
-        enabled = [cfg for cfg in servers if cfg.enabled]
+        merged: list[MCPServerConfig] = list(servers)
+        if include_bundle:
+            # Late import — keeps client.py's startup cheap when no
+            # plugins have bundled MCPs.
+            from opencomputer.mcp.bundle import default_registry
+
+            bundle_configs = default_registry.all_server_configs()
+            # Skip bundle entries whose ``name`` already appears in the
+            # user-configured list. This is defensive: a user could (in
+            # principle) hand-add a server named ``plug__mem`` that
+            # collides with a bundle. User config wins — they explicitly
+            # asked for it.
+            existing_names = {cfg.name for cfg in merged}
+            for cfg in bundle_configs:
+                if cfg.name in existing_names:
+                    logger.warning(
+                        "bundle MCP %s shadowed by user-configured server "
+                        "with same name; skipping bundle entry",
+                        cfg.name,
+                    )
+                    continue
+                merged.append(cfg)
+        enabled = [cfg for cfg in merged if cfg.enabled]
         if not enabled:
             return 0
 
@@ -1452,21 +1615,67 @@ class MCPManager:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "MCP server '%s' connect raised: %s", cfg.name, exc
+                        "MCP server '%s' connect raised: %s", cfg.name, exc,
                     )
                     return 0
                 if not ok:
                     return 0
                 self.connections.append(conn)
                 added = 0
+                # Gap D (mcp-openclaw-port follow-up) — assign canonical
+                # names via the compose pipeline (sanitize + truncate to
+                # 64 + collision suffix). Replaces the legacy "register
+                # raises ValueError on collision → log + skip" path with
+                # "compose resolves the collision before register".
+                from opencomputer.mcp.naming import compose_mcp_tool_name
+
+                existing_names: set[str] = set(self.tool_registry.names())
                 for tool in conn.tools:
+                    # ``server_name`` already includes the plugin prefix
+                    # for bundle MCPs (``<plugin>__<server>``); compose
+                    # with plugin_id="" splices it into the single
+                    # ``<server>__<tool>`` join, then sanitize +
+                    # truncate + collide-suffix.
+                    if not isinstance(tool, MCPTool):
+                        # Utility tools (list_resources etc.) — register
+                        # directly without renaming.
+                        try:
+                            self.tool_registry.register(tool)
+                            added += 1
+                        except ValueError:
+                            logger.warning(
+                                "MCP utility tool name collision (skipped): %s",
+                                tool.schema.name,
+                            )
+                        continue
+                    try:
+                        final_name = compose_mcp_tool_name(
+                            "", tool.server_name, tool.tool_name, existing_names,
+                        )
+                    except ValueError as exc:
+                        logger.warning(
+                            "MCP tool name compose exhausted suffixes: %s — "
+                            "skipping registration", exc,
+                        )
+                        continue
+                    tool._display_name_override = final_name
+                    # Gap F — propagate lease binding so the tool can
+                    # acquire on dispatch. No-op when this manager isn't
+                    # session-bound.
+                    if self.lease_registry is not None and self.lease_session_id:
+                        tool._lease_registry = self.lease_registry
+                        tool._lease_session_id = self.lease_session_id
                     try:
                         self.tool_registry.register(tool)
                         added += 1
                     except ValueError:
+                        # Compose already resolved against the registry
+                        # snapshot, so a collision HERE means a race —
+                        # another connection registered the same name
+                        # between snapshot and register. Log + skip.
                         logger.warning(
-                            "MCP tool name collision (skipped): %s",
-                            tool.schema.name,
+                            "MCP tool name collision race (skipped): %s",
+                            final_name,
                         )
                 return added
             finally:
@@ -1515,6 +1724,21 @@ class MCPManager:
                 self.tool_registry.unregister(tool.schema.name)
             await conn.disconnect()
         self.connections.clear()
+        # Gap A defence-in-depth — after the SDK's per-connection
+        # kill-tree path runs, scan once for any straggler MCP
+        # subprocess that survived (crash-path, owner-task force
+        # cancellation, etc.) and terminate it. No-op when clean.
+        try:
+            from opencomputer.mcp.process_tree import kill_mcp_descendants
+
+            n_term, n_kill = kill_mcp_descendants(os.getpid())
+            if n_term or n_kill:
+                logger.info(
+                    "MCP shutdown orphan sweep: terminated=%d killed=%d",
+                    n_term, n_kill,
+                )
+        except Exception as exc:  # noqa: BLE001 — sweep must never block shutdown
+            logger.warning("MCP shutdown orphan sweep raised: %s", exc)
 
     # ── background-loop lifecycle (2026-05-14 anyio fix) ──────────────
 
@@ -1628,6 +1852,7 @@ class MCPManager:
         osv_check_enabled: bool = True,
         osv_check_fail_closed: bool = False,
         timeout: float = 120.0,
+        include_bundle: bool = True,
     ) -> int:
         """Sync wrapper around :meth:`connect_all` for non-async callers.
 
@@ -1641,6 +1866,7 @@ class MCPManager:
                 servers,
                 osv_check_enabled=osv_check_enabled,
                 osv_check_fail_closed=osv_check_fail_closed,
+                include_bundle=include_bundle,
             ),
             timeout=timeout,
         )
@@ -1651,6 +1877,7 @@ class MCPManager:
         *,
         osv_check_enabled: bool = True,
         osv_check_fail_closed: bool = False,
+        include_bundle: bool = True,
     ) -> None:
         """Fire-and-forget connect_all on the bg loop. Non-blocking.
 
@@ -1669,6 +1896,7 @@ class MCPManager:
                 servers,
                 osv_check_enabled=osv_check_enabled,
                 osv_check_fail_closed=osv_check_fail_closed,
+                include_bundle=include_bundle,
             ),
             self._bg_loop,
         )

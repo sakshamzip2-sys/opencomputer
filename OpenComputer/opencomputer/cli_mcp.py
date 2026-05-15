@@ -84,22 +84,174 @@ def _enforce_osv_malware_check(
 
 @mcp_app.command("list")
 def list_servers() -> None:
-    """List every configured MCP server."""
+    """List every configured MCP server (user-configured + plugin-bundled)."""
     cfg = load_config()
-    if not cfg.mcp.servers:
+    bundle_configs = _gather_bundle_configs()
+    if not cfg.mcp.servers and not bundle_configs:
         console.print("[dim]no MCP servers configured.[/dim]")
         console.print(
             "[dim]add one with: opencomputer mcp add NAME --transport stdio --command CMD ...[/dim]"
         )
         return
-    table = Table(show_header=True, header_style="bold cyan")
+    if cfg.mcp.servers:
+        table = Table(show_header=True, header_style="bold cyan", title="user")
+        table.add_column("name")
+        table.add_column("transport")
+        table.add_column("target")
+        table.add_column("enabled")
+        for s in cfg.mcp.servers:
+            target = (
+                f"{s.command} {' '.join(s.args)}".strip()
+                if s.transport == "stdio"
+                else s.url
+            )
+            table.add_row(
+                s.name,
+                s.transport,
+                target or "[dim](unset)[/dim]",
+                "[green]yes[/green]" if s.enabled else "[red]no[/red]",
+            )
+        console.print(table)
+    if bundle_configs:
+        # Bundle servers are grouped by plugin id (parsed from the
+        # ``<plugin>__<server>`` name prefix). One sub-section per plugin.
+        groups: dict[str, list] = {}
+        for plugin_id, cfg_entry in bundle_configs:
+            groups.setdefault(plugin_id, []).append(cfg_entry)
+        for plugin_id, entries in sorted(groups.items()):
+            bundle_table = Table(
+                show_header=True, header_style="bold magenta",
+                title=f"bundled — plugin {plugin_id!r}",
+            )
+            bundle_table.add_column("name")
+            bundle_table.add_column("transport")
+            bundle_table.add_column("target")
+            bundle_table.add_column("enabled")
+            for s in entries:
+                target = (
+                    f"{s.command} {' '.join(s.args)}".strip()
+                    if s.transport == "stdio"
+                    else s.url
+                )
+                bundle_table.add_row(
+                    s.name,
+                    s.transport,
+                    target or "[dim](unset)[/dim]",
+                    "[green]yes[/green]" if s.enabled else "[red]no[/red]",
+                )
+            console.print(bundle_table)
+
+
+def _gather_bundle_configs() -> list[tuple[str, MCPServerConfig]]:
+    """Return ``[(plugin_id, server_config), ...]`` from the bundle registry.
+
+    Imports the registry lazily so plain ``oc mcp list`` doesn't pay
+    for the bundle module unless any plugins have actually bundled MCPs.
+    """
+    from opencomputer.mcp.bundle import default_registry
+
+    out: list[tuple[str, MCPServerConfig]] = []
+    for plugin_id in default_registry.plugin_ids():
+        for cfg in default_registry.servers_for_plugin(plugin_id):
+            out.append((plugin_id, cfg))
+    return out
+
+
+@mcp_app.command("sessions")
+def list_sessions() -> None:
+    """List per-session MCP runtimes (M2 — mcp-openclaw-port).
+
+    Only meaningful when ``MCPConfig.session_scoped=True`` and an
+    agent is running in this process. Out-of-process invocations
+    (``oc mcp sessions`` standalone) see an empty registry because the
+    runtime is bound to the running ``oc chat`` / ``oc gateway`` process.
+    """
+    # Late-import — the runtime module is only needed when the user
+    # explicitly invokes this subcommand.
+    from opencomputer.agent.config_store import load_config
+
+    cfg = load_config()
+    if not cfg.mcp.session_scoped:
+        console.print(
+            "[yellow]session_scoped MCP is disabled.[/yellow] "
+            "Enable in [bold]mcp.session_scoped: true[/bold] in your config.yaml "
+            "(opt-in feature flag)."
+        )
+        return
+    # Try to reach the registry — only populated when an agent is
+    # actually running in this process. CLI in standalone mode prints a
+    # helpful explainer instead of pretending to be empty.
+    from opencomputer.mcp.session_registry import current_runtime_manager
+
+    runtime = current_runtime_manager()
+    if runtime is None:
+        console.print(
+            "[dim]no active session-runtime in this process. "
+            "Session MCP runtimes are bound to the running `oc chat` / "
+            "`oc gateway` agent.[/dim]"
+        )
+        return
+    stats = runtime.stats_all()
+    if not stats:
+        console.print("[dim]no active per-session MCP runtimes.[/dim]")
+        return
+    table = Table(
+        show_header=True, header_style="bold cyan", title="per-session MCP runtimes",
+    )
+    table.add_column("session_id")
+    table.add_column("connections")
+    table.add_column("created_at")
+    table.add_column("last_used_at")
+    for s in stats:
+        from datetime import datetime
+        table.add_row(
+            s.session_id,
+            str(s.connection_count),
+            datetime.fromtimestamp(s.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.fromtimestamp(s.last_used_at).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    console.print(table)
+
+
+@mcp_app.command("bundles")
+def list_bundles() -> None:
+    """List bundle-MCP servers shipped by active plugins.
+
+    mcp-openclaw-port M1 (2026-05-15). Bundle MCPs are MCP servers a
+    plugin declares in its own manifest's ``bundle_mcp`` field; they
+    are mounted only while the plugin is loaded and namespaced as
+    ``<plugin_id>__<server>__<tool>``. Distinct from user-configured
+    presets shown by ``oc mcp list``.
+
+    NOTE: this CLI runs out-of-process from the active agent, so the
+    registry is empty unless the agent has already loaded the plugins.
+    Run ``oc plugins`` to see which plugins are active; bundles only
+    register on plugin activation.
+    """
+    configs = _gather_bundle_configs()
+    if not configs:
+        console.print(
+            "[dim]no bundle MCPs registered. "
+            "Plugins declare them via the [bold]bundle_mcp[/bold] field in plugin.json.[/dim]"
+        )
+        console.print(
+            "[dim]see docs/plugin-bundle-mcp.md for the authoring guide.[/dim]"
+        )
+        return
+    table = Table(show_header=True, header_style="bold magenta", title="bundle MCPs")
+    table.add_column("plugin")
     table.add_column("name")
     table.add_column("transport")
     table.add_column("target")
     table.add_column("enabled")
-    for s in cfg.mcp.servers:
-        target = f"{s.command} {' '.join(s.args)}".strip() if s.transport == "stdio" else s.url
+    for plugin_id, s in configs:
+        target = (
+            f"{s.command} {' '.join(s.args)}".strip()
+            if s.transport == "stdio"
+            else s.url
+        )
         table.add_row(
+            plugin_id,
             s.name,
             s.transport,
             target or "[dim](unset)[/dim]",
@@ -336,7 +488,17 @@ def test_server(
 
 
 @mcp_app.command("serve")
-def mcp_serve() -> None:
+def mcp_serve(
+    enable_approvals: bool = typer.Option(
+        False,
+        "--enable-approvals",
+        help=(
+            "M3 (mcp-openclaw-port): expose the permissions_request_subscribe "
+            "long-poll tool so external MCP clients can drive OC consent. "
+            "Default OFF — consent state is sensitive."
+        ),
+    ),
+) -> None:
     """Start an MCP server exposing OpenComputer's session history over stdio.
 
     Run this from another MCP client (Claude Code, Cursor, …) to query OC's
@@ -344,7 +506,10 @@ def mcp_serve() -> None:
     entries.
 
     Tools exposed: ``sessions_list``, ``session_get``, ``messages_read``,
-    ``recall_search``, ``consent_history``.
+    ``recall_search``, ``consent_history``, ``permissions_list_open``,
+    ``messages_send``, ``messages_send_status``, ``events_poll``,
+    ``events_wait``, ``permissions_respond``. With ``--enable-approvals``,
+    also exposes ``permissions_request_subscribe`` (long-poll).
 
     Saksham use case: Claude Code while coding can call ``recall_search``
     to surface past Telegram discussions about a stock or codebase decision.
@@ -353,7 +518,7 @@ def mcp_serve() -> None:
     """
     from opencomputer.mcp.server import main as serve_main
 
-    serve_main()
+    serve_main(enable_approvals=enable_approvals)
 
 
 @mcp_app.command("presets")

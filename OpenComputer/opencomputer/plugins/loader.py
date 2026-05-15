@@ -1518,6 +1518,21 @@ def load_plugin(
                 exc_info=True,
             )
 
+    # mcp-openclaw-port M1 (2026-05-15): bundle MCP servers the plugin
+    # ships in its own tree. Register on the process-global
+    # ``BundleMcpRegistry`` so :class:`MCPManager` can mount them
+    # alongside user-configured servers. Errors logged + swallowed:
+    # bundle-MCP startup must never block plugin load.
+    if manifest.bundle_mcp:
+        try:
+            _register_bundle_mcps(candidate, api=api)
+        except Exception:  # noqa: BLE001 — diagnostic, never block load
+            logger.debug(
+                "bundle MCP registration raised for plugin '%s'; swallowing",
+                manifest.id,
+                exc_info=True,
+            )
+
     logger.info("loaded plugin '%s' v%s", manifest.id, manifest.version)
     return LoadedPlugin(
         candidate=candidate,
@@ -1525,6 +1540,179 @@ def load_plugin(
         registrations=registrations,
         api=api,
     )
+
+
+def _register_bundle_mcps(
+    candidate: PluginCandidate,
+    *,
+    registry: Any = None,
+    api: Any = None,
+) -> int:
+    """Register a plugin's bundle MCP servers (mcp-openclaw-port M1).
+
+    The plugin manifest's ``bundle_mcp`` field lists servers shipped
+    inside the plugin tree. Each entry produces an MCPServerConfig named
+    ``<plugin_id>__<server.name>`` and lands in the
+    :class:`opencomputer.mcp.bundle.BundleMcpRegistry` keyed by plugin
+    id; the MCP manager merges this view with user-configured servers
+    on connect.
+
+    Returns the number of servers actually registered (path-escape or
+    invalid-transport entries are skipped by the registry's safety
+    check, logged at WARNING).
+
+    Late-imports :mod:`opencomputer.mcp.bundle` so the loader's import
+    surface stays narrow and the bundle module is only paid for when
+    a plugin actually declares ``bundle_mcp``.
+    """
+    if not candidate.manifest.bundle_mcp:
+        return 0
+    from opencomputer.mcp.bundle import default_registry
+
+    reg = registry if registry is not None else default_registry
+    n = reg.register_plugin_servers(
+        candidate.manifest.id,
+        candidate.root_dir.resolve(),
+        candidate.manifest.bundle_mcp,
+    )
+    # Gap G — register first-tool-call wakeup stubs for lazy bundles
+    # whose manifest declares a tool catalog. Without this, lazy=True
+    # bundles surface no tools to the LLM until manually woken.
+    try:
+        _register_lazy_bundle_stubs(candidate, api)
+    except Exception:  # noqa: BLE001 — never block load on stub wiring
+        logger.debug(
+            "lazy bundle stub registration raised for plugin '%s'; swallowing",
+            candidate.manifest.id, exc_info=True,
+        )
+    return n
+
+
+def _register_lazy_bundle_stubs(
+    candidate: PluginCandidate,
+    api: Any = None,
+) -> int:
+    """Register :class:`LazyBundleStubTool` for each lazy+declared bundle.
+
+    Mcp-openclaw-port Gap G. For every BundleMcpServer entry where
+    ``lazy=True`` AND ``tools`` is non-empty, register one stub per
+    declared tool on the active tool registry. The stub knows the
+    composed name, the bundle's config (via :mod:`bundle`), and the
+    active MCPManager handle (via :mod:`manager_registry`).
+
+    Returns the count of stubs registered. Swallows registry errors
+    (tool name collision) at WARNING level so one bad declaration
+    doesn't gate the rest of the plugin's stubs.
+
+    Requires ``api`` to expose ``tools.register`` (the PluginAPI shape).
+    Without an api or its registry, this becomes a no-op — plugins
+    loaded via test helpers that bypass the api still parse correctly.
+    """
+    if api is None or not hasattr(api, "tools"):
+        return 0
+    register = getattr(api.tools, "register", None)
+    if not callable(register):
+        return 0
+
+    from opencomputer.mcp.lazy_wakeup import (
+        BundleWakeupError,
+        LazyBundleStubTool,
+    )
+
+    plugin_id = candidate.manifest.id
+    n_registered = 0
+    for srv in candidate.manifest.bundle_mcp:
+        if not srv.lazy or not srv.tools:
+            continue
+
+        # Build the wakeup_fn closure — fires the connect_one path on
+        # the active MCPManager. Late-imports so this module's import
+        # surface stays small.
+        def _wakeup_for(server_name: str = srv.name) -> None:
+            from opencomputer.mcp.bundle import default_registry as _br
+            from opencomputer.mcp.manager_registry import current_active_manager
+
+            mgr = current_active_manager()
+            if mgr is None:
+                raise BundleWakeupError(
+                    f"no active MCPManager — cannot wake bundle "
+                    f"{plugin_id}__{server_name}"
+                )
+            # Find the bundle config in the registry (it was registered
+            # by _register_bundle_mcps with enabled=False per lazy=True).
+            configs = _br.servers_for_plugin(plugin_id)
+            target = next(
+                (c for c in configs if c.name == f"{plugin_id}__{server_name}"),
+                None,
+            )
+            if target is None:
+                raise BundleWakeupError(
+                    f"bundle config not found for "
+                    f"{plugin_id}__{server_name} — registry was unregistered?"
+                )
+            # Flip enabled=True locally + connect.
+            from dataclasses import replace as _replace
+            enabled_cfg = _replace(target, enabled=True)
+            try:
+                ok = mgr.connect_one_sync(enabled_cfg)
+            except AttributeError:
+                # connect_one_sync absent → fall back to start_in_background
+                mgr.start_in_background([enabled_cfg], include_bundle=False)
+                ok = True  # fire-and-forget; trust the bg loop
+            except Exception as exc:  # noqa: BLE001
+                raise BundleWakeupError(
+                    f"MCP server spawn failed: {type(exc).__name__}: {exc}"
+                ) from exc
+            if not ok:
+                raise BundleWakeupError(
+                    f"MCP connect_one_sync returned False for "
+                    f"{plugin_id}__{server_name} — check server logs"
+                )
+
+        def _lookup(name: str) -> Any:
+            # api.tools.get is the registry's name-keyed lookup
+            getter = getattr(api.tools, "get", None)
+            if callable(getter):
+                return getter(name)
+            # Fallback: try names() + a dict-like access
+            return None
+
+        for decl in srv.tools:
+            stub = LazyBundleStubTool(
+                plugin_id=plugin_id,
+                server_name=srv.name,
+                decl=decl,
+                wakeup_fn=_wakeup_for,
+                registry_lookup=_lookup,
+            )
+            try:
+                register(stub)
+                n_registered += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "lazy bundle stub for %s__%s__%s failed to register: %s",
+                    plugin_id, srv.name, decl.name, exc,
+                )
+    return n_registered
+
+
+def _unregister_bundle_mcps(
+    plugin_id: str,
+    *,
+    registry: Any = None,
+) -> int:
+    """Drop bundle MCP entries for ``plugin_id`` (mcp-openclaw-port M1).
+
+    Symmetric to :func:`_register_bundle_mcps`. Returns the count
+    removed; zero is fine and is the no-op case (plugin never bundled
+    any MCPs). The MCP manager handles process-level subprocess
+    shutdown separately — this function only touches the config
+    registry.
+    """
+    from opencomputer.mcp.bundle import default_registry
+
+    reg = registry if registry is not None else default_registry
+    return reg.unregister_plugin(plugin_id)
 
 
 def _install_mcp_servers_from_manifest(manifest) -> None:  # type: ignore[no-untyped-def]
@@ -1709,6 +1897,20 @@ def teardown_loaded_plugin(
         if regs.registered_memory_provider:
             target_api.memory_provider = None
 
+    # mcp-openclaw-port M1 (2026-05-15) — drop bundle MCP registrations
+    # symmetric to load_plugin's _register_bundle_mcps call. The
+    # MCPManager handles subprocess shutdown via its own connect/disconnect
+    # cycle; this clears the *config* registry so a subsequent connect
+    # doesn't try to re-spawn a now-disabled plugin's bundles.
+    try:
+        _unregister_bundle_mcps(plugin_id)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "bundle MCP unregister raised for plugin '%s'; swallowing",
+            plugin_id,
+            exc_info=True,
+        )
+
     # Step 3 — drop the synthetic module + common sibling names from
     # sys.modules so a later reload sees a clean graph. Synthetic name
     # is deterministic (see load_plugin below).
@@ -1785,4 +1987,6 @@ __all__ = [
     "teardown_loaded_plugin",
     "reload_plugin",
     "SingleInstanceError",
+    "_register_bundle_mcps",
+    "_unregister_bundle_mcps",
 ]

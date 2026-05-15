@@ -1,0 +1,24 @@
+{
+  "id": "downloads-cleanup-mcp",
+  "name": "Downloads Cleanup MCP",
+  "description": "Reference bundle-MCP plugin (mcp-openclaw-port M5). Ships a Python-based MCP server that lists files in ~/Downloads by age, summarises by extension, and archives stale entries on demand. Demonstrates the ${PLUGIN_ROOT} placeholder + lazy-spawn lifecycle for plugins authoring their own MCP servers.",
+  "version": "0.1.0",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "tool",
+  "entry": "plugin",
+  "enabled_by_default": false,
+  "tool_names": [],
+  "bundle_mcp": [
+    {
+      "name": "downloads",
+      "transport": "stdio",
+      "command": "${PLUGIN_ROOT}/mcp_server.py",
+      "args": [],
+      "env": {},
+      "lazy": true,
+      "osv_check": false,
+      "connection_timeout_seconds": 15.0
+    }
+  ]
+}
