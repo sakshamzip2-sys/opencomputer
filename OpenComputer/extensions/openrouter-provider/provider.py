@@ -36,6 +36,12 @@ _spec.loader.exec_module(_mod)
 OpenAIProvider = _mod.OpenAIProvider
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_PROVIDER_ROUTING: dict[str, object] = {
+    "data_collection": "deny",
+    "order": ["Fireworks", "Together", "DeepInfra"],
+    "ignore": ["Google AI Studio"],
+    "allow_fallbacks": True,
+}
 
 #: Wave 3 (2026-05-08) — recognized OpenRouter routing-suffix sugar.
 #: ``:nitro`` => sort by throughput, ``:floor`` => sort by price.
@@ -209,6 +215,7 @@ class OpenRouterProvider(OpenAIProvider):
         from openai import AsyncOpenAI as _AsyncOpenAI
 
         http_client = _httpx.AsyncClient(
+            timeout=self.request_timeout_seconds,
             event_hooks={
                 "response": [_capture_cache_status],
                 "request": [_inject_routing],
@@ -229,8 +236,8 @@ class OpenRouterProvider(OpenAIProvider):
             data = self._load_or_cfg()
             pr = data.get("provider_routing") if isinstance(data, dict) else None
             if not isinstance(pr, dict):
-                return None
-            block: dict = {}
+                return dict(DEFAULT_OPENROUTER_PROVIDER_ROUTING)
+            block: dict = dict(DEFAULT_OPENROUTER_PROVIDER_ROUTING)
             for key in ("sort", "data_collection"):
                 v = pr.get(key)
                 if v:
@@ -241,9 +248,11 @@ class OpenRouterProvider(OpenAIProvider):
                     block[key] = v
             if pr.get("require_parameters"):
                 block["require_parameters"] = True
+            if "allow_fallbacks" in pr:
+                block["allow_fallbacks"] = bool(pr.get("allow_fallbacks"))
             return block or None
         except Exception:  # noqa: BLE001
-            return None
+            return dict(DEFAULT_OPENROUTER_PROVIDER_ROUTING)
 
     @staticmethod
     def _load_or_cfg() -> dict:

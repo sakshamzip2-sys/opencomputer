@@ -27,6 +27,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
@@ -48,6 +49,8 @@ from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 #: chat loop can extract attachments and strip the marker before passing
 #: text to the LLM.
 IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*([^\]]+?)\]")
+_SLASH_MENU_LIMIT = 20
+_SLASH_DESC_LIMIT = 74
 
 
 def _images_dir(profile_home: Path) -> Path:
@@ -94,6 +97,82 @@ def _strip_trailing_whitespace(text: str) -> str:
     return text.rstrip()
 
 
+def _active_slash_token(text: str, cursor_position: int) -> tuple[str, int, int] | None:
+    """Return the active slash-token prefix at the cursor.
+
+    The token can appear at the start of the input or after whitespace, e.g.
+    ``/us`` or ``show me /us``. Slashes inside paths/URLs/words are ignored.
+    """
+    cursor = max(0, min(cursor_position, len(text)))
+    before = text[:cursor]
+    slash = before.rfind("/")
+    if slash < 0:
+        return None
+    if slash > 0 and not before[slash - 1].isspace():
+        return None
+    prefix = before[slash + 1 :]
+    if "/" in prefix or any(ch.isspace() for ch in prefix):
+        return None
+    return prefix, slash, cursor
+
+
+def _slash_token_uses_dropdown(prefix: str, start: int) -> bool:
+    """Only command-position slash tokens open the command list.
+
+    The leading-slash check (``start == 0``) keeps mid-message slashes
+    (``"and / or"``) out of the dropdown, but a bare ``/`` with no
+    prefix yet IS the canonical "show me everything" gesture — matches
+    Claude Code's behavior where typing one slash pops the full command
+    list immediately.
+    """
+    return start == 0
+
+
+def _compact_description(desc: str) -> str:
+    from .slash_completer import _trim_description
+
+    trimmed = _trim_description(desc)
+    if len(trimmed) <= _SLASH_DESC_LIMIT:
+        return trimmed
+    head = trimmed[:_SLASH_DESC_LIMIT]
+    cut = head.rfind(" ")
+    if cut <= 0:
+        cut = _SLASH_DESC_LIMIT
+    return head[:cut].rstrip() + "…"
+
+
+def _slash_item_text(item: object) -> str:
+    from .slash import CommandDef, SkillEntry
+
+    if isinstance(item, CommandDef):
+        return item.name
+    if isinstance(item, SkillEntry):
+        return item.id
+    return ""
+
+
+class SlashTokenAutoSuggest(AutoSuggest):
+    """Inline ghost completion for the slash token under the cursor."""
+
+    def __init__(self, ranker: Callable[[str], list[object]]) -> None:
+        self._ranker = ranker
+
+    def get_suggestion(self, buffer, document):  # noqa: ANN001
+        active = _active_slash_token(document.text, document.cursor_position)
+        if active is None:
+            return None
+        prefix, _start, end = active
+        if end != document.cursor_position or not prefix:
+            return None
+        matches = self._ranker(prefix)
+        if not matches:
+            return None
+        name = _slash_item_text(matches[0])
+        if not name.lower().startswith(prefix.lower()) or len(name) <= len(prefix):
+            return None
+        return Suggestion(name[len(prefix) :])
+
+
 def _render_dropdown_for_state(state: dict) -> list[tuple[str, str]]:
     """Render a dropdown row list from the picker state dict.
 
@@ -104,8 +183,6 @@ def _render_dropdown_for_state(state: dict) -> list[tuple[str, str]]:
     :class:`FormattedTextControl`.
     """
     from .slash import CommandDef, SkillEntry
-    from .slash_completer import _trim_description
-
     matches = state.get("matches") or []
     if not matches:
         return []
@@ -153,7 +230,7 @@ def _render_dropdown_for_state(state: dict) -> list[tuple[str, str]]:
         out.append((cursor_cls, "❯ " if is_sel else "  "))
         out.append((title_cls, label))
         out.append((cat_cls, f"  {tag}"))
-        out.append((desc_cls, f"  {_trim_description(desc)}"))
+        out.append((desc_cls, f"  {_compact_description(desc)}"))
         out.append(("", "\n"))
     return out
 
@@ -283,6 +360,15 @@ def build_prompt_session(
 
     from opencomputer.cli_ui.style import current_menu_style
 
+    try:
+        from prompt_toolkit.output.defaults import create_output
+
+        prompt_output = create_output()
+    except Exception:
+        from prompt_toolkit.output import DummyOutput
+
+        prompt_output = DummyOutput()
+
     return PromptSession(
         message=HTML("<ansigreen><b>you ›</b></ansigreen> "),
         history=FileHistory(str(history_path)),
@@ -311,6 +397,7 @@ def build_prompt_session(
         # chat loop can re-render the user's message inside a styled
         # boundary box (no duplicate "you › ..." line in scrollback).
         erase_when_done=True,
+        output=prompt_output,
     )
 
 
@@ -567,6 +654,7 @@ async def read_user_input(
         FormattedTextControl,
     )
     from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.layout.processors import AppendAutoSuggestion
     from prompt_toolkit.styles import Style
 
     from .slash import SLASH_REGISTRY
@@ -587,11 +675,19 @@ async def read_user_input(
         else None
     )
 
+    def _rank_slash_prefix(prefix: str) -> list[object]:
+        if picker_source is not None:
+            return [m.item for m in picker_source.rank(prefix)[:_SLASH_MENU_LIMIT]]
+        return [
+            c for c in SLASH_REGISTRY if c.name.startswith(prefix.lower())
+        ][:_SLASH_MENU_LIMIT]
+
     input_buffer = Buffer(
         history=history,
         multiline=False,
         complete_while_typing=False,
         enable_history_search=True,
+        auto_suggest=SlashTokenAutoSuggest(_rank_slash_prefix),
     )
 
     # Mutable picker state. Updated on every keystroke via on_text_changed
@@ -603,23 +699,27 @@ async def read_user_input(
         "selected_idx": 0,
         "mode": "",
         "at_token_range": None,  # (start, end) when mode == "file"
+        "slash_token_range": None,  # (start, end) when mode == "slash"
     }
 
     def _refilter(text: str) -> None:
-        # Slash prefix wins (commands + skills via picker source).
-        if text.startswith("/") and " " not in text:
-            prefix = text[1:]
-            if picker_source is not None:
-                matches = picker_source.rank(prefix)
-                state["matches"] = [m.item for m in matches]
-            else:
-                # Legacy path — registry only, startswith filter.
-                state["matches"] = [
-                    c for c in SLASH_REGISTRY if c.name.startswith(prefix.lower())
-                ][:20]
+        # Slash token wins (commands + skills via picker source). Inline slash
+        # tokens use ghost completion only; the dropdown is command-position UI.
+        active_slash = _active_slash_token(text, input_buffer.cursor_position)
+        if active_slash is not None:
+            prefix, start, end = active_slash
+            if not _slash_token_uses_dropdown(prefix, start):
+                state["matches"] = []
+                state["selected_idx"] = 0
+                state["mode"] = ""
+                state["at_token_range"] = None
+                state["slash_token_range"] = (start, end)
+                return
+            state["matches"] = _rank_slash_prefix(prefix)
             state["selected_idx"] = 0
             state["mode"] = "slash"
             state["at_token_range"] = None
+            state["slash_token_range"] = (start, end)
             return
 
         # @filepath mode — detect ``@<query>`` at cursor position.
@@ -640,17 +740,20 @@ async def read_user_input(
             state["selected_idx"] = 0
             state["mode"] = "file"
             state["at_token_range"] = (start, end)
+            state["slash_token_range"] = None
             return
 
         state["matches"] = []
         state["selected_idx"] = 0
         state["mode"] = ""
         state["at_token_range"] = None
+        state["slash_token_range"] = None
 
     def _on_text_changed(_buf):  # noqa: ANN001 — pt fires (sender,)
         _refilter(input_buffer.text)
 
     input_buffer.on_text_changed += _on_text_changed
+    input_buffer.on_cursor_position_changed += _on_text_changed
 
     def _has_dropdown() -> bool:
         return bool(state["matches"])
@@ -664,9 +767,7 @@ async def read_user_input(
         # invalid — the constructor only accepts ``min/max/weight/preferred``.
         # Calling it crashed prompt_toolkit's renderer the moment the user
         # typed ``/`` (PR #210 follow-up).
-        # Cap raised from 10 → 20 in Task 8 to match the picker source's
-        # default top_n. Skills + commands are mixed so 10 was too tight.
-        return Dimension.exact(min(len(state["matches"]), 20))
+        return Dimension.exact(min(len(state["matches"]), _SLASH_MENU_LIMIT))
 
     kb = KeyBindings()
 
@@ -713,19 +814,47 @@ async def read_user_input(
                 slash_text = sel.id
             else:
                 return
-            input_buffer.text = f"/{slash_text}"
-            input_buffer.cursor_position = len(input_buffer.text)
-            # Re-filter so the dropdown collapses after selection (matches
-            # the file-completion path above). Without this, the dropdown's
-            # reserved screen rows stay on-screen as a blank gap until the
-            # next keystroke triggers on_text_changed.
-            _refilter(input_buffer.text)
+            token_range = state.get("slash_token_range")
+            if token_range is None:
+                start, end = 0, len(input_buffer.text)
+            else:
+                start, end = token_range
+            full = input_buffer.text
+            insertion = f"/{slash_text}"
+            input_buffer.text = full[:start] + insertion + full[end:]
+            input_buffer.cursor_position = start + len(insertion)
+            # Collapse immediately; waiting for on_text_changed leaves the
+            # dropdown rows reserved until the next keypress.
+            state["matches"] = []
+            state["selected_idx"] = 0
+            state["mode"] = ""
+            state["slash_token_range"] = None
 
     @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
     def _tab(event):  # noqa: ANN001
         _apply_selection()
         # Belt-and-braces: explicitly invalidate so the layout re-renders
         # the now-empty dropdown ConditionalContainer immediately.
+        event.app.invalidate()
+
+    def _has_auto_suggestion() -> bool:
+        """True when SlashTokenAutoSuggest produced an inline ghost completion."""
+        suggestion = input_buffer.suggestion
+        return suggestion is not None and bool(suggestion.text)
+
+    @kb.add(Keys.ControlI, filter=Condition(_has_auto_suggestion))  # Tab
+    def _tab_accept_suggestion(event):  # noqa: ANN001
+        """Accept the ghost-text completion shown after the cursor.
+
+        Mirrors Claude Code's "type /sub, see /sub[agent-driven-development]
+        in grey, press Tab to fill" UX. Only fires when the dropdown is
+        not open (the dropdown's Tab handler above is registered first
+        and takes precedence when its filter matches).
+        """
+        suggestion = input_buffer.suggestion
+        if suggestion is None or not suggestion.text:
+            return
+        input_buffer.insert_text(suggestion.text)
         event.app.invalidate()
 
     @kb.add(Keys.BackTab)  # Shift+Tab — cycle permission modes
@@ -786,12 +915,30 @@ async def read_user_input(
             else:
                 event.app.exit(result=input_buffer.text)
                 return
-            input_buffer.text = f"/{slash_text}"
+            token_range = state.get("slash_token_range")
+            is_command_only = False
+            if token_range is None:
+                input_buffer.text = f"/{slash_text}"
+                is_command_only = True
+            else:
+                start, end = token_range
+                full = input_buffer.text
+                insertion = f"/{slash_text}"
+                input_buffer.text = full[:start] + insertion + full[end:]
+                input_buffer.cursor_position = start + len(insertion)
+                is_command_only = input_buffer.text == insertion
             # Record the pick to MRU so it floats next session.
             try:
                 mru_store.record(slash_text)
             except Exception:  # noqa: BLE001 — never break submit
                 pass
+            if not is_command_only:
+                state["matches"] = []
+                state["selected_idx"] = 0
+                state["mode"] = ""
+                state["slash_token_range"] = None
+                event.app.invalidate()
+                return
         event.app.exit(result=input_buffer.text)
 
     @kb.add(Keys.Escape, eager=True)
@@ -801,6 +948,7 @@ async def read_user_input(
         if state["matches"]:
             state["matches"] = []
             state["selected_idx"] = 0
+            state["slash_token_range"] = None
             # Force the layout to re-render — without this, the dropdown's
             # reserved screen rows stay on-screen as a blank gap (matches
             # the Shift+Tab and Ctrl+P handlers below which also invalidate
@@ -924,7 +1072,15 @@ async def read_user_input(
     # ``height=1`` and renders only on the first row — wrapped continuation
     # lines have no prefix, matching zsh/fish wrap UX.
     input_window = Window(
-        content=BufferControl(buffer=input_buffer),
+        # AppendAutoSuggestion paints the SlashTokenAutoSuggest ghost text
+        # (greyed-out completion after the cursor) — without this processor
+        # the AutoSuggest fires but never reaches the screen, matching the
+        # bug where typing ``/sub`` in OC showed nothing while Claude Code
+        # showed ``/sub[agent-driven-development]``.
+        content=BufferControl(
+            buffer=input_buffer,
+            input_processors=[AppendAutoSuggestion()],
+        ),
         height=Dimension(min=1, max=10),
         wrap_lines=True,
     )
@@ -1047,9 +1203,9 @@ async def read_user_input(
         HSplit(
             [
                 filler,
+                VSplit([prompt_window, input_window]),
                 dropdown_window,
                 dropdown_divider,
-                VSplit([prompt_window, input_window]),
                 paste_hint_window,
                 badge_window,
                 status_line_window,

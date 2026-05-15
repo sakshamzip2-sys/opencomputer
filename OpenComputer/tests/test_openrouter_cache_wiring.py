@@ -60,6 +60,13 @@ def test_async_openai_client_carries_cache_headers(or_mod):
     assert headers.get("X-OpenRouter-Cache-TTL") == "300"
 
 
+def test_custom_http_client_preserves_provider_timeout(or_mod):
+    p = or_mod.OpenRouterProvider()
+    timeout = p.client._client.timeout
+    assert timeout.connect == p.request_timeout_seconds
+    assert timeout.read == p.request_timeout_seconds
+
+
 def test_explicit_disable_via_config(monkeypatch, or_mod):
     """When openrouter.response_cache=False, no cache headers should be added."""
     # Patch _load_or_cfg directly — simpler than rigging the OC config_store

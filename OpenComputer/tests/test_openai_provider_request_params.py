@@ -89,11 +89,11 @@ async def test_openrouter_compatible_provider_keeps_max_tokens(monkeypatch):
     await provider.complete(
         model="openai/gpt-5",
         messages=[Message(role="user", content="hi")],
-        max_tokens=456,
+        max_tokens=128,
     )
 
     kwargs = mock_client.chat.completions.create.await_args.kwargs
-    assert kwargs["max_tokens"] == 456
+    assert kwargs["max_tokens"] == 128
     assert "max_completion_tokens" not in kwargs
 
 
@@ -115,7 +115,7 @@ async def test_openrouter_caps_default_max_tokens(monkeypatch):
     )
 
     kwargs = mock_client.chat.completions.create.await_args.kwargs
-    assert kwargs["max_tokens"] == 512
+    assert kwargs["max_tokens"] == 256
 
 
 @pytest.mark.asyncio

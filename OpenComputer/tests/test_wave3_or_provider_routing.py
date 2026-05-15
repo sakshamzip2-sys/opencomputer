@@ -134,14 +134,22 @@ provider_routing:
     p = or_mod.OpenRouterProvider()
     assert p._provider_routing_block == {
         "sort": "price",
+        "order": ["Fireworks", "Together", "DeepInfra"],
         "only": ["Anthropic"],
+        "ignore": ["Google AI Studio"],
+        "allow_fallbacks": True,
         "data_collection": "deny",
     }
 
 
-def test_or_provider_no_routing_when_empty_config(monkeypatch, tmp_path):
+def test_or_provider_uses_safe_default_routing_when_empty_config(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("OC_HOME", str(tmp_path))
     or_mod = _load_or_module()
     p = or_mod.OpenRouterProvider()
-    assert p._provider_routing_block is None
+    assert p._provider_routing_block == {
+        "data_collection": "deny",
+        "order": ["Fireworks", "Together", "DeepInfra"],
+        "ignore": ["Google AI Studio"],
+        "allow_fallbacks": True,
+    }

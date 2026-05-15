@@ -13,7 +13,10 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 
 from opencomputer.cli_ui.input_loop import (
+    _SLASH_MENU_LIMIT,
+    _active_slash_token,
     _history_file_path,
+    _slash_token_uses_dropdown,
     _strip_trailing_whitespace,
     build_prompt_session,
 )
@@ -40,6 +43,33 @@ def test_strip_trailing_whitespace_simple():
     assert _strip_trailing_whitespace("hello  ") == "hello"
     assert _strip_trailing_whitespace("  ") == ""
     assert _strip_trailing_whitespace("hello\nworld") == "hello\nworld"
+
+
+def test_active_slash_token_detects_inline_message_prefix():
+    assert _active_slash_token("can you show me /us", len("can you show me /us")) == (
+        "us",
+        len("can you show me "),
+        len("can you show me /us"),
+    )
+
+
+def test_active_slash_token_requires_token_boundary():
+    assert _active_slash_token("https://example.com/us", len("https://example.com/us")) is None
+    assert _active_slash_token("email/a", len("email/a")) is None
+
+
+def test_active_slash_token_rejects_completed_command_args():
+    assert _active_slash_token("/usage now", len("/usage now")) is None
+
+
+def test_slash_menu_limit_keeps_existing_command_capacity():
+    assert _SLASH_MENU_LIMIT >= 20
+
+
+def test_slash_dropdown_only_opens_for_command_position_prefix():
+    assert not _slash_token_uses_dropdown("", 0)
+    assert _slash_token_uses_dropdown("su", 0)
+    assert not _slash_token_uses_dropdown("su", len("how are you "))
 
 
 def test_build_prompt_session_returns_session(tmp_path: Path):

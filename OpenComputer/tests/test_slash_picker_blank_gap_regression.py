@@ -28,21 +28,18 @@ def _read_user_input_source() -> str:
     return inspect.getsource(input_loop.read_user_input)
 
 
-def test_apply_selection_slash_mode_calls_refilter_after_buffer_write():
-    """The slash branch (else: in _apply_selection) MUST call
-    _refilter(input_buffer.text) after writing the buffer so the
-    dropdown collapses immediately. Without this, the dropdown's
-    reserved rows stay on-screen as a blank gap."""
+def test_apply_selection_slash_mode_clears_dropdown_state_after_buffer_write():
+    """The slash branch must collapse the dropdown immediately after selection."""
     src = _read_user_input_source()
     pattern = re.compile(
-        r'input_buffer\.text\s*=\s*f"/\{slash_text\}".*?'
-        r"_refilter\(",
+        r"input_buffer\.text\s*=.*?full\[:start\]\s*\+\s*insertion\s*\+\s*full\[end:\].*?"
+        r'state\["matches"\]\s*=\s*\[\].*?'
+        r'state\["mode"\]\s*=\s*""',
         re.DOTALL,
     )
     assert pattern.search(src), (
-        "_apply_selection slash branch must call _refilter() after "
-        "writing the buffer — otherwise the dropdown stays on-screen "
-        "as a blank gap until the next keystroke"
+        "_apply_selection slash branch must clear dropdown state after "
+        "writing the buffer, otherwise the dropdown stays on-screen"
     )
 
 
@@ -107,3 +104,20 @@ def test_ctrl_p_still_invalidates():
         re.DOTALL,
     )
     assert pattern.search(src), "Ctrl+P handler must still invalidate"
+
+
+def test_layout_places_input_before_dropdown():
+    """Slash menu should render below the active input, Claude-Code-style."""
+    src = _read_user_input_source()
+    pattern = re.compile(
+        r"VSplit\(\[prompt_window,\s*input_window\]\).*?"
+        r"dropdown_window.*?"
+        r"dropdown_divider",
+        re.DOTALL,
+    )
+    assert pattern.search(src), "input row must appear before dropdown in HSplit"
+
+
+def test_bare_slash_does_not_open_dropdown():
+    src = _read_user_input_source()
+    assert "if not _slash_token_uses_dropdown(prefix, start):" in src

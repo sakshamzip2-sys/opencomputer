@@ -31,11 +31,23 @@ from typing import Any
 
 # Public so callers / tests can reference these without importing magic
 # constants. Defaults match the Claude Code visual.
-PREFIX = "⚕ "  # U+2695 + space
-SEPARATOR = " │ "  # U+2502 with single-space pads
+#
+# 2026-05-12 redesign — swapped the U+2695 caduceus (rendered as ``$`` in
+# Consolas / Cascadia Mono on Windows where the medical glyph is absent)
+# for the U+25C6 black diamond which ships in every default Windows
+# Terminal font. Separator dropped from heavy U+2502 vertical bar to a
+# breezier middle dot.
+PREFIX = "◆ "  # U+25C6 black diamond + space
+SEPARATOR = "  ·  "  # U+00B7 middle dot, double-space pads
 BAR_FILL = "█"  # U+2588 (full block)
 BAR_EMPTY = "░"  # U+2591 (light shade)
 BAR_WIDTH = 10
+
+#: Mid-truncation cap for the model id segment. Anything longer than this
+#: gets squeezed to ``head…tail`` so the bar doesn't wrap on narrow
+#: terminals or long OpenRouter slugs (``minimax/minimax-m2.5:free`` →
+#: ``minimax/min…2.5:free``).
+MODEL_ID_DISPLAY_MAX = 28
 
 #: Conservative default when a model id has no entry in
 #: ``DEFAULT_CONTEXT_WINDOWS`` and no ``-1m`` hint. 200k matches the
@@ -143,8 +155,52 @@ def progress_bar(used: int, total: int, width: int = BAR_WIDTH) -> str:
     if total <= 0 or used <= 0:
         return BAR_EMPTY * width
     ratio = min(used / total, 1.0)
-    filled = int(ratio * width)
+    filled = max(1, int(ratio * width))
     return BAR_FILL * filled + BAR_EMPTY * (width - filled)
+
+
+def bar_color_for(percent: int) -> str:
+    """Return a prompt_toolkit color spec graded by % context used.
+
+    Tiers chosen to mirror common terminal-app heat scales:
+      - 0-49%   → green   ("plenty of headroom")
+      - 50-74%  → yellow  ("getting full")
+      - 75-89%  → orange  ("compact soon")
+      - 90%+    → red     ("compact imminent")
+
+    Returns a bare color spec (no ``fg:`` prefix) so callers can compose
+    it with bold/italic attributes if they want.
+    """
+    if percent >= 90:
+        return "fg:ansired bold"
+    if percent >= 75:
+        return "fg:#ff8700"  # orange (256-color)
+    if percent >= 50:
+        return "fg:ansiyellow"
+    return "fg:ansigreen"
+
+
+def truncate_model_id(model_id: str, *, max_len: int = MODEL_ID_DISPLAY_MAX) -> str:
+    """Mid-truncate a long model id so it fits on one status-line row.
+
+    Preserves the head + tail so the user can still recognise the model
+    family AND the variant tag:
+
+        ``minimax/minimax-m2.5:free`` (24) → unchanged
+        ``some-very-long-vendor/model-codename-v2.5:free`` → ``some-very-long…2.5:free``
+
+    Empty / short ids pass through verbatim.
+    """
+    if not isinstance(model_id, str):
+        return ""
+    if len(model_id) <= max_len:
+        return model_id
+    # 1-char ellipsis, split remaining budget head-heavy so the prefix
+    # (which carries the vendor / family) stays readable.
+    budget = max_len - 1
+    head_len = (budget * 2) // 3
+    tail_len = budget - head_len
+    return f"{model_id[:head_len]}…{model_id[-tail_len:]}"
 
 
 def percent_used(used: int, total: int) -> int:
@@ -154,6 +210,14 @@ def percent_used(used: int, total: int) -> int:
     pct = int((used / total) * 100)
     # Cap at 100 — we don't want ``120%`` showing on a slight overflow.
     return min(pct, 100)
+
+
+def format_percent_used(used: int, total: int) -> str:
+    """Render context usage with a visible low-usage state."""
+    if total <= 0 or used <= 0:
+        return "0%"
+    pct = percent_used(used, total)
+    return "<1%" if pct == 0 else f"{pct}%"
 
 
 def max_context_for(
@@ -230,7 +294,12 @@ def _read_runtime_state(runtime: object) -> dict[str, Any]:
             "custom_providers": (),
         }
     custom = getattr(runtime, "custom", None) or {}
-    model_id = custom.get("model_id") or ""
+    model_id = (
+        custom.get("model_id")
+        or custom.get("active_model_id")
+        or custom.get("model")
+        or ""
+    )
     if not isinstance(model_id, str):
         model_id = str(model_id)
 
@@ -301,29 +370,31 @@ def render_status_line(runtime: object) -> list[tuple[str, str]]:
         model_context_overrides=state.get("model_context_overrides") or {},
         custom_providers=state.get("custom_providers") or (),
     )
-    pct = percent_used(tokens_used, max_ctx)
     bar = progress_bar(tokens_used, max_ctx)
+    pct_int = percent_used(tokens_used, max_ctx)
 
     style_prefix = _style("fg:ansicyan bold")
     style_model = _style("fg:ansiwhite bold")
     style_sep = _style("fg:ansibrightblack")
+    style_tokens_label = _style("fg:ansibrightblack")
     style_tokens = _style("")
-    style_bar = _style("fg:ansigreen")
-    style_pct = _style("")
+    style_bar = _style(bar_color_for(pct_int))
+    style_pct = _style("bold" if pct_int >= 75 else "")
     style_cost = _style("fg:ansiyellow")
     style_time = _style("fg:ansibrightblack")
 
     fragments: list[tuple[str, str]] = []
     fragments.append((style_prefix, " " + PREFIX))
-    fragments.append((style_model, model_id or "(unknown)"))
+    fragments.append((style_model, truncate_model_id(model_id) or "default"))
     fragments.append((style_sep, SEPARATOR))
+    fragments.append((style_tokens_label, "ctx "))
     fragments.append((
         style_tokens,
         f"{format_tokens(tokens_used)}/{format_tokens(max_ctx)}",
     ))
-    fragments.append((style_sep, SEPARATOR))
-    fragments.append((style_bar, f"[{bar}]"))
-    fragments.append((style_pct, f" {pct}%"))
+    fragments.append((style_sep, " "))
+    fragments.append((style_bar, bar))
+    fragments.append((style_pct, f" {format_percent_used(tokens_used, max_ctx)}"))
 
     cost_str = format_cost(cost)
     if cost_str:
@@ -365,13 +436,17 @@ __all__ = [
     "BAR_WIDTH",
     "DEFAULT_MAX_CONTEXT",
     "EXTENDED_MAX_CONTEXT",
+    "MODEL_ID_DISPLAY_MAX",
     "PREFIX",
     "SEPARATOR",
+    "bar_color_for",
     "format_cost",
     "format_elapsed",
+    "format_percent_used",
     "format_tokens",
     "max_context_for",
     "percent_used",
     "progress_bar",
     "render_status_line",
+    "truncate_model_id",
 ]

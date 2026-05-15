@@ -100,6 +100,22 @@ def test_dropdown_text_renders_skill_with_skill_tag() -> None:
     assert "(command)" in rendered_text  # rename is a command
 
 
+def test_dropdown_text_is_compact_enough_for_chat_surface() -> None:
+    """The slash menu should not flood each row with long descriptions."""
+    long = "word " * 80
+    state = {
+        "matches": [
+            CommandDef(name="usage", description=long, category="meta"),
+        ],
+        "selected_idx": 0,
+        "mode": "slash",
+        "at_token_range": None,
+    }
+    rendered = _render_dropdown(state)
+    rendered_text = "".join(t for _c, t in rendered)
+    assert len(rendered_text.strip()) <= 120
+
+
 def test_dropdown_text_truncates_descriptions_at_250() -> None:
     """Long descriptions get word-boundary truncated with ellipsis."""
     long = "this is a very long description " * 20  # ~640 chars

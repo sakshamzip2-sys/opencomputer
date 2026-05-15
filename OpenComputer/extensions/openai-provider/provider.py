@@ -48,7 +48,7 @@ from plugin_sdk.tool_contract import ToolSchema
 
 logger = logging.getLogger(__name__)
 
-_OPENROUTER_DEFAULT_MAX_TOKENS = 512
+_OPENROUTER_DEFAULT_MAX_TOKENS = 256
 _RATE_GUARD_PROVIDER = "openai"
 
 

@@ -167,10 +167,8 @@ class TestProgressBar:
     def test_full_all_filled(self) -> None:
         assert progress_bar(200_000, 200_000) == BAR_FILL * BAR_WIDTH
 
-    def test_six_percent_zero_filled_cells(self) -> None:
-        # 6% of 10 cells floors to 0 — Claude Code's actual behavior at
-        # this percentage; user's example bar is rendered identically.
-        assert progress_bar(12_400, 200_000) == BAR_EMPTY * BAR_WIDTH
+    def test_six_percent_has_minimum_visible_fill(self) -> None:
+        assert progress_bar(12_400, 200_000) == BAR_FILL + BAR_EMPTY * 9
 
     def test_sixty_percent(self) -> None:
         assert progress_bar(120_000, 200_000) == BAR_FILL * 6 + BAR_EMPTY * 4
@@ -281,7 +279,7 @@ class TestRenderStatusLine:
         # 12.4K / 1M = 1% (rounded down from 1.24%).
         assert (
             text
-            == " ⚕ claude-opus-4-7 │ 12.4K/1M │ [░░░░░░░░░░] 1% │ $0.06 │ 15m "
+            == " ⚕ claude-opus-4-7 │ ctx 12.4K/1M │ [█░░░░░░░░░] 1% │ $0.06 │ 15m "
         )
 
     def test_cold_start_snapshot(self) -> None:
@@ -289,9 +287,15 @@ class TestRenderStatusLine:
         text = _flatten(render_status_line(rt))
         # No model id, no tokens, no cost, no start time.
         # Cost segment is omitted (None → ""); elapsed shows "0s" so the
-        # field's existence is visible from the first frame. (unknown) hits
-        # DEFAULT_MAX_CONTEXT (200K) because no model id is set.
-        assert text == " ⚕ (unknown) │ 0/200K │ [░░░░░░░░░░] 0% │ 0s "
+        # field's existence is visible from the first frame. Empty model id
+        # renders as "default" while still using DEFAULT_MAX_CONTEXT (200K).
+        assert text == " ⚕ default │ ctx 0/200K │ [░░░░░░░░░░] 0% │ 0s "
+
+    def test_model_id_seeded_before_first_turn_removes_unknown(self) -> None:
+        rt = _FakeRuntime({"model_id": "claude-opus-4-7"})
+        text = _flatten(render_status_line(rt))
+        assert "(unknown)" not in text
+        assert "claude-opus-4-7" in text
 
     def test_one_m_model_uses_extended_context(self, monkeypatch) -> None:
         monkeypatch.setattr(status_line, "_now_monotonic", lambda: 100.0)
@@ -382,9 +386,7 @@ def test_cli_token_tally_sync_updates_status_line_bar() -> None:
     # ``session_tokens_in`` (set by _sync). Either path resolves to
     # 9_000 — output is NEVER added in.
     assert "9K/1M" in text
-    # 9K / 1M = 0.9% → floor 0%. The previous "1%" assertion was
-    # locked in by the double-counting bug.
-    assert "0%" in text
+    assert "<1%" in text
     # Guard against regression to "12K" (in + out summed).
     assert "12K/" not in text
 

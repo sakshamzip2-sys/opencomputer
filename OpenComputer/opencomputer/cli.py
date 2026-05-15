@@ -14,6 +14,7 @@ import atexit
 import logging
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1330,6 +1331,23 @@ def _sync_runtime_token_tally(runtime: object, tally: dict[str, int]) -> None:
     custom["session_tokens_out"] = max(out_tokens, 0)
 
 
+def _seed_chat_status_metadata(runtime: object, cfg: object) -> None:
+    """Populate status-line metadata before the first prompt is rendered."""
+    custom = getattr(runtime, "custom", None)
+    if not isinstance(custom, dict):
+        return
+    model_cfg = getattr(cfg, "model", None)
+    model_id = getattr(model_cfg, "model", "") if model_cfg is not None else ""
+    if model_id:
+        custom["model_id"] = model_id
+        custom["active_model_id"] = model_id
+    custom["model_context_overrides"] = dict(
+        getattr(cfg, "model_context_overrides", {}) or {}
+    )
+    custom["custom_providers"] = tuple(getattr(cfg, "custom_providers", ()) or ())
+    custom.setdefault("session_started_at", time.monotonic())
+
+
 _STREAM_HOOKS_WIRED = False
 
 
@@ -1627,6 +1645,7 @@ def _run_chat_session(
     runtime = RuntimeContext(
         plan_mode=plan, yolo_mode=yolo, permission_mode=permission_mode,
     )
+    _seed_chat_status_metadata(runtime, cfg)
     # Hermes v2 D7 (2026-05-08) — expose the live Rich Console under
     # ``runtime.custom["live_console"]`` so slash commands that need to
     # repaint a live surface (currently /skin) can hot-swap the theme
@@ -1741,6 +1760,7 @@ def _run_chat_session(
         )
 
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+    loop._runtime = runtime
 
     # Kanban-Goals v2 (2026-05-08) — banner callback for the Ralph loop.
     # AgentLoop._maybe_continue_goal fires this once per turn end with
@@ -2670,6 +2690,7 @@ def _run_chat_session(
         # model a generic prompt so it knows to describe the image.
         if _image_paths and not cleaned_text.strip():
             cleaned_text = "(See attached image.)"
+        _is_slash_input = is_slash_command(user_input)
 
         # Render the user's message inside a green-bordered Panel so it
         # is visually distinct from the assistant's response. PromptSession
@@ -2690,18 +2711,19 @@ def _run_chat_session(
             )
         _panel_body = _UserText.assemble(*_panel_body_parts) if _panel_body_parts else _UserText(user_input, style="bold")
 
-        console.print(
-            _UserPanel(
-                _panel_body,
-                border_style="green",
-                padding=(0, 1),
-                expand=False,
-                title=_UserText("you", style="bold green"),
-                title_align="left",
+        if not _is_slash_input:
+            console.print(
+                _UserPanel(
+                    _panel_body,
+                    border_style="green",
+                    padding=(0, 1),
+                    expand=False,
+                    title=_UserText("you", style="bold green"),
+                    title_align="left",
+                )
             )
-        )
 
-        if is_slash_command(user_input):
+        if _is_slash_input:
             def _on_model_swap(new_model: str) -> tuple[bool, str]:
                 """``/model <id>`` mid-session swap (Sub-project C).
 
