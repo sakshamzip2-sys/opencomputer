@@ -341,6 +341,16 @@ def test_mcp_cli_add_no_args_tty_empty_input_aborts(
     assert result.exit_code == 0
 
 
+def test_mcp_cli_add_no_args_tty_eof_aborts_130(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exhausted stdin (EOF) at the prompt aborts with exit 130 — same
+    branch as Ctrl-C / KeyboardInterrupt."""
+    monkeypatch.setattr("opencomputer.cli_mcp._stdin_is_tty", lambda: True)
+    result = _runner_invoke(["mcp", "add"], input="")
+    assert result.exit_code == 130
+
+
 def test_mcp_cli_add_no_args_tty_unknown_preset_errors(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
