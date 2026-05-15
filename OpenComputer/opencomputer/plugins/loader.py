@@ -832,6 +832,14 @@ class PluginAPI:
         # silently shadow another plugin's commands.
         self._cli_command_registrations: dict[str, Any] = {}
 
+        # §9.8 profile-handoff: queued profile-rebind handler
+        # registrations. Plugin ``register(api)`` is called once at
+        # process start, BEFORE any AgentLoop exists. We hold each
+        # ``(name, handler, priority)`` here; AgentLoop drains the
+        # queue into its ``ProfileRebindRegistry`` at __init__ time.
+        # Re-registering an existing name replaces (idempotent).
+        self._pending_profile_rebind_handlers: dict[str, tuple[Any, int]] = {}
+
     @property
     def activation_source(self) -> PluginActivationSource:
         """Why this plugin was activated — see ``PluginActivationSource``.
@@ -1044,6 +1052,50 @@ class PluginAPI:
 
     def register_channel(self, name: str, adapter: Any) -> None:
         self.channels[name] = adapter
+
+    def register_profile_rebind_handler(
+        self,
+        name: str,
+        handler: Any,
+        *,
+        priority: int = 150,
+    ) -> None:
+        """Register a callable invoked when the active profile swaps.
+
+        §9.8 of profile-handoff completion. The handler signature is
+        ``(new_home: Path, old_home: Path | None) -> None | Awaitable``.
+        Plugins (browser-harness, honcho, langfuse, ...) use this to
+        re-point their per-profile state on a mid-session swap.
+
+        ``register(api)`` is called once at process start, before any
+        ``AgentLoop`` exists. The registration is queued here and drained
+        into each ``AgentLoop``'s ``ProfileRebindRegistry`` at __init__
+        time, so the handler runs on every swap of every loop in the
+        process.
+
+        Args:
+            name: Identifier for the handler. Re-registering replaces.
+            handler: Callable; may be sync or async.
+            priority: Lower runs earlier. Plugins default to 150 (after
+                built-in handlers at 20/50/60/120).
+
+        Raises:
+            TypeError: ``handler`` is not callable.
+            ValueError: ``name`` is empty.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Handler name must be a non-empty string")
+        if not callable(handler):
+            raise TypeError("Handler must be callable")
+        self._pending_profile_rebind_handlers[name] = (handler, int(priority))
+
+    @property
+    def pending_profile_rebind_handlers(
+        self,
+    ) -> dict[str, tuple[Any, int]]:
+        """Snapshot of queued rebind handlers. ``AgentLoop`` reads this
+        at __init__ to drain into its registry."""
+        return dict(self._pending_profile_rebind_handlers)
 
     def register_realtime_bridge(
         self,

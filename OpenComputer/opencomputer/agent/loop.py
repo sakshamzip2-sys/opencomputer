@@ -638,24 +638,35 @@ def _resolve_handoff_audit_key() -> bytes | None:
         return None
 
 
-def _apply_pending_profile_swap(
+async def _apply_pending_profile_swap(
     runtime: object,
     *,
     memory: object,
     prompt_snapshots: dict | None,
     sid: str | None,
+    rebind_registry: object = None,
 ) -> str | None:
     """Apply a queued profile swap at turn entry.
 
     Sequence:
-      1. Consume ``pending_profile_id`` (delegates to _profile_swap helper).
-      2. If a swap occurred, rebind ``memory`` to the new profile_home.
-      3. Evict the prompt-cache snapshot for ``sid`` so the next turn
+      1. Resolve the OLD profile home (for rebind handlers that need it).
+      2. Consume ``pending_profile_id`` (delegates to _profile_swap helper).
+         This step now ALSO updates ``os.environ['OPENCOMPUTER_HOME']`` so
+         every code path that calls ``_home()`` post-swap sees the new
+         profile — closes the §3 split-brain documented in
+         ``docs/plans/profile-handoff-investigation.md``.
+      3. If a swap occurred, rebind ``memory`` to the new profile_home.
+      4. Invoke every registered rebind handler (env, .env, provider,
+         MCP, SessionDB, browser, ...) via ``rebind_registry``.
+         Exceptions are logged at WARN and do NOT roll back the swap.
+      5. Evict the prompt-cache snapshot for ``sid`` so the next turn
          rebuilds the system prompt against the new SOUL.md/MEMORY.md.
 
     Returns the new active profile id, or None if no swap occurred.
 
     Plan 1 of 3 — see docs/superpowers/specs/2026-05-01-profile-ui-port-design.md.
+    v3 profile-handoff completion — see
+    ``docs/plans/profile-handoff-investigation.md`` §9.
     """
     from opencomputer.cli_ui._profile_swap import (
         consume_pending_profile_swap,
@@ -664,6 +675,21 @@ def _apply_pending_profile_swap(
     from opencomputer.profiles import get_profile_dir
 
     init_active_profile_id(runtime)
+
+    # Resolve OLD home BEFORE consume so rebind handlers receive both
+    # endpoints. ``init_active_profile_id`` populated ``active_profile_id``
+    # in runtime.custom; that's the pre-swap value.
+    old_id = "default"
+    try:
+        old_id = (
+            getattr(runtime, "custom", {}).get("active_profile_id")
+            or "default"
+        )
+    except Exception:  # noqa: BLE001 — non-fatal, just use default
+        old_id = "default"
+    old_home_root = get_profile_dir(None if old_id == "default" else old_id)
+    old_home = old_home_root / "home"
+
     new_id = consume_pending_profile_swap(runtime)
     if new_id is None:
         return None
@@ -684,6 +710,39 @@ def _apply_pending_profile_swap(
                 new_id,
                 exc_info=True,
             )
+
+    # Invoke every registered rebind handler. Order is priority-sorted:
+    # env (10-49) → config + providers (50-99) → stateful (100-149) →
+    # plugins (150+). Each handler is exception-isolated so a single
+    # failure cannot wedge subsequent ones; UI / logs surface the
+    # per-handler outcome via the returned RebindHandlerResult list.
+    if rebind_registry is not None:
+        try:
+            results = await rebind_registry.invoke(new_home, old_home)
+        except Exception:  # noqa: BLE001 — registry itself shouldn't raise but defend
+            _log.warning(
+                "profile rebind registry invoke() raised — swap continues "
+                "with memory rebind only",
+                exc_info=True,
+            )
+        else:
+            failed = [r for r in results if r.error is not None]
+            if failed:
+                _log.warning(
+                    "profile swap to %r: %d/%d rebind handler(s) failed: %s",
+                    new_id,
+                    len(failed),
+                    len(results),
+                    ", ".join(f"{r.name}={type(r.error).__name__}" for r in failed),
+                )
+            else:
+                _log.info(
+                    "profile swap to %r: %d rebind handler(s) succeeded "
+                    "(total %.1fms)",
+                    new_id,
+                    len(results),
+                    sum(r.duration_ms for r in results),
+                )
 
     # Evict the cached prompt snapshot for this session so the next turn
     # rebuilds against the new memory pointers.
@@ -925,6 +984,49 @@ class AgentLoop:
         # (back-compat: tools without claims are unaffected either way).
         self._consent_gate = consent_gate
 
+        # Profile-rebind registry — closes the §3 split-brain documented in
+        # ``docs/plans/profile-handoff-investigation.md``. Subsystems
+        # (env, .env, provider, MCP, SessionDB, browser, ConsentGate)
+        # register a handler that is invoked once per profile swap. The
+        # registry is exception-isolated: one handler raising does NOT
+        # stop the others, mirroring the existing memory-rebind try/except
+        # at loop.py:679-686. Built-in handlers are registered below via
+        # ``_install_builtin_rebind_handlers``; plugins register via
+        # ``register_profile_rebind_handler`` (exposed on the AgentLoop
+        # API and ``plugin_sdk.runtime_context.PluginAPI``).
+        from opencomputer.agent.profile_rebind import ProfileRebindRegistry
+
+        self._profile_rebind_registry = ProfileRebindRegistry()
+        self._install_builtin_rebind_handlers()
+
+        # §9.8 — drain any plugin-queued rebind handlers (browser-harness,
+        # honcho, langfuse) registered through ``PluginAPI.register_profile_rebind_handler``.
+        # Plugins call register() once at process start; AgentLoop is
+        # constructed per session — this is where the queue meets the
+        # actual registry. Re-draining on subsequent AgentLoop builds is
+        # idempotent because the registry's ``register`` replaces by name.
+        try:
+            from opencomputer.plugins.registry import registry as _plugin_registry
+
+            shared = getattr(_plugin_registry, "shared_api", None)
+            if shared is not None:
+                pending = getattr(
+                    shared, "pending_profile_rebind_handlers", None,
+                )
+                if pending:
+                    for name, (handler, priority) in pending.items():
+                        try:
+                            self._profile_rebind_registry.register(
+                                name, handler, priority=priority,
+                            )
+                        except Exception:  # noqa: BLE001
+                            _log.warning(
+                                "plugin rebind handler %r failed to register",
+                                name, exc_info=True,
+                            )
+        except Exception:  # noqa: BLE001 — plugin loader not yet bootstrapped is fine
+            _log.debug("plugin rebind queue drain skipped", exc_info=True)
+
         # TS-T5: progressive subdirectory hint discovery. Watches tool
         # calls for paths into NEW subdirectories and lazily loads
         # ``OPENCOMPUTER.md`` / ``AGENTS.md`` / ``CLAUDE.md`` /
@@ -1005,6 +1107,329 @@ class AgentLoop:
                 _sc_attach()
         except Exception as e:  # noqa: BLE001 — defensive
             _log.warning("system-control attach_to_bus skipped: %s", e)
+
+    # ─── profile-rebind public API ─────────────────────────────────
+
+    def register_profile_rebind_handler(
+        self,
+        name: str,
+        handler: Any,
+        *,
+        priority: int = 100,
+    ) -> None:
+        """Register a callable invoked when the active profile swaps.
+
+        The handler signature is ``(new_home: Path, old_home: Path | None) ->
+        None | Awaitable[None]``. May be sync or async. Exceptions raised
+        by the handler are logged at WARN and isolated — they do NOT
+        roll back the swap or stop sibling handlers from running.
+
+        Priority guidance (lower = earlier):
+
+        * 10-49: environment plumbing (env vars, .env reload)
+        * 50-99: config + provider client
+        * 100-149: stateful subsystems (SessionDB, MCPManager, consent)
+        * 150+: plugins (browser-profile, honcho, langfuse, etc.)
+
+        Re-registering an existing ``name`` replaces the prior handler
+        (idempotent — safe across plugin reload / test rebuild).
+
+        Plugins should call this via
+        :py:meth:`plugin_sdk.runtime_context.PluginAPI.register_profile_rebind_handler`,
+        which proxies to this method.
+        """
+        self._profile_rebind_registry.register(
+            name, handler, priority=priority,
+        )
+
+    def unregister_profile_rebind_handler(self, name: str) -> bool:
+        """Remove a previously-registered rebind handler.
+
+        Returns ``True`` if the handler existed and was removed,
+        ``False`` if no handler by that name was registered.
+        """
+        return self._profile_rebind_registry.unregister(name)
+
+    @property
+    def profile_rebind_handler_names(self) -> list[str]:
+        """Names of all registered rebind handlers, in invocation order."""
+        return self._profile_rebind_registry.names()
+
+    def _install_builtin_rebind_handlers(self) -> None:
+        """Wire the in-process subsystem rebind handlers.
+
+        Closes the multi-subsystem state-binding gaps documented in
+        ``docs/plans/profile-handoff-investigation.md`` §9. Each handler
+        is a closure capturing ``self`` so the swap propagates into the
+        AgentLoop's stateful attributes (provider, MCP manager, ...).
+
+        Priority guidance (lower runs earlier):
+
+        * 10-49: environment plumbing
+            - ``dotenv``: reload ``.env`` and unload prior profile's keys
+        * 50-99: provider client
+            - ``provider``: rebuild from current (post-config-rebind) name
+        * 100-149: stateful subsystems
+            - ``handoff_audit``: rebound elsewhere per-turn (see
+              ``_run_handoff_auto_swap``), not duplicated here
+        * 150+: plugins (browser-harness, honcho, langfuse) register
+          themselves via ``register_profile_rebind_handler``.
+
+        Handlers tolerate ``old_home=None`` for the first-ever swap.
+        """
+
+        from opencomputer.agent import dotenv_tracker
+
+        def _rebind_dotenv(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
+            """§9.3 — unload prior .env, load new profile's .env.
+
+            ``new_home`` is the per-profile ``home/`` subdir; the .env
+            file actually lives at the **profile root** (one level up).
+            We resolve the profile root by walking up one level.
+            """
+            profile_root = new_home.parent if new_home.name == "home" else new_home
+            dotenv_tracker.swap_profile_dotenv(profile_root, old_home)
+
+        def _rebind_provider(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
+            """§9.7 — rebuild provider client + invalidate handoff adapter.
+
+            Reads ``self.config.model.provider`` for the name. After
+            M4 (config hot-swap) ships, this picks up the new profile's
+            provider automatically; today, same provider class is
+            re-instantiated so it reads fresh API keys from the
+            (already-rebound) ``os.environ``.
+
+            Best-effort: a failure to construct (e.g. missing API key)
+            is logged at WARN by the registry — we re-raise here so it
+            surfaces in the per-handler RebindHandlerResult.
+            """
+            from opencomputer.agent.provider_swap import lookup_provider
+
+            provider_name = getattr(
+                getattr(self.config, "model", None), "provider", "",
+            )
+            if not provider_name:
+                _log.warning(
+                    "profile rebind: no provider name in config — provider "
+                    "client kept pointing at old profile's instance",
+                )
+                return
+
+            # Close the old provider if it exposes a close hook.
+            old_provider = getattr(self, "provider", None)
+            if old_provider is not None:
+                close = getattr(old_provider, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 — never block swap on close
+                        _log.warning(
+                            "profile rebind: prior provider close() raised "
+                            "(continuing — new provider will not collide)",
+                            exc_info=True,
+                        )
+
+            new_provider = lookup_provider(provider_name)
+            self.provider = new_provider
+
+            # Invalidate the cached ProviderAdapter so the next handoff
+            # generation builds against the new provider.
+            self._handoff_provider_adapter = None
+
+            _log.info(
+                "profile rebind: provider %r rebuilt against new env",
+                provider_name,
+            )
+
+        def _rebind_session_db(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
+            """§9.2 — point SessionDB at new profile's sessions.db.
+
+            Writes a continuation marker into the OLD DB for the
+            currently-active session (if any) so an ``oc resume`` from
+            the old profile can surface a "session continued in
+            <new_profile>" hint to the user. Then re-points the path,
+            applies migrations to the new file, and re-attaches the
+            subagent store + episodic memory cascade so subsequent
+            writes land in the new file.
+            """
+            new_db_path = new_home / "sessions.db"
+
+            # Best-effort detect the current profile name for the marker.
+            target_label = ""
+            try:
+                target_label = new_home.parent.name if new_home.name == "home" else new_home.name
+            except Exception:  # noqa: BLE001 — label is cosmetic
+                target_label = ""
+
+            db = getattr(self, "db", None)
+            if db is None or not hasattr(db, "rebind"):
+                # No SessionDB on this loop (test fixture / unusual
+                # construction path). Skip rather than crash — the
+                # missing-attribute case is not actionable at swap time.
+                return
+            try:
+                db.rebind(
+                    new_db_path,
+                    source_session_id=getattr(self, "_current_session_id", "") or None,
+                    target_profile=target_label or None,
+                )
+            except Exception:  # noqa: BLE001
+                _log.warning(
+                    "SessionDB rebind failed — chat history may continue "
+                    "in the old profile's sessions.db",
+                    exc_info=True,
+                )
+                return
+
+            # Cascade — re-attach SubagentStore + EpisodicMemory against
+            # the new db path. Best-effort each; failure does not roll
+            # back the rebind.
+            try:
+                from opencomputer.agent.subagent_registry import SubagentRegistry
+                from opencomputer.agent.subagent_store import (
+                    SubagentStore,
+                    SubagentStoreUnavailable,
+                )
+
+                try:
+                    _store = SubagentStore(self.db.db_path)
+                    SubagentRegistry.instance().attach_store(_store)
+                except SubagentStoreUnavailable as exc:
+                    _log.debug(
+                        "SubagentStore unavailable post-rebind for %s: %s",
+                        self.db.db_path, exc,
+                    )
+            except Exception:  # noqa: BLE001
+                _log.debug(
+                    "SubagentStore cascade post-rebind skipped", exc_info=True,
+                )
+
+            try:
+                self._episodic = EpisodicMemory(db=self.db)
+            except Exception:  # noqa: BLE001
+                _log.debug(
+                    "EpisodicMemory cascade post-rebind failed (continuing)",
+                    exc_info=True,
+                )
+
+        def _rebind_config(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
+            """§9.4 — hot-swap allowlisted Config fields from the new profile.
+
+            Reads ``<profile_root>/config.yaml`` (one level up from
+            ``new_home``), merges allowlisted top-level fields onto
+            ``self.config`` via ``dataclasses.replace``. Restart-required
+            fields are logged at WARN with the list of deltas the user
+            would need to restart for.
+
+            Must run AFTER the dotenv handler so newly-loaded env vars
+            inform any env-resolving config fields, and BEFORE the
+            provider handler so the provider rebuild reads the new
+            ``model.provider`` / ``model.model``.
+            """
+            from opencomputer.agent.config_hot_swap import hot_swap_config
+
+            profile_root = new_home.parent if new_home.name == "home" else new_home
+            merged, result = hot_swap_config(self.config, profile_root)
+            if result.error is not None:
+                _log.warning(
+                    "profile rebind: config hot-swap failed (%s) — keeping "
+                    "current config", result.error,
+                )
+                return
+            self.config = merged
+
+        async def _rebind_mcp(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
+            """§9.5 — diff-cycle MCP fleet against new profile's mcp.servers.
+
+            Resolves the active MCPManager via ``manager_registry`` so
+            EVERY AgentLoop (chat + subagents) participates, not just
+            the one constructed at cli.py:1762.
+
+            Loads NEW profile's config independently (config hot-swap
+            allowlist excludes ``mcp`` by design) so we read the
+            authoritative new list, not whatever survived the allowlist.
+            """
+            try:
+                from opencomputer.mcp.manager_registry import current_active_manager
+            except Exception:  # noqa: BLE001
+                return
+            mgr = current_active_manager()
+            if mgr is None or not hasattr(mgr, "diff_cycle"):
+                return
+
+            from opencomputer.agent.config_hot_swap import _load_profile_config
+
+            profile_root = new_home.parent if new_home.name == "home" else new_home
+            try:
+                new_cfg = _load_profile_config(profile_root)
+            except Exception:  # noqa: BLE001
+                _log.warning(
+                    "MCP rebind: failed to load new profile config — "
+                    "fleet unchanged",
+                    exc_info=True,
+                )
+                return
+
+            servers = list(getattr(new_cfg.mcp, "servers", ()) or ())
+            try:
+                await mgr.diff_cycle(servers)
+            except Exception:  # noqa: BLE001
+                _log.warning(
+                    "MCP rebind: diff_cycle raised — fleet may be partial",
+                    exc_info=True,
+                )
+
+        def _rebind_consent_gate(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
+            """§2.10 — re-point F1 ConsentGate at new profile's audit.db.
+
+            Only runs if a gate was wired at __init__. The new gate
+            uses ``<profile_root>/audit.db`` (NOT ``home/audit.db``)
+            and per-profile keyring HMAC slot.
+
+            Caveat: tools that captured ``self._consent_gate`` at THEIR
+            __init__ time hold the OLD gate reference. The rebind
+            mutates the gate in place (new connection inside the same
+            object) so behavior continues but with new bindings —
+            existing references stay valid.
+            """
+            gate = getattr(self, "_consent_gate", None)
+            if gate is None:
+                return  # no gate configured for this loop
+            profile_root = (
+                new_home.parent if new_home.name == "home" else new_home
+            )
+            try:
+                ok = gate.rebind_to_profile(profile_root)
+                if not ok:
+                    _log.warning(
+                        "consent gate rebind returned False — gate is "
+                        "now in fail-closed mode for the new profile",
+                    )
+            except Exception:  # noqa: BLE001
+                _log.warning(
+                    "consent gate rebind raised — gate may be partially "
+                    "rebound",
+                    exc_info=True,
+                )
+
+        self._profile_rebind_registry.register(
+            "dotenv", _rebind_dotenv, priority=20,
+        )
+        self._profile_rebind_registry.register(
+            "config", _rebind_config, priority=50,
+        )
+        self._profile_rebind_registry.register(
+            "provider", _rebind_provider, priority=60,
+        )
+        self._profile_rebind_registry.register(
+            "mcp", _rebind_mcp, priority=110,
+        )
+        self._profile_rebind_registry.register(
+            "session_db", _rebind_session_db, priority=120,
+        )
+        self._profile_rebind_registry.register(
+            "consent_gate", _rebind_consent_gate, priority=130,
+        )
 
     # ─── compaction telemetry ───────────────────────────────────────
 
@@ -1570,11 +1995,12 @@ class AgentLoop:
         # ``_session_id`` is not stored on self; the local ``sid`` is used
         # directly. ``_current_session_id`` mirrors it but is set at line
         # 577 — using ``sid`` here is canonical and avoids any race.
-        _apply_pending_profile_swap(
+        await _apply_pending_profile_swap(
             self._runtime,
             memory=getattr(self, "memory", None),
             prompt_snapshots=getattr(self, "_prompt_snapshots", None),
             sid=sid,
+            rebind_registry=self._profile_rebind_registry,
         )
 
         # 2026-05-11 — Alt+M scoped-models cycling. Pops ``pending_model_id``

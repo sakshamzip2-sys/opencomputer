@@ -195,6 +195,27 @@ class BaseChannelAdapter(ABC):
         self._fatal_error_message: str | None = None
         self._fatal_error_retryable: bool = False
 
+        # 2026-05-15 — Per-instance auto_swap_enabled override from config.
+        # The class-level default is ``False`` (channel-bound profile
+        # contract). Config-driven enablement closes the v3 §6 gap
+        # where ``BaseChannelAdapter.auto_swap_enabled`` was reachable
+        # but no subclass / instance ever opted in. Profile YAML can now
+        # set ``channels.<platform>.auto_swap_enabled: true`` and the
+        # adapter respects it without code changes. We accept only the
+        # explicit boolean ``True`` to avoid accidental enablement via
+        # truthy strings ("true", "yes") from misconfigured YAML — those
+        # would be a footgun (per-channel handoff is contract-affecting).
+        cfg_optin = config.get("auto_swap_enabled")
+        if cfg_optin is True:
+            # Per-instance override — wins over class-level default.
+            # Using setattr on self (not the class) keeps multi-instance
+            # adapters independent.
+            self.auto_swap_enabled = True
+        elif cfg_optin is False:
+            self.auto_swap_enabled = False
+        # else: any non-bool value (None, str, int) is silently ignored
+        # to avoid the misconfig footgun. Class-level default is used.
+
     def set_message_handler(
         self, handler: Callable[[MessageEvent], Awaitable[str | None]]
     ) -> None:

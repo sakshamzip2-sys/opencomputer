@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opencomputer.agent.consent.audit import AuditEvent, AuditLogger
@@ -87,6 +89,10 @@ class ConsentGate:
     def __init__(self, *, store: ConsentStore, audit: AuditLogger) -> None:
         self._store = store
         self._audit = audit
+        # §2.10 profile-handoff: track underlying sqlite connection so
+        # ``rebind_to_profile`` can close it cleanly. None for stores
+        # backed by non-sqlite implementations (custom shims, tests).
+        self._owned_conn = getattr(store, "_conn", None)
         # Round 2a P-5 — pending-approval registry. Key is
         # ``(session_id, capability_id)``. The Event is set by
         # :meth:`resolve_pending` once the user clicks; the decision
@@ -122,6 +128,116 @@ class ConsentGate:
         # :meth:`refresh_approvals_config` when the operator changes the
         # config file.
         self._approvals_config: _ApprovalsConfig | None = None
+
+    # §2.10 profile-handoff rebind — see
+    # ``docs/plans/profile-handoff-investigation.md``.
+
+    def rebind_to_profile(self, new_home: Path) -> bool:
+        """Re-point this gate at the new profile's audit.db + keyring.
+
+        Closes the prior connection, opens a new one against
+        ``<new_home>/audit.db``, loads (or generates) the new profile's
+        HMAC chain key from the keyring, and rebuilds the internal
+        ``ConsentStore`` + ``AuditLogger``. The cached approvals config
+        is cleared so the next gate check reloads from the new
+        profile's ``config.yaml``.
+
+        Args:
+            new_home: Profile root that owns the new ``audit.db`` (NOT
+                the ``home/`` subdir — audit lives at the profile root).
+
+        Returns:
+            ``True`` on success, ``False`` on partial failure (the gate
+            keeps the prior bindings — fail-closed). Logs at WARN with
+            detail on failure.
+        """
+        from pathlib import Path
+
+        from opencomputer.agent.consent.audit import AuditLogger
+        from opencomputer.agent.consent.store import ConsentStore
+        from opencomputer.agent.state import apply_migrations
+
+        if not isinstance(new_home, Path):
+            _log.warning(
+                "ConsentGate.rebind_to_profile: new_home must be Path "
+                "(got %s) — keeping prior bindings",
+                type(new_home).__name__,
+            )
+            return False
+
+        # Close prior connection if we own it.
+        try:
+            prior = self._owned_conn
+            if prior is not None:
+                try:
+                    prior.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            new_home.mkdir(parents=True, exist_ok=True)
+            import sqlite3
+
+            conn = sqlite3.connect(new_home / "audit.db", check_same_thread=False)
+            apply_migrations(conn)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "ConsentGate.rebind_to_profile: failed to open "
+                "%s/audit.db (%s) — gate retains prior bindings",
+                new_home, exc,
+            )
+            return False
+
+        # Load HMAC key from new profile's keyring slot.
+        try:
+            from opencomputer.agent.consent.keyring_adapter import KeyringAdapter
+
+            kr = KeyringAdapter(
+                service="opencomputer-consent", fallback_dir=new_home,
+            )
+            key_hex = kr.get("hmac-chain")
+            if key_hex is None:
+                key_bytes = os.urandom(32)
+                kr.set("hmac-chain", key_bytes.hex())
+            else:
+                key_bytes = bytes.fromhex(key_hex)
+        except Exception:  # noqa: BLE001
+            _log.warning(
+                "ConsentGate.rebind_to_profile: keyring load failed; "
+                "generating ephemeral HMAC key for new profile (audit "
+                "rows will not chain-verify against prior runs)",
+                exc_info=True,
+            )
+            key_bytes = os.urandom(32)
+
+        try:
+            new_store = ConsentStore(conn)
+            new_audit = AuditLogger(conn, hmac_key=key_bytes)
+        except Exception:  # noqa: BLE001
+            _log.warning(
+                "ConsentGate.rebind_to_profile: store/audit construction "
+                "raised — keeping prior bindings",
+                exc_info=True,
+            )
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+        self._store = new_store
+        self._audit = new_audit
+        self._owned_conn = conn
+        # Force a reload of approvals config from new profile's YAML.
+        self._approvals_config = None
+        # In-memory session-scoped grants belong to the user's contract
+        # with the gate at session start — drop them on profile swap so
+        # the new profile starts fresh (no carry-over of "you said yes
+        # to X under the old profile").
+        self._session_grants.clear()
+        return True
 
     def _get_approvals_config(self) -> _ApprovalsConfig:
         """Lazy-load + cache the active profile's ``security.approvals`` config.

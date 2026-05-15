@@ -1818,6 +1818,10 @@ def _run_chat_session(
 
     # Gap G — publish the active MCPManager so LazyBundleStubTool can
     # find it at first-tool-call wakeup. Set once per chat session.
+    # The §9.5 MCP rebind handler is installed automatically by every
+    # AgentLoop via _install_builtin_rebind_handlers; it discovers the
+    # manager through manager_registry.current_active_manager(), so this
+    # set_active_manager call is also what wires the MCP rebind path.
     try:
         from opencomputer.mcp.manager_registry import set_active_manager
 
