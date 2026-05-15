@@ -77,6 +77,38 @@ plugins rarely construct one by hand. Fields map 1:1 to manifest
 keys — see [`plugin-authors.md`](./plugin-authors.md) §2 for the
 "when to set" table.
 
+### `BundleMcpServer`
+
+Frozen dataclass declaring an MCP server bundled with a plugin
+(mcp-openclaw-port M1). Plugins list these on
+`PluginManifest.bundle_mcp` so OC auto-mounts the server's tools
+under `<plugin_id>__<server>__<tool>` namespacing. Eleven fields:
+
+- `name` — `str` (required). Becomes part of the namespaced tool
+  prefix. Alphanumeric / dash / underscore.
+- `transport` — `Literal["stdio", "sse", "http"]`. Defaults to `"stdio"`.
+- `command` — `str` (stdio only). Supports `${PLUGIN_ROOT}`
+  placeholder expanded to the plugin's on-disk path at spawn time.
+- `args` — `tuple[str, ...]` (stdio only). Each element supports
+  `${PLUGIN_ROOT}` placeholder.
+- `env` — `dict[str, str]` (stdio only). Values support `${PLUGIN_ROOT}`.
+- `cwd` — `str`. Working dir for the subprocess.
+- `url` — `str` (sse / http only). Endpoint URL.
+- `headers` — `dict[str, str]` (sse / http only). HTTP auth headers.
+- `connection_timeout_seconds` — `float`. Default `30.0`.
+- `lazy` — `bool`. Default `True`. When `True` the bundle does NOT
+  auto-mount at chat start; users wake it via `oc mcp enable` +
+  `oc mcp reconnect`. Set `False` for eager-mount.
+- `tools_allow` — `tuple[str, ...] | None`. Per-server tool whitelist.
+- `tools_deny` — `tuple[str, ...]`. Applied after `tools_allow`.
+- `osv_check` — `bool`. Default `True`. Skip OSV malware scan when
+  the plugin author signs off on the bundled server.
+
+Path-escape attacks (`${PLUGIN_ROOT}/../../etc/passwd`) raise
+`BundleMcpSafetyError` and the bundle entry is skipped (logged at
+WARNING). See [`plugin-bundle-mcp.md`](./plugin-bundle-mcp.md) for
+the full author guide.
+
 ### `ModelSupport`
 
 Frozen dataclass declaring which model ids a provider plugin can
