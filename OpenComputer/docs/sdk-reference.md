@@ -77,6 +77,25 @@ plugins rarely construct one by hand. Fields map 1:1 to manifest
 keys — see [`plugin-authors.md`](./plugin-authors.md) §2 for the
 "when to set" table.
 
+### `BundleMcpToolDecl`
+
+Frozen dataclass declaring one MCP tool ahead-of-time for lazy bundle
+wakeup (mcp-openclaw-port Gap G). Plugins ship `BundleMcpServer.tools`
+so the loader can register stub
+`opencomputer.mcp.lazy_wakeup.LazyBundleStubTool` instances at
+activation — the LLM sees the bundle's tools as available immediately;
+first dispatch triggers the actual MCP server spawn + routes the call
+to the real tool.
+
+Three fields:
+
+- `name` — bare tool name (e.g. `"read_file"`). The composed registry
+  name is `<plugin>__<server>__<tool>`.
+- `description` — passed through to the tool schema.
+- `input_schema` — JSON Schema (Draft 7) dict the LLM uses to build
+  arguments. Empty dict means "no schema declared" — permissive (the
+  MCP server's actual schema overrides once awake).
+
 ### `BundleMcpServer`
 
 Frozen dataclass declaring an MCP server bundled with a plugin

@@ -130,6 +130,15 @@ class SessionMcpRuntimeManager:
             if len(self._slots) >= self.max_sessions:
                 self._evict_lru_locked()
             manager = self._factory()
+            # Gap F — bind lease registry + session id on the manager
+            # so each MCPTool it builds acquires/releases leases on
+            # dispatch. The sweep_idle path skips sessions with active
+            # leases to avoid evicting mid-call.
+            try:
+                manager.lease_registry = self.lease_registry
+                manager.lease_session_id = session_id
+            except Exception:  # noqa: BLE001 — mock managers in tests
+                pass
             self._slots[session_id] = _Slot(
                 manager=manager,
                 created_at=now,

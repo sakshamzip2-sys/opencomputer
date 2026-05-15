@@ -260,6 +260,16 @@ class MCPTool(BaseTool):
     #: dispatch path. ``None`` means :func:`_run_on_session_loop` skips
     #: cross-loop trampolining and awaits the session call directly.
     session_loop: asyncio.AbstractEventLoop | None = None
+    #: Gap D — class-level default so MCPTool.__new__(MCPTool) test
+    #: doubles don't AttributeError on ``self.schema`` access. The
+    #: instance attribute set in ``__init__`` shadows this.
+    _display_name_override: str | None = None
+    #: Gap F — class-level defaults so test doubles via ``MCPTool.__new__``
+    #: still get a usable lease-counting path. ``None`` on either means
+    #: ``execute`` dispatches without acquiring a lease (back-compat for
+    #: process-global MCPManager + every existing test).
+    _lease_session_id: str | None = None
+    _lease_registry: Any = None
 
     def __init__(
         self,
@@ -335,6 +345,29 @@ class MCPTool(BaseTool):
             # Fall through to the MCP server; it'll surface any error.
             pass
 
+        # Gap F (M4) — acquire a lease for the duration of this dispatch
+        # if the tool was bound to a session-scoped lease registry. The
+        # SessionMcpRuntimeManager's sweep_idle path checks the lease
+        # count BEFORE evicting, so an in-flight call can't be torn down.
+        # No-op when ``_lease_registry`` / ``_lease_session_id`` is None
+        # (the process-global MCPManager path), keeping every existing
+        # test + production call site backward-compatible.
+        lease_release: Any = None
+        if (
+            self._lease_registry is not None
+            and self._lease_session_id is not None
+        ):
+            try:
+                lease_release = self._lease_registry.acquire(
+                    self._lease_session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Lease acquisition failure must NOT break dispatch.
+                logger.debug(
+                    "lease acquire failed for session=%s tool=%s: %s",
+                    self._lease_session_id, self.tool_name, exc,
+                )
+
         try:
             # G10 (Hermes parity, 2026-05-09): cap the per-tool-call wait
             # so a wedged MCP server can't block the agent loop forever.
@@ -374,6 +407,13 @@ class MCPTool(BaseTool):
                 content=redact_runtime_text(err),
                 is_error=True,
             )
+        finally:
+            # Gap F — release the lease no matter the outcome.
+            if lease_release is not None:
+                try:
+                    lease_release()
+                except Exception:  # noqa: BLE001 — release is best-effort
+                    pass
 
 
 def hermes_alias_name(server_name: str, tool_name: str) -> str:
@@ -857,7 +897,10 @@ class MCPConnection:
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("OSV bus publish failed (continuing): %s", exc)
+            from opencomputer.mcp.redaction import redact_mcp_log_text as _red
+            logger.warning(
+                "OSV bus publish failed (continuing): %s", _red(str(exc)),
+            )
         if high and fail_closed:
             return (
                 f"OSV blocked launch: {ecosystem}/{package} "
@@ -1476,6 +1519,28 @@ class MCPManager:
         self._bg_loop: asyncio.AbstractEventLoop | None = None
         self._bg_thread: threading.Thread | None = None
         self._bg_ready: threading.Event = threading.Event()
+        # Gap F — when bound by ``SessionMcpRuntimeManager``, each
+        # MCPTool produced by this manager acquires a lease on this
+        # registry for the duration of its dispatch. ``None`` means
+        # no lease accounting (process-global MCPManager path).
+        self.lease_registry: Any = None
+        self.lease_session_id: str | None = None
+        # Gap A — startup orphan sweep. Best-effort psutil walk + SIGTERM
+        # against any MCP-named descendant left over from a prior crashed
+        # OC run. Empty on the clean common case.
+        try:
+            from opencomputer.mcp.process_tree import kill_mcp_descendants
+
+            n_term, n_kill = kill_mcp_descendants(os.getpid())
+            if n_term or n_kill:
+                logger.info(
+                    "MCP startup orphan sweep: terminated=%d killed=%d",
+                    n_term, n_kill,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "MCP startup orphan sweep raised (continuing): %s", exc,
+            )
 
     async def connect_all(
         self,
@@ -1542,8 +1607,12 @@ class MCPManager:
                         osv_check_fail_closed=osv_check_fail_closed,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    from opencomputer.mcp.redaction import (
+                        redact_mcp_log_text as _red,
+                    )
                     logger.warning(
-                        "MCP server '%s' connect raised: %s", cfg.name, exc
+                        "MCP server '%s' connect raised: %s",
+                        cfg.name, _red(str(exc)),
                     )
                     return 0
                 if not ok:
@@ -1587,6 +1656,12 @@ class MCPManager:
                         )
                         continue
                     tool._display_name_override = final_name
+                    # Gap F — propagate lease binding so the tool can
+                    # acquire on dispatch. No-op when this manager isn't
+                    # session-bound.
+                    if self.lease_registry is not None and self.lease_session_id:
+                        tool._lease_registry = self.lease_registry
+                        tool._lease_session_id = self.lease_session_id
                     try:
                         self.tool_registry.register(tool)
                         added += 1
