@@ -22,11 +22,11 @@ if TYPE_CHECKING:
     from opencomputer.mcp.session_runtime import SessionMcpRuntimeManager
 
 _lock = threading.RLock()
-_active: "SessionMcpRuntimeManager | None" = None
+_active: SessionMcpRuntimeManager | None = None
 
 
 def set_runtime_manager(
-    manager: "SessionMcpRuntimeManager | None",
+    manager: SessionMcpRuntimeManager | None,
 ) -> None:
     """Install (or clear) the process-global runtime manager.
 
@@ -38,7 +38,7 @@ def set_runtime_manager(
         _active = manager
 
 
-def current_runtime_manager() -> "SessionMcpRuntimeManager | None":
+def current_runtime_manager() -> SessionMcpRuntimeManager | None:
     """Return the active runtime manager, or ``None`` when unset.
 
     Consumers (the CLI) should handle ``None`` explicitly — it means

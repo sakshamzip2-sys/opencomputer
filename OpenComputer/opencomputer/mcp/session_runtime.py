@@ -37,7 +37,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from opencomputer.mcp.client import MCPManager
@@ -62,7 +62,7 @@ class SessionMcpRuntimeStats:
 class _Slot:
     """Internal bookkeeping entry — one per active session."""
 
-    manager: "MCPManager"
+    manager: MCPManager
     created_at: float
     last_used_at: float
 
@@ -85,7 +85,7 @@ class SessionMcpRuntimeManager:
 
     def __init__(
         self,
-        mcp_manager_factory: Callable[[], "MCPManager"],
+        mcp_manager_factory: Callable[[], MCPManager],
         *,
         idle_ttl_seconds: float = 300.0,
         max_sessions: int = 20,
@@ -98,7 +98,7 @@ class SessionMcpRuntimeManager:
 
     # ── lookup / creation ──────────────────────────────────────────
 
-    def get_or_create(self, session_id: str) -> "MCPManager":
+    def get_or_create(self, session_id: str) -> MCPManager:
         """Return the manager for ``session_id``, creating one if absent.
 
         Side effects:
@@ -182,7 +182,7 @@ class SessionMcpRuntimeManager:
         """
         now = time.time()
         cutoff = now - self.idle_ttl_seconds
-        evicted: list[tuple[str, "MCPManager"]] = []
+        evicted: list[tuple[str, MCPManager]] = []
         with self._lock:
             for sid in list(self._slots.keys()):
                 slot = self._slots[sid]
@@ -218,7 +218,7 @@ class SessionMcpRuntimeManager:
         self._stop_manager_safely(lru_sid, slot.manager)
 
     def _stop_manager_safely(
-        self, session_id: str, manager: "MCPManager",
+        self, session_id: str, manager: MCPManager,
     ) -> None:
         """Stop a manager + swallow + log any error.
 
@@ -268,14 +268,14 @@ class SessionMcpRuntimeManager:
         return out
 
 
-def build_default_factory(tool_registry: Any) -> Callable[[], "MCPManager"]:
+def build_default_factory(tool_registry: Any) -> Callable[[], MCPManager]:
     """Build the production factory that returns a fresh :class:`MCPManager`.
 
     Late-imports :mod:`opencomputer.mcp.client` so the session-runtime
     module's import surface stays narrow (the runtime can be discussed
     in plans + tests without dragging in the heavy MCP client).
     """
-    def _factory() -> "MCPManager":
+    def _factory() -> MCPManager:
         from opencomputer.mcp.client import MCPManager
         return MCPManager(tool_registry=tool_registry)
     return _factory

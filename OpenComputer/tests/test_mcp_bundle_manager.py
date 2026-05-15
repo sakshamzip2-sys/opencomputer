@@ -34,7 +34,7 @@ def _isolate_default_registry() -> Generator[None, None, None]:
 class _FakeConnection:
     """Pretend-connection that records its construction config + reports 'connected'."""
 
-    instances: list["_FakeConnection"] = []
+    instances: list[_FakeConnection] = []
 
     def __init__(self, *, config: MCPServerConfig, **_kwargs: object) -> None:
         self.config = config

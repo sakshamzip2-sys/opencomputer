@@ -34,7 +34,6 @@ from opencomputer.mcp.bundle import (
 from opencomputer.plugins.discovery import _parse_manifest
 from plugin_sdk.core import BundleMcpServer, PluginManifest
 
-
 # ─── BundleMcpServer dataclass shape ─────────────────────────────
 
 
