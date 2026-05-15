@@ -260,14 +260,12 @@ class PromptContext:
     #:   * ``os_pretty``      — human OS label ("macOS 14.3").
     #:   * ``cpu_logical``    — logical CPU count.
     #:   * ``total_ram_gb``   — total RAM in GiB.
-    #:   * ``display_server`` — "wayland"/"x11"/"aqua"/"windows"/"none".
     #:   * ``is_headless``    — Linux-with-no-display flag.
     #:   * ``is_container``   — Docker/LXC/Kubernetes flag.
     arch: str = ""
     os_pretty: str = ""
     cpu_logical: int = 0
     total_ram_gb: float = 0.0
-    display_server: str = ""
     is_headless: bool = False
     is_container: bool = False
     #: V3.A-T3 — workspace-context slot reserved for T8 (CLAUDE.md /
@@ -427,7 +425,6 @@ class PromptBuilder:
             os_pretty=host.os_pretty,
             cpu_logical=host.cpu_logical,
             total_ram_gb=host.total_ram_gb,
-            display_server=host.display_server,
             is_headless=host.is_headless,
             is_container=host.is_container,
             workspace_context=workspace_context,
@@ -455,7 +452,6 @@ class PromptBuilder:
             os_pretty=ctx.os_pretty,
             cpu_logical=ctx.cpu_logical,
             total_ram_gb=ctx.total_ram_gb,
-            display_server=ctx.display_server,
             is_headless=ctx.is_headless,
             is_container=ctx.is_container,
             workspace_context=ctx.workspace_context,

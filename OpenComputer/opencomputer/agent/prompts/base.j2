@@ -273,8 +273,8 @@ The above are files the user has pinned via `oc pin <path>` so the agent doesn't
 {% if cpu_logical or total_ram_gb -%}
 - Hardware: {{ cpu_logical or "?" }} logical CPUs, {{ total_ram_gb or "?" }} GiB RAM
 {% endif -%}
-{% if display_server and display_server not in ("aqua", "windows") -%}
-- Display: {{ display_server }}{% if is_headless %} (headless — no display server){% endif %}
+{% if is_headless -%}
+- Display: headless — no display server (do not suggest GUI or browser-window actions)
 {% endif -%}
 {% if is_container -%}
 - Environment: running inside a container
