@@ -40,7 +40,7 @@ import uuid
 from pathlib import Path
 from typing import Any, ClassVar
 
-from backend import (  # type: ignore[import-not-found]
+from cu_backend import (  # type: ignore[import-not-found]
     ActionResult,
     CaptureResult,
     ComputerUseBackend,
@@ -118,7 +118,7 @@ def _get_backend() -> ComputerUseBackend:
         if _backend is None:
             backend_name = os.environ.get("OPENCOMPUTER_COMPUTER_USE_BACKEND", "cua").lower()
             if backend_name in {"cua", "cua-driver", ""}:
-                from cua_backend import CuaDriverBackend  # type: ignore[import-not-found]
+                from cu_cua_backend import CuaDriverBackend  # type: ignore[import-not-found]
                 _backend = CuaDriverBackend()
             elif backend_name == "noop":
                 _backend = NoopBackend()
@@ -527,7 +527,7 @@ COMPUTER_USE_CAPABILITY = CapabilityClaim(
 
 
 def _import_schema() -> dict[str, Any]:
-    from schema import COMPUTER_USE_SCHEMA  # type: ignore[import-not-found]
+    from cu_schema import COMPUTER_USE_SCHEMA  # type: ignore[import-not-found]
     return COMPUTER_USE_SCHEMA
 
 
@@ -560,7 +560,7 @@ class ComputerUseTool(BaseTool):
         if sys.platform != "darwin":
             return False
         try:
-            from cua_backend import (  # type: ignore[import-not-found]
+            from cu_cua_backend import (  # type: ignore[import-not-found]
                 cua_driver_binary_available,
             )
         except Exception:

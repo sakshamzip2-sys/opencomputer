@@ -15,7 +15,7 @@ import shutil
 import typer
 
 # Plugin loader puts the plugin root on sys.path[0] — flat sibling import.
-from installer import (  # type: ignore[import-not-found]  # noqa: E402
+from cu_installer import (  # type: ignore[import-not-found]  # noqa: E402
     cua_driver_version,
     install_cua_driver,
 )

@@ -39,16 +39,20 @@ def _load(module_name: str, path: Path):
     return mod
 
 
-# tool.py / cua_backend.py import siblings by SHORT name (the loader puts
-# the plugin root on sys.path[0]). Alias each under its short name before
-# loading dependents — same pattern as test_lsp_bridge_plugin.py.
-backend_mod = _load("_cu_test_backend", PLUGIN_DIR / "backend.py")
-sys.modules["backend"] = backend_mod
-schema_mod = _load("_cu_test_schema", PLUGIN_DIR / "schema.py")
-sys.modules["schema"] = schema_mod
-cua_backend_mod = _load("_cu_test_cua_backend", PLUGIN_DIR / "cua_backend.py")
-sys.modules["cua_backend"] = cua_backend_mod
-tool_mod = _load("_cu_test_tool", PLUGIN_DIR / "tool.py")
+# cu_tool.py / cu_cua_backend.py import siblings by their (cu_-prefixed)
+# module name (the loader puts the plugin root on sys.path[0]). The cu_
+# prefix means no other plugin can collide on these names in sys.modules.
+# Alias each under its real module name before loading dependents — same
+# pattern as test_lsp_bridge_plugin.py.
+backend_mod = _load("_cu_test_backend", PLUGIN_DIR / "cu_backend.py")
+sys.modules["cu_backend"] = backend_mod
+schema_mod = _load("_cu_test_schema", PLUGIN_DIR / "cu_schema.py")
+sys.modules["cu_schema"] = schema_mod
+cua_backend_mod = _load(
+    "_cu_test_cua_backend", PLUGIN_DIR / "cu_cua_backend.py"
+)
+sys.modules["cu_cua_backend"] = cua_backend_mod
+tool_mod = _load("_cu_test_tool", PLUGIN_DIR / "cu_tool.py")
 
 CaptureResult = backend_mod.CaptureResult
 UIElement = backend_mod.UIElement
@@ -560,7 +564,7 @@ class TestGuidanceInjectionProvider:
     @pytest.fixture()
     def provider(self):
         injection_mod = _load(
-            "_cu_test_injection", PLUGIN_DIR / "injection.py"
+            "_cu_test_injection", PLUGIN_DIR / "cu_injection.py"
         )
         return injection_mod.ComputerUseGuidanceProvider()
 
@@ -597,3 +601,146 @@ class TestGuidanceInjectionProvider:
         with patch("sys.platform", "win32"):
             out = asyncio.run(provider.collect(self._ctx()))
         assert out is None
+
+
+# ---------------------------------------------------------------------------
+# sys.modules collision regression — computer-use loaded alongside the
+# plugins it used to collide with (memory-vector / memory-wiki ship
+# `backend.py`, browser-control ships `schema.py`, open-design ships
+# `cli.py` + `doctor.py`). Before the cu_-prefix rename, whichever plugin
+# loaded first won the bare name in sys.modules and the others (or
+# computer-use) hit `ImportError: cannot import name ... from 'backend'`.
+# This test loads them through the REAL loader in BOTH orders.
+# ---------------------------------------------------------------------------
+
+from opencomputer.plugins.discovery import discover  # noqa: E402
+from opencomputer.plugins.loader import (  # noqa: E402
+    PluginAPI,
+    load_plugin,
+)
+
+_EXTENSIONS_DIR = PLUGIN_DIR.parent
+_COLLIDING_IDS = ("memory-vector", "memory-wiki", "browser-control", "open-design")
+
+
+class _CollisionToolReg:
+    """Tool registry stub exposing the surface the loader contract reads."""
+
+    def __init__(self) -> None:
+        self.registered: list[object] = []
+
+    def register(self, tool: object) -> None:
+        self.registered.append(tool)
+
+    register_tool = register
+
+    def names(self) -> list[str]:
+        return [t.schema.name for t in self.registered]  # type: ignore[attr-defined]
+
+
+class _CollisionHookEngine:
+    def __init__(self) -> None:
+        self.specs: list[object] = []
+        self._hooks: dict[object, list[object]] = {}
+
+    def register(self, spec: object) -> None:
+        self.specs.append(spec)
+        self._hooks.setdefault(spec.event, []).append(spec)  # type: ignore[attr-defined]
+
+    register_hook = register
+
+
+def _fresh_api() -> PluginAPI:
+    return PluginAPI(
+        tool_registry=_CollisionToolReg(),
+        hook_engine=_CollisionHookEngine(),
+        provider_registry={},
+        channel_registry={},
+    )
+
+
+def _candidates_by_id() -> dict[str, object]:
+    cands = discover([_EXTENSIONS_DIR], force_rescan=True)
+    return {c.manifest.id: c for c in cands}  # type: ignore[attr-defined]
+
+
+class TestNoModuleCollisionWithSiblingPlugins:
+    """The cu_-prefix rename must make computer-use immune to the
+    `sys.modules` filename collision with sibling plugins."""
+
+    def test_no_module_collision_with_sibling_plugins(self) -> None:
+        by_id = _candidates_by_id()
+        for pid in (*_COLLIDING_IDS, "computer-use"):
+            assert pid in by_id, (
+                f"{pid!r} not discovered in {_EXTENSIONS_DIR} — "
+                f"got {sorted(by_id)!r}"
+            )
+
+        # ── Order A: colliding plugins FIRST, computer-use LAST. ──────
+        # (worst case for computer-use — `backend` / `schema` / `cli` /
+        # `doctor` already cached under the bare name by another plugin.)
+        order_a = (*_COLLIDING_IDS, "computer-use")
+        registered_a: dict[str, list[str]] = {}
+        for pid in order_a:
+            api = _fresh_api()
+            loaded = load_plugin(by_id[pid], api)
+            assert loaded is not None, (
+                f"[order A] load_plugin({pid!r}) returned None — "
+                "import-time failure; see logs"
+            )
+            registered_a[pid] = api.tools.names()  # type: ignore[attr-defined]
+        assert "computer_use" in registered_a["computer-use"], (
+            "[order A] computer_use tool did NOT register when loaded "
+            f"after the colliding plugins — got {registered_a['computer-use']!r}"
+        )
+        # The memory plugins must still expose their own tools (their
+        # `backend.py` import of VectorMemoryBackend must not have been
+        # poisoned by computer-use).
+        assert "VectorMemoryAdd" in registered_a["memory-vector"], (
+            "[order A] memory-vector lost its tools — backend.py collision"
+        )
+        assert "WikiMemoryAdd" in registered_a["memory-wiki"], (
+            "[order A] memory-wiki lost its tools — backend.py collision"
+        )
+
+        # ── Order B: computer-use FIRST, colliding plugins LAST. ──────
+        order_b = ("computer-use", *_COLLIDING_IDS)
+        registered_b: dict[str, list[str]] = {}
+        for pid in order_b:
+            api = _fresh_api()
+            loaded = load_plugin(by_id[pid], api)
+            assert loaded is not None, (
+                f"[order B] load_plugin({pid!r}) returned None — "
+                "import-time failure; see logs"
+            )
+            registered_b[pid] = api.tools.names()  # type: ignore[attr-defined]
+        assert "computer_use" in registered_b["computer-use"], (
+            "[order B] computer_use tool did NOT register when loaded "
+            f"before the colliding plugins — got {registered_b['computer-use']!r}"
+        )
+        assert "VectorMemoryAdd" in registered_b["memory-vector"], (
+            "[order B] memory-vector lost its tools after computer-use loaded"
+        )
+        assert "WikiMemoryAdd" in registered_b["memory-wiki"], (
+            "[order B] memory-wiki lost its tools after computer-use loaded"
+        )
+
+    def test_memory_backends_import_their_own_class(self) -> None:
+        """Direct proof of the original log: `cannot import name
+        'VectorMemoryBackend' from 'backend'`. Load computer-use, THEN
+        import each memory plugin's backend — the symbol must resolve."""
+        by_id = _candidates_by_id()
+        load_plugin(by_id["computer-use"], _fresh_api())
+
+        for pid, symbol in (
+            ("memory-vector", "VectorMemoryBackend"),
+            ("memory-wiki", "WikiMemoryBackend"),
+        ):
+            mod = _load(
+                f"_cu_collision_{pid.replace('-', '_')}_backend",
+                _EXTENSIONS_DIR / pid / "backend.py",
+            )
+            assert hasattr(mod, symbol), (
+                f"{pid}/backend.py is missing {symbol!r} after computer-use "
+                "loaded — the sys.modules collision regressed"
+            )

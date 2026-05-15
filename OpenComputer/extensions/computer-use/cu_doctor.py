@@ -42,7 +42,7 @@ async def run(fix: bool) -> RepairResult:
     # 2) Missing binary — optionally repair.
     if not binary:
         if fix:
-            from installer import install_cua_driver  # type: ignore[import-not-found]
+            from cu_installer import install_cua_driver  # type: ignore[import-not-found]
 
             installed = install_cua_driver(upgrade=False)
             if installed and shutil.which("cua-driver"):

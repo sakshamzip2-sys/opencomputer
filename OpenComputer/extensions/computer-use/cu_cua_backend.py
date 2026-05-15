@@ -30,7 +30,7 @@ import threading
 from concurrent.futures import Future
 from typing import Any
 
-from backend import (  # type: ignore[import-not-found]
+from cu_backend import (  # type: ignore[import-not-found]
     ActionResult,
     CaptureResult,
     ComputerUseBackend,

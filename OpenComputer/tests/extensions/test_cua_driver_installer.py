@@ -1,7 +1,7 @@
 """Tests for the cua-driver installer.
 
 Ported from hermes-agent ``tests/hermes_cli/test_install_cua_driver.py``,
-adapted to the standalone ``installer`` module in the computer-use plugin.
+adapted to the standalone ``cu_installer`` module in the computer-use plugin.
 
 ``install_cua_driver(upgrade=True)`` must:
 
@@ -39,7 +39,7 @@ def _load(module_name: str, path: Path):
     return mod
 
 
-installer = _load("_cu_test_installer", PLUGIN_DIR / "installer.py")
+installer = _load("_cu_test_installer", PLUGIN_DIR / "cu_installer.py")
 
 
 class TestInstallCuaDriverUpgrade:

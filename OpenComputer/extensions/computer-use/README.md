@@ -95,14 +95,18 @@ uses. Captures older than 24 h are pruned automatically.
 ## Architecture
 
 ```
-plugin.py      register() — surfaces ComputerUseTool + `oc computer-use` CLI + doctor row
-tool.py        ComputerUseTool(BaseTool) — dispatch, safety guards, capture persistence
-backend.py     ComputerUseBackend ABC + UIElement / CaptureResult / ActionResult
-cua_backend.py CuaDriverBackend — MCP stdio client + background asyncio bridge
-schema.py      the OpenAI function-calling schema for `computer_use`
-installer.py   install_cua_driver() — the cua-driver curl-piped installer
-doctor.py      health check (macOS gate, binary present, mcp SDK importable)
-cli.py         `oc computer-use install|status`
+plugin.py         register() — surfaces ComputerUseTool + `oc computer-use` CLI + doctor row
+cu_tool.py        ComputerUseTool(BaseTool) — dispatch, safety guards, capture persistence
+cu_backend.py     ComputerUseBackend ABC + UIElement / CaptureResult / ActionResult
+cu_cua_backend.py CuaDriverBackend — MCP stdio client + background asyncio bridge
+cu_schema.py      the OpenAI function-calling schema for `computer_use`
+cu_installer.py   install_cua_driver() — the cua-driver curl-piped installer
+cu_doctor.py      health check (macOS gate, binary present, mcp SDK importable)
+cu_cli.py         `oc computer-use install|status`
+cu_injection.py   ComputerUseGuidanceProvider — system-prompt workflow + safety guidance
+
+All internal modules carry the `cu_` prefix so no bare module name can collide
+with another plugin in `sys.modules` (the OC unique-filename convention).
 ```
 
 The cua-driver SPIs are not Apple-public and can break on OS updates. Pin a
