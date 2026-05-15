@@ -50,13 +50,24 @@ user prompt.
 ## Reference: `opencomputer mcp` subcommands
 
 ```bash
-opencomputer mcp add NAME [options]   # add a server
+opencomputer mcp add                  # no NAME on a TTY → interactive preset picker
+opencomputer mcp add NAME [options]   # add a server by hand
+opencomputer mcp presets              # list the bundled one-line-install presets
+opencomputer mcp install <slug>       # install a preset non-interactively
 opencomputer mcp list                 # see what's configured
 opencomputer mcp test NAME            # connect + list tools, no register
 opencomputer mcp enable NAME          # flip enabled = true
 opencomputer mcp disable NAME         # flip enabled = false
 opencomputer mcp remove NAME          # drop from config.yaml
 ```
+
+**Discovery entry point.** Running `opencomputer mcp add` with no `NAME` on
+an interactive terminal renders the bundled preset table and prompts for a
+slug — one keystroke from a working install (it delegates to
+`mcp install <slug>`, so OSV pre-flight and env-var checks are identical).
+Type `custom` at the prompt for the manual flag shape, or Enter to abort.
+On a non-TTY (CI / piped) it stays a strict error with a hint, so scripts
+don't silently change shape.
 
 Three transports:
 
