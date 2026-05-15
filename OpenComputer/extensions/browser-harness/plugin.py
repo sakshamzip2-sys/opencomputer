@@ -81,6 +81,19 @@ def register(api) -> None:  # PluginAPI is duck-typed
     # user-data-dir. Without this, swapping profiles mid-conversation
     # leaves cookies/OAuth state stuck in the original profile's
     # browser-profile directory.
+    #
+    # Resolve the cleanup callable AT plugin-load time, when the plugin
+    # dir is on sys.path. The handler runs LATER (during a swap) when
+    # that path entry is gone — a lazy import would fail with
+    # ImportError. We capture the bound function reference into a
+    # closure so the handler doesn't import anything at run time.
+    try:
+        from dispatcher import (  # type: ignore[import-not-found]
+            _emergency_cleanup_all_sessions as _cleanup_browser_sessions,
+        )
+    except Exception:
+        _cleanup_browser_sessions = None  # type: ignore[assignment]
+
     def _rebind_browser_profile(new_home, old_home):  # noqa: ANN001
         """Update env var + drop browser sessions on profile swap.
 
@@ -105,16 +118,14 @@ def register(api) -> None:  # PluginAPI is duck-typed
             # error rather than wedging the swap.
             return
 
-        # Tear down active sessions so they re-launch under the new env.
-        try:
-            from dispatcher import _emergency_cleanup_all_sessions  # type: ignore[import-not-found]
-
-            _emergency_cleanup_all_sessions()
-        except Exception:
-            # If dispatcher symbols differ, no cleanup — sessions die
-            # naturally at next request when the daemon notices the env
-            # var changed (or on tool-call timeout).
-            return
+        # Use the import resolved at plugin-load time, not lazy-loaded.
+        if _cleanup_browser_sessions is not None:
+            try:
+                _cleanup_browser_sessions()
+            except Exception:
+                # Cleanup is best-effort; sessions die at next-request
+                # timeout if this swallows a real error.
+                return
 
     # The PluginAPI register helper is added by §9.8; older PluginAPI
     # versions silently no-op (the attribute won't exist) which is

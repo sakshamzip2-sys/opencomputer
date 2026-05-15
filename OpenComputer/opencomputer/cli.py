@@ -1818,27 +1818,16 @@ def _run_chat_session(
 
     # Gap G — publish the active MCPManager so LazyBundleStubTool can
     # find it at first-tool-call wakeup. Set once per chat session.
+    # The §9.5 MCP rebind handler is installed automatically by every
+    # AgentLoop via _install_builtin_rebind_handlers; it discovers the
+    # manager through manager_registry.current_active_manager(), so this
+    # set_active_manager call is also what wires the MCP rebind path.
     try:
         from opencomputer.mcp.manager_registry import set_active_manager
 
         set_active_manager(mcp_mgr)
     except Exception:  # noqa: BLE001 — wakeup is opt-in; never block
         pass
-
-    # §9.5 — wire the MCP fleet rebind handler so a mid-session profile
-    # swap diff-cycles the connections to match the new profile's
-    # ``config.yaml`` ``mcp.servers`` list. Boot-time registration so
-    # the closure captures the live ``mcp_mgr`` and AgentLoop.
-    try:
-        from opencomputer.agent.profile_rebind import register_mcp_rebind_handler
-
-        register_mcp_rebind_handler(loop, mcp_mgr)
-    except Exception:  # noqa: BLE001 — rebind is a quality-of-life feature
-        _log.warning(
-            "MCP profile-rebind handler registration failed; profile swap "
-            "will not reconcile the MCP fleet until next restart",
-            exc_info=True,
-        )
 
     # Wire the delegate factory so the model can spawn subagents.
     #

@@ -1177,7 +1177,6 @@ class AgentLoop:
 
         Handlers tolerate ``old_home=None`` for the first-ever swap.
         """
-        from pathlib import Path
 
         from opencomputer.agent import dotenv_tracker
 
@@ -1339,6 +1338,47 @@ class AgentLoop:
                 return
             self.config = merged
 
+        async def _rebind_mcp(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
+            """§9.5 — diff-cycle MCP fleet against new profile's mcp.servers.
+
+            Resolves the active MCPManager via ``manager_registry`` so
+            EVERY AgentLoop (chat + subagents) participates, not just
+            the one constructed at cli.py:1762.
+
+            Loads NEW profile's config independently (config hot-swap
+            allowlist excludes ``mcp`` by design) so we read the
+            authoritative new list, not whatever survived the allowlist.
+            """
+            try:
+                from opencomputer.mcp.manager_registry import current_active_manager
+            except Exception:  # noqa: BLE001
+                return
+            mgr = current_active_manager()
+            if mgr is None or not hasattr(mgr, "diff_cycle"):
+                return
+
+            from opencomputer.agent.config_hot_swap import _load_profile_config
+
+            profile_root = new_home.parent if new_home.name == "home" else new_home
+            try:
+                new_cfg = _load_profile_config(profile_root)
+            except Exception:  # noqa: BLE001
+                _log.warning(
+                    "MCP rebind: failed to load new profile config — "
+                    "fleet unchanged",
+                    exc_info=True,
+                )
+                return
+
+            servers = list(getattr(new_cfg.mcp, "servers", ()) or ())
+            try:
+                await mgr.diff_cycle(servers)
+            except Exception:  # noqa: BLE001
+                _log.warning(
+                    "MCP rebind: diff_cycle raised — fleet may be partial",
+                    exc_info=True,
+                )
+
         def _rebind_consent_gate(new_home: Path, old_home: Path | None) -> None:  # noqa: ARG001
             """§2.10 — re-point F1 ConsentGate at new profile's audit.db.
 
@@ -1380,6 +1420,9 @@ class AgentLoop:
         )
         self._profile_rebind_registry.register(
             "provider", _rebind_provider, priority=60,
+        )
+        self._profile_rebind_registry.register(
+            "mcp", _rebind_mcp, priority=110,
         )
         self._profile_rebind_registry.register(
             "session_db", _rebind_session_db, priority=120,
