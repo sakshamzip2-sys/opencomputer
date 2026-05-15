@@ -38,7 +38,6 @@ from opencomputer.mcp.client import MCPManager, MCPTool
 from opencomputer.tools.registry import ToolRegistry
 from plugin_sdk.core import ToolCall
 
-
 # Skip on platforms where killpg / process_tree semantics don't apply.
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",

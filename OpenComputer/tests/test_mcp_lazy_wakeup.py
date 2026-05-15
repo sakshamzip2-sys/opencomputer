@@ -356,7 +356,7 @@ def test_stub_tool_caches_wakeup_error_no_retry_thrash() -> None:
     result2 = asyncio.run(stub.execute(ToolCall(id="c2", name="x", arguments={})))
     assert result2.is_error
     assert len(n_calls) == 1, (
-        f"wakeup_fn was retried unnecessarily — bundle thrashing risk"
+        "wakeup_fn was retried unnecessarily — bundle thrashing risk"
     )
 
 

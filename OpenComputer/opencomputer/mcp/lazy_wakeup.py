@@ -191,7 +191,7 @@ class LazyBundleStubTool(BaseTool):
                     ),
                     timeout=self.wakeup_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return ToolResult(
                     tool_call_id=call.id,
                     content=(

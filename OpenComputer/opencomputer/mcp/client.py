@@ -40,8 +40,11 @@ ConnectionState = Literal["connected", "disconnected", "error"]
 # exception text that contains URLs, tokens, headers. Pipe every log
 # call through ``redacting`` so secrets never reach the log file
 # regardless of how the exception was constructed. The adapter only
-# touches ``%s`` arguments; the format string stays verbatim.
-from opencomputer.mcp.redaction import redacting as _redacting
+# touches ``%s`` arguments; the format string stays verbatim. Import
+# here (after other module-level imports) so the wrapper is in scope
+# for the ``logger`` binding below. ``noqa: E402`` because ruff doesn't
+# know we need ``logging`` imported first.
+from opencomputer.mcp.redaction import redacting as _redacting  # noqa: E402
 
 logger = _redacting(logging.getLogger("opencomputer.mcp.client"))
 
