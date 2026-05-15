@@ -302,6 +302,28 @@ class MCPTool(BaseTool):
         # central redaction module BEFORE returning to the LLM.
         from opencomputer.security.redact import redact_runtime_text
 
+        # Gap C (mcp-openclaw-port follow-up) — validate args against
+        # the tool's inputSchema BEFORE round-tripping to the server.
+        # Surfaces field-path errors to the LLM instead of a generic
+        # MCP -32602; saves an RTT when the LLM produces obviously bad
+        # arguments. Permissive on missing/non-object schemas.
+        try:
+            from opencomputer.mcp.schema_validation import (
+                SchemaValidationError,
+                validate_tool_arguments,
+            )
+
+            validate_tool_arguments(call.arguments, self.parameters)
+        except SchemaValidationError as e:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=redact_runtime_text(str(e)),
+                is_error=True,
+            )
+        except Exception:  # noqa: BLE001 — schema-validation must never crash dispatch
+            # Fall through to the MCP server; it'll surface any error.
+            pass
+
         try:
             # G10 (Hermes parity, 2026-05-09): cap the per-tool-call wait
             # so a wedged MCP server can't block the agent loop forever.
