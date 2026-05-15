@@ -286,7 +286,8 @@ def test_ctrl_p_handler_calls_cycle_profile(tmp_path, monkeypatch):
     assert "_cycle_persona(runtime" not in src
 
 
-def test_apply_pending_profile_swap_orchestrator(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_apply_pending_profile_swap_orchestrator(tmp_path, monkeypatch):
     """Orchestrator: init + consume + rebind memory + evict snapshot."""
     monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
     _seed_profiles(tmp_path, ["work"])
@@ -318,7 +319,7 @@ def test_apply_pending_profile_swap_orchestrator(tmp_path, monkeypatch):
     runtime.custom["pending_profile_id"] = "work"
     snapshots = {"sid-1": "cached-prompt", "sid-2": "other-cached"}
 
-    swapped = _apply_pending_profile_swap(
+    swapped = await _apply_pending_profile_swap(
         runtime, memory=mm, prompt_snapshots=snapshots, sid="sid-1"
     )
 
@@ -331,12 +332,13 @@ def test_apply_pending_profile_swap_orchestrator(tmp_path, monkeypatch):
     assert "sid-2" in snapshots       # other sessions untouched
 
 
-def test_apply_pending_profile_swap_no_pending_is_noop(tmp_path):
+@pytest.mark.asyncio
+async def test_apply_pending_profile_swap_no_pending_is_noop(tmp_path):
     """No pending → orchestrator is a clean no-op."""
     from opencomputer.agent.loop import _apply_pending_profile_swap
     runtime = _runtime()
     snapshots = {"sid-1": "cached"}
-    result = _apply_pending_profile_swap(
+    result = await _apply_pending_profile_swap(
         runtime, memory=None, prompt_snapshots=snapshots, sid="sid-1"
     )
     assert result is None

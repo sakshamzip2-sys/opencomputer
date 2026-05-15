@@ -16,6 +16,7 @@ on a handoff-subsystem issue.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -43,6 +44,77 @@ from opencomputer.awareness.personas.classifier import (
 )
 
 _log = logging.getLogger("opencomputer.agent.handoff.orchestrator")
+
+
+# Tool input keys that hold a file path. Covers built-in tools
+# (Read/Edit/Write/MultiEdit/Glob/NotebookRead/NotebookEdit) plus
+# common coding-harness variants.
+_FILE_PATH_KEYS: frozenset[str] = frozenset(
+    {
+        "file_path", "filePath", "path", "notebook_path", "notebookPath",
+        "absolute_path", "absolutePath",
+    }
+)
+
+_MAX_RECENT_FILE_PATHS: int = 32
+
+
+def _extract_recent_file_paths(messages: Sequence[Any]) -> tuple[str, ...]:
+    """Pull file paths off recent tool_use blocks for the classifier.
+
+    The classifier weights extension-frequency heuristics (.py for
+    coding, .md for learning) — see
+    ``opencomputer/awareness/personas/classifier.py:161-172``. Without
+    real paths these signals are dead.
+
+    Strategy: scan recent assistant turns for content blocks shaped
+    like ``{"type": "tool_use", "input": {"file_path": "..."}}``,
+    de-dupe while preserving order, cap at
+    ``_MAX_RECENT_FILE_PATHS``.
+
+    Args:
+        messages: The same iterable handed to the streak check. Can
+            be Anthropic-shaped dicts, OAI-shaped dicts, or
+            ``RuntimeContext.ChatMessage``-ish objects with ``.role`` /
+            ``.content``. We only look at ``role == "assistant"``.
+
+    Returns:
+        Tuple of file paths in oldest-to-newest order. Empty if the
+        input is malformed, empty, or contains no tool_use blocks.
+    """
+    seen: dict[str, None] = {}  # ordered set
+    for msg in messages or ():
+        try:
+            role = (
+                msg.get("role") if isinstance(msg, dict)
+                else getattr(msg, "role", "")
+            ) or ""
+            if role != "assistant":
+                continue
+            content = (
+                msg.get("content") if isinstance(msg, dict)
+                else getattr(msg, "content", None)
+            )
+            # Content can be a string (no tools) or list of blocks.
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use":
+                    continue
+                tool_input = block.get("input")
+                if not isinstance(tool_input, dict):
+                    continue
+                for key in _FILE_PATH_KEYS:
+                    val = tool_input.get(key)
+                    if isinstance(val, str) and val.strip():
+                        seen[val] = None
+                        if len(seen) >= _MAX_RECENT_FILE_PATHS:
+                            return tuple(seen)
+        except Exception:  # noqa: BLE001 — never break classifier on extraction
+            continue
+    return tuple(seen)
 
 
 class _AnyProvider(Protocol):
@@ -221,8 +293,17 @@ async def run_auto_swap_pipeline(
     try:
         ctx = ClassificationContext(
             foreground_app=foreground_app,
-            time_of_day_hour=12,
-            recent_file_paths=(),
+            # v3 (2026-05-15) — was hardcoded to 12 (noon) — classifier
+            # uses this for evening/morning persona routing
+            # (classifier.py:167-172). With the local wall-clock hour the
+            # "relaxed" (≥21 or <6) and "coding default" (9-12) buckets
+            # actually fire when they should.
+            time_of_day_hour=_dt.datetime.now().hour,
+            # v3 (2026-05-15) — was hardcoded to (). Classifier weights
+            # 3+ recent .py = coding, 3+ recent .md = learning. Pulling
+            # from the same recent_messages we already feed the streak
+            # check costs nothing and restores the signal.
+            recent_file_paths=_extract_recent_file_paths(recent_messages),
             last_messages=tuple(last_user_messages),
             window_title=window_title,
             profile_home=profile_home,

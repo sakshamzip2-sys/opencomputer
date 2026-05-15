@@ -1717,6 +1717,137 @@ class MCPManager:
                     tool.schema.name,
                 )
 
+    @staticmethod
+    def _config_identity_hash(cfg: MCPServerConfig) -> str:
+        """Stable identity key for an MCP server config.
+
+        Combines ``name`` + ``command`` + sorted ``args`` + sorted ``env``
+        + ``url`` (for HTTP transport) + ``enabled``. A change to any of
+        these means the server should be reconnected to pick up the new
+        config — even if the name is the same.
+
+        SHA-256 hex; the value is opaque to callers (used only for
+        set membership).
+        """
+        import hashlib
+        import json
+
+        # Gather every field that materially affects how the server is
+        # spawned. ``name`` alone is not enough — two profiles can have
+        # an ``alphavantage`` server with different API keys.
+        payload = {
+            "name": cfg.name,
+            "command": getattr(cfg, "command", None),
+            "args": sorted(getattr(cfg, "args", ()) or ()),
+            "env": sorted(
+                (getattr(cfg, "env", None) or {}).items()
+            ),
+            "url": getattr(cfg, "url", None),
+            "enabled": bool(getattr(cfg, "enabled", True)),
+            # Transport kind is implicit in command vs url; tools_allow /
+            # tools_deny don't change the spawn shape but DO change which
+            # tools register, so include them.
+            "tools_allow": sorted(getattr(cfg, "tools_allow", None) or ()),
+            "tools_deny": sorted(getattr(cfg, "tools_deny", ()) or ()),
+        }
+        raw = json.dumps(payload, sort_keys=True, default=str).encode()
+        return hashlib.sha256(raw).hexdigest()
+
+    async def diff_cycle(
+        self, new_servers: list[MCPServerConfig],
+    ) -> dict[str, int]:
+        """Reconcile current MCP connections with ``new_servers``.
+
+        Computes the diff between currently-connected servers (keyed by
+        identity hash) and the new desired set. Disconnects removed +
+        changed servers (unregistering their tools), connects added +
+        changed servers.
+
+        Used by §9.5 of
+        ``docs/plans/profile-handoff-investigation.md`` — when the
+        active profile swaps, this rebinds the MCP fleet to the new
+        profile's ``config.yaml`` ``mcp.servers`` list.
+
+        Args:
+            new_servers: The desired server list. Servers with
+                ``enabled=False`` are treated the same as "not in the
+                set" — they are disconnected if currently connected.
+
+        Returns:
+            Dict with diagnostic counts:
+              - ``disconnected``: number of connections shut down
+              - ``connected``: number of new connections established
+              - ``tools_total``: total tool count after reconcile
+        """
+        # Index current connections by hash.
+        current_by_hash: dict[str, MCPConnection] = {
+            self._config_identity_hash(c.config): c for c in self.connections
+        }
+        # Filter to enabled. Disabled = absent.
+        new_enabled = [s for s in new_servers if getattr(s, "enabled", True)]
+        new_by_hash: dict[str, MCPServerConfig] = {
+            self._config_identity_hash(s): s for s in new_enabled
+        }
+
+        to_disconnect: list[MCPConnection] = [
+            c for h, c in current_by_hash.items() if h not in new_by_hash
+        ]
+        to_connect: list[MCPServerConfig] = [
+            s for h, s in new_by_hash.items() if h not in current_by_hash
+        ]
+
+        # Disconnect first so a same-named server replaced with new
+        # config doesn't collide on tool registration.
+        for conn in to_disconnect:
+            try:
+                for tool in conn.tools:
+                    try:
+                        self.tool_registry.unregister(tool.schema.name)
+                    except KeyError:
+                        logger.debug(
+                            "diff_cycle: tool %s already absent during "
+                            "unregister",
+                            tool.schema.name,
+                        )
+                await conn.disconnect()
+            except Exception as exc:  # noqa: BLE001 — never block on disconnect
+                logger.warning(
+                    "diff_cycle: disconnect of %s raised: %s",
+                    conn.config.name, exc,
+                )
+
+        # Rebuild the connections list to drop the disconnected ones.
+        self.connections = [
+            c for c in self.connections if c not in to_disconnect
+        ]
+
+        # Connect new + changed.
+        connected = 0
+        if to_connect:
+            # Use connect_all so OSV checks + tool registration paths run
+            # consistently with first-boot connect. include_bundle=False
+            # because bundle entries are already managed separately.
+            connected_tools = await self.connect_all(
+                to_connect, include_bundle=False,
+            )
+            connected = len(to_connect)
+            tools_added = connected_tools
+        else:
+            tools_added = 0
+
+        result = {
+            "disconnected": len(to_disconnect),
+            "connected": connected,
+            "tools_added": tools_added,
+            "tools_total": sum(len(c.tools) for c in self.connections),
+        }
+        if to_disconnect or to_connect:
+            logger.info(
+                "MCP diff_cycle: %s",
+                ", ".join(f"{k}={v}" for k, v in result.items()),
+            )
+        return result
+
     async def shutdown(self) -> None:
         """Disconnect all servers and remove their tools from the registry."""
         for conn in self.connections:

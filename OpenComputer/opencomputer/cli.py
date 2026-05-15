@@ -1825,6 +1825,21 @@ def _run_chat_session(
     except Exception:  # noqa: BLE001 — wakeup is opt-in; never block
         pass
 
+    # §9.5 — wire the MCP fleet rebind handler so a mid-session profile
+    # swap diff-cycles the connections to match the new profile's
+    # ``config.yaml`` ``mcp.servers`` list. Boot-time registration so
+    # the closure captures the live ``mcp_mgr`` and AgentLoop.
+    try:
+        from opencomputer.agent.profile_rebind import register_mcp_rebind_handler
+
+        register_mcp_rebind_handler(loop, mcp_mgr)
+    except Exception:  # noqa: BLE001 — rebind is a quality-of-life feature
+        _log.warning(
+            "MCP profile-rebind handler registration failed; profile swap "
+            "will not reconcile the MCP fleet until next restart",
+            exc_info=True,
+        )
+
     # Wire the delegate factory so the model can spawn subagents.
     #
     # 2026-05-11 — closures bind ``loop`` (the parent AgentLoop instance)
