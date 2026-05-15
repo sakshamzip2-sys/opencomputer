@@ -49,7 +49,7 @@ import logging
 import sqlite3
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from opencomputer.agent.config import _home
 from opencomputer.agent.state import SessionDB
@@ -706,21 +706,32 @@ def build_server(enable_approvals: bool = False) -> FastMCP:
 
         @server.tool()
         async def permissions_request_subscribe(
+            ctx: Context,
             timeout_s: float = 30.0,
             poll_interval_s: float = 1.0,
         ) -> list[dict[str, Any]]:
-            """Long-poll for pending F1 consent requests (M3).
+            """Long-poll for pending F1 consent requests (M3 + Gap H push).
 
             Wraps the same query as :func:`permissions_list_open` in a
             sleep loop so external MCP clients (Claude Code, Cursor,
             IDE plugins) can block on permission events instead of
             busy-polling.
 
+            Gap H push semantics (mcp-openclaw-port follow-up): when a
+            new pending request is detected during the poll, the server
+            ALSO emits a ``notifications/message`` (LoggingMessageNotification)
+            with ``logger="openclaw.permission"`` and the request data
+            in the payload. Clients that listen for MCP log
+            notifications get out-of-band push UX even while another
+            tool call is in flight.
+
             Args:
                 timeout_s: Max seconds to wait. Default 30, capped at
                     120 to avoid pathological MCP timeouts; clients
                     wanting longer holds should call again.
                 poll_interval_s: How often to check (default 1s).
+                ctx: FastMCP Context auto-injected by the SDK when
+                    available. Used for the push-notification path.
 
             Returns:
                 List of pending consent-request dicts (capability_id,
@@ -745,6 +756,31 @@ def build_server(enable_approvals: bool = False) -> FastMCP:
                     except sqlite3.OperationalError:
                         rows = []
                     if rows:
+                        # Gap H — emit push notification BEFORE returning
+                        # so the client receives the event out-of-band
+                        # via its log-message subscription (in addition
+                        # to the long-poll return value below). Best-
+                        # effort: any transport error here is swallowed
+                        # so the long-poll response still returns.
+                        try:
+                            for row in rows:
+                                await ctx.session.send_log_message(
+                                    level="info",
+                                    data={
+                                        "event": "openclaw.permission.requested",
+                                        "capability_id": row["capability_id"],
+                                        "scope": row["scope"],
+                                        "requested_at": row["requested_at"],
+                                        "requested_by": row["requested_by"],
+                                    },
+                                    logger="openclaw.permission",
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "permission-requested push notification "
+                                "failed; long-poll response unaffected",
+                                exc_info=True,
+                            )
                         return [dict(r) for r in rows]
                 now = asyncio.get_event_loop().time()
                 if now >= deadline:
