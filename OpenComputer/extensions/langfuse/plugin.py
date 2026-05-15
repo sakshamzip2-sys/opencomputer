@@ -438,5 +438,41 @@ def register(api: Any) -> None:  # noqa: ANN001 — duck-typed PluginAPI
         os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
     )
 
+    # §9.8 profile-handoff: rebuild langfuse client against the new
+    # profile's LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY /
+    # LANGFUSE_BASE_URL on profile swap. The dotenv handler at
+    # priority 20 has already updated os.environ.
+    def _rebind_langfuse(new_home, old_home):  # noqa: ANN001, ARG001
+        global _client
+        try:
+            new_client = _build_client()
+        except Exception:
+            logger.warning(
+                "langfuse rebind: _build_client raised — keeping prior client",
+                exc_info=True,
+            )
+            return
+        _client = new_client
+        if new_client is None:
+            logger.info(
+                "langfuse rebind: new profile has no credentials — "
+                "langfuse went INERT for this session",
+            )
+        else:
+            logger.info(
+                "langfuse rebind: client rebuilt against new profile (host=%s)",
+                os.environ.get(
+                    "LANGFUSE_BASE_URL", "https://cloud.langfuse.com",
+                ),
+            )
+
+    if hasattr(api, "register_profile_rebind_handler"):
+        try:
+            api.register_profile_rebind_handler(
+                "langfuse", _rebind_langfuse, priority=158,
+            )
+        except Exception:
+            pass
+
 
 __all__ = ["open_turn_span", "register", "score_trace"]
