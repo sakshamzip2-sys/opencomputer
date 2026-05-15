@@ -1654,14 +1654,20 @@ def _register_lazy_bundle_stubs(
             from dataclasses import replace as _replace
             enabled_cfg = _replace(target, enabled=True)
             try:
-                mgr.connect_one_sync(enabled_cfg)
+                ok = mgr.connect_one_sync(enabled_cfg)
             except AttributeError:
                 # connect_one_sync absent → fall back to start_in_background
                 mgr.start_in_background([enabled_cfg], include_bundle=False)
+                ok = True  # fire-and-forget; trust the bg loop
             except Exception as exc:  # noqa: BLE001
                 raise BundleWakeupError(
                     f"MCP server spawn failed: {type(exc).__name__}: {exc}"
                 ) from exc
+            if not ok:
+                raise BundleWakeupError(
+                    f"MCP connect_one_sync returned False for "
+                    f"{plugin_id}__{server_name} — check server logs"
+                )
 
         def _lookup(name: str) -> Any:
             # api.tools.get is the registry's name-keyed lookup
