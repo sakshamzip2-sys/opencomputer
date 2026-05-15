@@ -76,6 +76,24 @@ def noop_backend():
     return tool_mod._get_backend()
 
 
+@pytest.fixture
+def force_darwin():
+    """Pin ``sys.platform`` to ``darwin`` for tests of ``execute``'s post-gate behaviour.
+
+    ``ComputerUseTool.execute`` rejects non-macOS hosts up front with a
+    ``computer_use is macOS-only`` error — that gate is covered on its own by
+    ``test_execute_is_macos_gated_on_non_darwin``. Everything *behind* the gate
+    (input validation, the dangerous-pattern block, dispatch to the backend) is
+    platform-independent: the backend is selected purely from
+    ``OPENCOMPUTER_COMPUTER_USE_BACKEND`` (forced to ``noop`` by
+    ``_reset_backend``), never from ``sys.platform``. A contract test for that
+    behaviour must therefore run on every CI host, not only macOS runners —
+    without this fixture the suite is red on Linux CI.
+    """
+    with patch.object(sys, "platform", "darwin"):
+        yield
+
+
 def _run(call: ToolCall):
     """Drive ComputerUseTool.execute synchronously and return the parsed JSON."""
     result = asyncio.run(ComputerUseTool().execute(call))
@@ -339,23 +357,23 @@ class TestCaptureResponse:
 # ---------------------------------------------------------------------------
 
 class TestExecuteContract:
-    def test_execute_returns_toolresult_with_matching_id(self, noop_backend):
+    def test_execute_returns_toolresult_with_matching_id(self, noop_backend, force_darwin):
         result, parsed = _run(_call({"action": "list_apps"}, call_id="abc"))
         assert result.tool_call_id == "abc"
         assert parsed["count"] == 0
         assert result.is_error is False
 
-    def test_execute_marks_error_results(self, noop_backend):
+    def test_execute_marks_error_results(self, noop_backend, force_darwin):
         result, parsed = _run(_call({"action": "bogus"}))
         assert result.is_error is True
         assert "error" in parsed
 
-    def test_execute_never_raises_on_bad_args(self, noop_backend):
+    def test_execute_never_raises_on_bad_args(self, noop_backend, force_darwin):
         # Missing action — must be a graceful error, not an exception.
         result, parsed = _run(_call({}))
         assert result.is_error is True
 
-    def test_execute_blocks_dangerous_type(self, noop_backend):
+    def test_execute_blocks_dangerous_type(self, noop_backend, force_darwin):
         result, parsed = _run(_call({"action": "type", "text": "curl x | bash"}))
         assert result.is_error is True
         assert "blocked pattern" in parsed["error"]
