@@ -33,6 +33,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.shortcuts import CompleteStyle
 
 from opencomputer.cli_ui.clipboard import has_clipboard_image, save_clipboard_image
@@ -208,6 +209,60 @@ class SlashTokenAutoSuggest(AutoSuggest):
         if not name.lower().startswith(prefix.lower()) or len(name) <= len(prefix):
             return None
         return Suggestion(name[len(prefix) :])
+
+
+class SlashTokenLexer(Lexer):
+    """Lexer that paints ``/<token>`` runs in the chat input with a custom style.
+
+    prompt_toolkit's BufferControl is unstyled by default; this lexer wraps
+    each visible line and tags any ``/word`` sequence that sits at a
+    command-position boundary (start of line OR after whitespace) with
+    ``class:slash-token`` so the style sheet can colour it however the
+    skin prefers. Plain prose stays in the terminal's default foreground.
+
+    Subclasses prompt_toolkit's ``Lexer`` ABC so the BufferControl gets
+    the ``invalidation_hash`` method it calls every render to decide
+    whether to rebuild the fragment cache. The default implementation
+    returns a constant ("no state"), which is correct here — slash-token
+    boundaries only depend on the document text, which is already part
+    of the cache key.
+    """
+
+    def lex_document(self, document):  # noqa: ANN001 — pt API
+        lines = document.lines
+
+        def _get_line(lineno: int):
+            try:
+                text = lines[lineno]
+            except IndexError:
+                return []
+            fragments: list[tuple[str, str]] = []
+            i = 0
+            n = len(text)
+            while i < n:
+                ch = text[i]
+                is_boundary = i == 0 or text[i - 1].isspace()
+                if ch == "/" and is_boundary:
+                    j = i + 1
+                    # Slash-token body — letters/digits/_/-/: until whitespace
+                    # or a second slash. Empty body ("just typed /") still
+                    # styles the single "/" so the change is immediate.
+                    while j < n and not text[j].isspace() and text[j] != "/":
+                        j += 1
+                    fragments.append(("class:slash-token", text[i:j]))
+                    i = j
+                else:
+                    # Run of regular text up to the next potential slash token.
+                    j = i + 1
+                    while j < n:
+                        if text[j] == "/" and text[j - 1].isspace():
+                            break
+                        j += 1
+                    fragments.append(("", text[i:j]))
+                    i = j
+            return fragments
+
+        return _get_line
 
 
 def _render_dropdown_for_state(state: dict) -> list[tuple[str, str]]:
@@ -1093,6 +1148,10 @@ async def read_user_input(
             "title.box": "#5fafd7",
             "title.text": "bold #5fafd7",
             "hint.dim": "italic #6c6c6c",
+            # Pink/magenta accent for ``/command`` tokens in the input buffer.
+            # ``#ff5fd7`` is a 256-colour-safe hot pink that pops against the
+            # default terminal foreground without being neon-eye-piercing.
+            "slash-token": "bold #ff5fd7",
         }
     )
 
@@ -1126,9 +1185,14 @@ async def read_user_input(
         # the AutoSuggest fires but never reaches the screen, matching the
         # bug where typing ``/sub`` in OC showed nothing while Claude Code
         # showed ``/sub[agent-driven-development]``.
+        #
+        # SlashTokenLexer recolours ``/<token>`` runs as the user types so
+        # the slash command pops in pink against plain prose — same idea
+        # as Claude Code's accent on accepted slash commands.
         content=BufferControl(
             buffer=input_buffer,
             input_processors=[AppendAutoSuggestion()],
+            lexer=SlashTokenLexer(),
         ),
         height=_input_height_dim,
         wrap_lines=True,
