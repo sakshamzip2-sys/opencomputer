@@ -427,6 +427,24 @@ class UserModelStore:
             )
             return int(cur.rowcount or 0)
 
+    def update_node_metadata(
+        self, node_id: str, metadata: dict[str, Any]
+    ) -> None:
+        """Replace one node's ``metadata`` JSON in place.
+
+        A plain ``UPDATE`` — unlike :meth:`insert_node`, which is
+        ``INSERT OR REPLACE`` and therefore delete-then-reinserts the
+        row, cascade-dropping the node's incident edges via the
+        ``ON DELETE CASCADE`` foreign keys. Soft-delete / tombstone
+        flows MUST use this so a node's edges survive a metadata-only
+        change. A no-op when ``node_id`` does not exist.
+        """
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE nodes SET metadata_json = ? WHERE node_id = ?",
+                (json.dumps(dict(metadata)), node_id),
+            )
+
     # ─── Edge CRUD ────────────────────────────────────────────────────
 
     @staticmethod

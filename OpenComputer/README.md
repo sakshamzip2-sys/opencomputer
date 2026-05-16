@@ -81,6 +81,7 @@ opencomputer skills          # list available skills (bundled + user)
 opencomputer plugins         # list installed plugins
 opencomputer setup           # first-run wizard
 opencomputer doctor          # diagnose config/env issues
+opencomputer awareness review # inspect & correct what the agent knows about you
 opencomputer config show     # print effective config
 opencomputer config get KEY  # read one config value (e.g. model.provider)
 opencomputer config set KEY VALUE

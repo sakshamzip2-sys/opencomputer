@@ -212,3 +212,41 @@ def test_update_edge_recency_weight(tmp_path: Path) -> None:
     fetched3 = store.get_edge(edge.edge_id)
     assert fetched3 is not None
     assert fetched3.recency_weight == 0.0
+
+
+def test_update_node_metadata_replaces_in_place(tmp_path: Path) -> None:
+    """update_node_metadata swaps the metadata JSON, leaving other fields."""
+    store = _store(tmp_path)
+    n = store.upsert_node(kind="attribute", value="uses Python", confidence=0.6)
+    store.update_node_metadata(n.node_id, {"deleted": True, "note": "x"})
+    fetched = store.get_node(n.node_id)
+    assert fetched is not None
+    assert fetched.metadata == {"deleted": True, "note": "x"}
+    # Identity-bearing fields are untouched.
+    assert fetched.kind == "attribute"
+    assert fetched.value == "uses Python"
+    assert fetched.confidence == 0.6
+
+
+def test_update_node_metadata_preserves_incident_edges(tmp_path: Path) -> None:
+    """Regression: a metadata update must NOT cascade-drop the node's edges.
+
+    ``insert_node`` is INSERT OR REPLACE — it delete-then-reinserts the
+    row, and the edges FK is ON DELETE CASCADE, so re-inserting a node
+    would silently wipe its edges. ``update_node_metadata`` is a plain
+    UPDATE and must keep them.
+    """
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(kind="asserts", from_node=a.node_id, to_node=b.node_id))
+    store.insert_edge(
+        Edge(kind="contradicts", from_node=b.node_id, to_node=a.node_id)
+    )
+    assert store.count_edges() == 2
+    # Soft-delete A by updating its metadata.
+    store.update_node_metadata(a.node_id, {"deleted": True})
+    # Both edges incident to A survive.
+    assert store.count_edges() == 2
+    assert len(store.list_edges(from_node=a.node_id)) == 1
+    assert len(store.list_edges(to_node=a.node_id)) == 1
