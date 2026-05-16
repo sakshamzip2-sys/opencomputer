@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from opencomputer.user_model.reranker import SessionContext
     from opencomputer.user_model.store import UserModelStore
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -472,15 +473,29 @@ class PromptBuilder:
         *,
         store: UserModelStore | None = None,
         top_k: int = 20,
+        session_context: SessionContext | None = None,
     ) -> str:
         """Return a pre-formatted top-K user-facts block, or empty string.
 
-        Pulls Identity + Goal + Preference + Attribute nodes from the
-        F4 user-model graph, sorted by kind priority then descending
-        confidence. Truncates to ~80 chars per fact for prompt token
-        economy. Returns ``""`` when the graph is empty so that
-        ``base.j2`` can omit the section via ``{% if user_facts %}``.
+        Pulls Identity + Goal + Preference + Attribute nodes from the F4
+        user-model graph and ranks them with
+        :class:`~opencomputer.user_model.reranker.UserFactsReranker` — a
+        weighted blend of kind priority, confidence, recency, and BM25
+        relevance to ``session_context``. Soft-deleted (``oc awareness
+        forget`` / ``correct``) and ``needs_review``-flagged nodes are
+        excluded. Truncates to ~80 chars per fact for prompt token
+        economy. Returns ``""`` when nothing qualifies so ``base.j2``
+        can omit the section via ``{% if user_facts %}``.
+
+        ``session_context`` is the opening-session signal; ``None`` ranks
+        context-free (no BM25 term). The agent loop computes this once
+        per session and freezes it onto the base prompt — re-ranking
+        mid-session would invalidate the prefix cache.
         """
+        from opencomputer.user_model.reranker import (
+            SessionContext,
+            UserFactsReranker,
+        )
         from opencomputer.user_model.store import UserModelStore
 
         s = store if store is not None else UserModelStore()
@@ -491,15 +506,22 @@ class PromptBuilder:
             kinds=("identity", "goal", "preference", "attribute"),
             limit=500,
         )
-        # Rank: identity > goal > preference > attribute, then by confidence
-        kind_order = {"identity": 0, "goal": 1, "preference": 2, "attribute": 3}
-        nodes_ranked = sorted(
-            nodes,
-            key=lambda n: (kind_order.get(n.kind, 99), -n.confidence),
-        )[:top_k]
-        if not nodes_ranked:
+        # Drop facts the user forgot / corrected (soft-deleted) or that
+        # ``oc awareness migrate`` flagged as agent-internal noise — they
+        # must not reach the prompt.
+        nodes = [
+            n
+            for n in nodes
+            if not n.metadata.get("deleted")
+            and not n.metadata.get("needs_review")
+        ]
+        if not nodes:
             return ""
-        lines = [f"- ({n.kind}) {n.value[:80]}" for n in nodes_ranked]
+        ctx = session_context if session_context is not None else SessionContext()
+        ranked = UserFactsReranker().score(nodes, ctx)[:top_k]
+        if not ranked:
+            return ""
+        lines = [f"- ({sf.node.kind}) {sf.node.value[:80]}" for sf in ranked]
         return "\n".join(lines)
 
     def build_user_tone(

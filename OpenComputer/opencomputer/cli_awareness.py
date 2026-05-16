@@ -374,25 +374,103 @@ def _resolve_node_id(store: UserModelStore, id_or_prefix: str) -> Node:
     raise typer.Exit(1)
 
 
+def _explain_session(console: Console, query: str | None) -> None:
+    """Render the reranker score breakdown for the prompt's top facts.
+
+    Shows, per fact, the kind / confidence / recency / BM25 sub-scores
+    and the composite — the exact maths ``build_user_facts`` uses to
+    pick the <user-facts> block. ``query`` simulates a session opening
+    message; ``None`` shows the context-free breakdown.
+    """
+    from opencomputer.user_model.reranker import (
+        SessionContext,
+        UserFactsReranker,
+    )
+    from opencomputer.user_model.store import UserModelStore
+
+    store = UserModelStore()
+    nodes = [
+        n
+        for n in store.list_nodes(limit=500)
+        if not _node_is_deleted(n) and not n.metadata.get("needs_review")
+    ]
+    if not nodes:
+        console.print("[dim]no facts to rank[/dim]")
+        return
+    ctx = SessionContext(recent_messages=(query,) if query else ())
+    scored = UserFactsReranker().score(nodes, ctx)[:20]
+    label = f"query={query!r}" if query else "context-free"
+    table = Table(title=f"reranker score breakdown — top {len(scored)} ({label})")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("kind", style="cyan", no_wrap=True)
+    table.add_column("value")
+    table.add_column("kind✦", justify="right")
+    table.add_column("conf✦", justify="right")
+    table.add_column("recency✦", justify="right")
+    table.add_column("bm25✦", justify="right")
+    table.add_column("score", justify="right", style="bold")
+    for i, sf in enumerate(scored, start=1):
+        b = sf.breakdown
+        table.add_row(
+            str(i), sf.node.kind, sf.node.value[:40],
+            f"{b['kind']:.2f}", f"{b['confidence']:.2f}",
+            f"{b['recency']:.2f}", f"{b['bm25']:.2f}",
+            f"{sf.score:.3f}",
+        )
+    console.print(table)
+    console.print(
+        "[dim]✦ = per-term sub-score (0–1); score = weighted blend.[/dim]"
+    )
+
+
 @awareness_app.command("explain")
 def explain(
     node_id: Annotated[
-        str,
-        typer.Argument(help="Node id or unique id prefix (see `awareness review`)."),
-    ],
+        str | None,
+        typer.Argument(
+            help="Node id or unique id prefix (see `awareness review`). "
+            "Omit when using --session."
+        ),
+    ] = None,
+    session: Annotated[
+        bool,
+        typer.Option(
+            "--session",
+            help="Show the reranker score breakdown for the top facts.",
+        ),
+    ] = False,
+    query: Annotated[
+        str | None,
+        typer.Option(
+            "--query",
+            help="With --session: simulate a session opening message.",
+        ),
+    ] = None,
 ) -> None:
-    """Show full provenance for one fact.
+    """Show provenance for one fact, or the reranker breakdown.
 
-    Renders the node's fields, every incident edge, and — for each edge
-    — both the stored ``recency_weight`` and the weight temporal decay
-    would assign right now. A large gap means decay has not been run.
+    ``explain <id>`` renders the node's fields, every incident edge, and
+    — per edge — the stored vs. live decay-adjusted recency weight.
+    ``explain --session`` instead shows, for the prompt's top facts, the
+    per-term reranker score breakdown (kind / confidence / recency /
+    BM25) and the composite; ``--query`` drives the BM25 term.
     """
     from opencomputer.user_model.decay import DecayEngine
     from opencomputer.user_model.store import UserModelStore
 
+    console = Console()
+    if session:
+        _explain_session(console, query)
+        return
+    if not node_id:
+        console.print(
+            "[bold red]error:[/bold red] give a fact id, or use "
+            "[bold]--session[/bold] for the reranker breakdown."
+        )
+        raise typer.Exit(1)
+
     store = UserModelStore()
     node = _resolve_node_id(store, node_id)
-    console = Console()
 
     status = (
         "[red]forgotten[/red]" if _node_is_deleted(node)
@@ -683,7 +761,72 @@ def migrate(
     console.print(f"  duplicate edges collapsed: [bold]{collapsed}[/bold]")
     if flagged:
         console.print(
-            "[dim]flagged facts stay in the prompt until the M3 reranker — "
-            "inspect with [bold]oc awareness review --needs-review[/bold], "
-            "evict with [bold]oc awareness forget[/bold].[/dim]"
+            "[dim]flagged facts are excluded from the prompt — inspect them "
+            "with [bold]oc awareness review --needs-review[/bold].[/dim]"
         )
+
+
+@awareness_app.command("eval-ranker")
+def eval_ranker(
+    query: Annotated[
+        str | None,
+        typer.Option(
+            "--query",
+            help="Simulate a session opening message (drives the BM25 term).",
+        ),
+    ] = None,
+    top_k: Annotated[
+        int,
+        typer.Option("--top-k", help="How many ranked facts to compare."),
+    ] = 15,
+) -> None:
+    """Compare the context-aware reranker against the old static sort.
+
+    Renders the old ``(kind, confidence)`` top-K beside the reranker's
+    top-K so the weights can be sanity-checked. ``--query`` simulates the
+    opening message that drives the BM25 relevance term.
+    """
+    from opencomputer.user_model.reranker import (
+        SessionContext,
+        UserFactsReranker,
+    )
+    from opencomputer.user_model.store import UserModelStore
+
+    store = UserModelStore()
+    console = Console()
+    nodes = [
+        n
+        for n in store.list_nodes(limit=500)
+        if not _node_is_deleted(n) and not n.metadata.get("needs_review")
+    ]
+    if not nodes:
+        console.print("[dim]no facts to rank[/dim]")
+        return
+
+    old = sorted(
+        nodes, key=lambda n: (_KIND_ORDER.get(n.kind, 99), -n.confidence)
+    )[:top_k]
+    ctx = SessionContext(recent_messages=(query,) if query else ())
+    new = [sf.node for sf in UserFactsReranker().score(nodes, ctx)[:top_k]]
+
+    label = f"query={query!r}" if query else "context-free"
+    table = Table(title=f"ranker comparison — top {top_k} ({label})")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("old — kind + confidence")
+    table.add_column("new — context-aware reranker")
+    for i in range(max(len(old), len(new))):
+        o = old[i].value[:38] if i < len(old) else ""
+        n = new[i].value[:38] if i < len(new) else ""
+        mark = "" if o == n else "  [yellow]●[/yellow]"
+        table.add_row(str(i + 1), o, n + mark)
+    console.print(table)
+
+    changed = sum(
+        1
+        for i in range(min(len(old), len(new)))
+        if old[i].node_id != new[i].node_id
+    )
+    console.print(
+        f"[dim]{changed} of {min(len(old), len(new))} positions changed "
+        "between the two rankings.[/dim]"
+    )

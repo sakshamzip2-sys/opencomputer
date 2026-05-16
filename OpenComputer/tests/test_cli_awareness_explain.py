@@ -106,3 +106,39 @@ def test_explain_orphan_node_is_handled(tmp_path, monkeypatch):
     result = runner.invoke(app, ["awareness", "explain", "lonely"])
     assert result.exit_code == 0, result.stdout
     assert "no incident edges" in result.stdout.lower()
+
+
+# ─── M3 T3.6 — explain --session score breakdown ─────────────────────
+
+
+def test_explain_session_shows_score_breakdown(tmp_path, monkeypatch):
+    """`explain --session` renders the reranker per-term score breakdown."""
+    store = _store(tmp_path, monkeypatch)
+    store.insert_node(Node(node_id="s1", kind="identity", value="name: X"))
+    store.insert_node(Node(node_id="s2", kind="attribute",
+                           value="uses Python"))
+    result = runner.invoke(app, ["awareness", "explain", "--session"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout.lower()
+    assert "kind" in out and "recency" in out and "bm25" in out
+
+
+def test_explain_session_with_query_runs_bm25(tmp_path, monkeypatch):
+    """--session --query exercises the BM25 term and still renders."""
+    store = _store(tmp_path, monkeypatch)
+    store.insert_node(Node(node_id="s1", kind="attribute",
+                           value="writes rust code"))
+    result = runner.invoke(
+        app, ["awareness", "explain", "--session", "--query", "rust help"]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "rust" in result.stdout
+
+
+def test_explain_with_no_id_and_no_session_exits_nonzero(
+    tmp_path, monkeypatch
+):
+    """`explain` with neither a node id nor --session is an error."""
+    _store(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["awareness", "explain"])
+    assert result.exit_code == 1
