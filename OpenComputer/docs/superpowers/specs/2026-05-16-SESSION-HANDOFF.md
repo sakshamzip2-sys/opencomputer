@@ -249,8 +249,8 @@ tests/agent/
 ## RESOLUTION — 2026-05-16 (follow-up session)
 
 Track A is fully shipped; handoff open items #1–#4 are all closed.
-Tracks B + C were audited this session (not worked on): Track C is
-essentially done, Track B is missing one milestone (M4) — see below.
+Tracks B + C are separate, fast-merging efforts this session did not
+touch — see the note below for how to check them.
 
 **Track A — session-fork dedup, complete.** Branch
 `feat/session-fork-helper-2026-05-16`, three commits on `origin/main`:
@@ -277,27 +277,14 @@ longer reproduces** — it passes in isolation and in-suite on the
 current `origin/main` base. No bug to file; it self-resolved on a
 newer base.
 
-**Tracks B + C — status snapshot.** B/C move independently of this
-branch; `git log origin/main` is the live source of truth. As of this
-session's end:
-
-*Track B — parity plan, 5 milestones:* M1 (#623, sandbox scope +
-tool-loop), M2 (#626, E2B backend + resolver), M3 (#627, Microsoft
-Graph tool — merged mid-session), and M5 (#622, reference extractions)
-shipped. **M4 (NeuTTS local voice) is the one milestone not yet on
-`origin/main`.** Its scope is in
-`2026-05-16-oc-parity-with-hermes-openclaw/PART-2` (Milestone 4).
-
-*Track C — awareness cleanup, 5 milestones:* PR #625's squash body
-shows it shipped M1 (inspection CLI), M2 (writer cleanup + validator),
-M3 (context-aware reranker), and M4 (decay + drift wired into the
-reranker). M5 (observability + top-level docs) was not separately
-confirmed — at most a small (~2-day, docs-only) gap. Track C is
-essentially done.
-
-Plus a config fix (#624). Process note: an earlier draft of this
-RESOLUTION called B+C "merged" with no verification — an overclaim,
-caught and corrected; this snapshot supersedes it.
+**Tracks B + C — not this branch's work; check them live.** The parity
+plan (`2026-05-16-oc-parity-with-hermes-openclaw/`) and the awareness-
+cleanup plan (`2026-05-16-awareness-cleanup/`) ship milestone-by-
+milestone on their own PRs, and they merged rapidly while this session
+ran. Any milestone-status snapshot written here goes stale fast —
+earlier drafts of this section did, repeatedly. For their real status
+run `git log origin/main` and read the milestone tables in each plan's
+`PART-2`. This session did not touch Track B or C.
 
 **Branch note.** The branch was rebased to drop a stray inherited
 commit (`85174ce2`, a life-event-teeth plan doc) so it carries
