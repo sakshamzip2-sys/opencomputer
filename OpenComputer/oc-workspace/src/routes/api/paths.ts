@@ -1,26 +1,14 @@
-import path from 'node:path'
-import os from 'node:os'
 import { createFileRoute } from '@tanstack/react-router'
-import { json } from '@tanstack/react-start'
-import { isAuthenticated } from '../../server/auth-middleware'
+import { handleGet } from '../../server/paths.server'
 
-const CLAUDE_HOME =
-  process.env.HERMES_HOME || process.env.CLAUDE_HOME || path.join(os.homedir(), '.hermes')
-
+// Server-only implementation lives in src/server/paths.server.ts so its
+// node:path / node:os imports never reach the client bundle: the TanStack
+// Start compiler strips `server.handlers` — and this import with it — from the
+// client build.
 export const Route = createFileRoute('/api/paths')({
   server: {
     handlers: {
-      GET: async ({ request }) => {
-        if (!isAuthenticated(request)) {
-          return json({ ok: false, error: 'Unauthorized' }, { status: 401 })
-        }
-        return json({
-          ok: true,
-          claudeHome: CLAUDE_HOME,
-          memoriesDir: path.join(CLAUDE_HOME, 'memories'),
-          skillsDir: path.join(CLAUDE_HOME, 'skills'),
-        })
-      },
+      GET: handleGet,
     },
   },
 })

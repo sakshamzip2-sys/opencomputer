@@ -5,7 +5,7 @@ import {
   normalizeMcpServer,
   payloadContainsString,
 } from '../../server/mcp-normalize'
-import { parseMcpServerInput, toConfigEntry, unavailableListPayload } from './mcp'
+import { parseMcpServerInput, toConfigEntry, unavailableListPayload } from '../../server/mcp.server'
 
 beforeEach(() => {
   vi.resetModules()

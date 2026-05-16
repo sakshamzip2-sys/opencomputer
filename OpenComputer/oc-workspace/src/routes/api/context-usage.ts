@@ -1,21 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { json } from '@tanstack/react-start'
 import { isAuthenticated } from '@/server/auth-middleware'
-import {
-  estimateContextTokensFromCacheRead,
-  estimateContextTokensFromMessages,
-  readContextUsage,
-} from '@/server/context-usage'
-
-// Re-export the pure token estimators alongside the route so callers can do
-//   import { estimateContextTokensFromMessages } from '@/routes/api/context-usage'
-// without depending directly on the server-side module. Keeps the route-level
-// API surface symmetrical with the test fixture and avoids leaking the
-// `@/server/*` path into client-adjacent code that may bundle this route.
-export {
-  estimateContextTokensFromCacheRead,
-  estimateContextTokensFromMessages,
-}
+import { readContextUsage } from '@/server/context-usage'
 
 export const Route = createFileRoute('/api/context-usage')({
   server: {

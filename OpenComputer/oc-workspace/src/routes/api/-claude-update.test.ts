@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createRemoteStatus, remoteUrlMatchesExpectedRepo } from './claude-update'
+import { createRemoteStatus, remoteUrlMatchesExpectedRepo } from '../../server/claude-update.server'
 
 describe('claude update repo gating', () => {
   it('matches Claude workspace repo aliases', () => {

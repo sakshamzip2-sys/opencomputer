@@ -4,7 +4,7 @@ import {
   checkpointFromRuntimeSnapshot,
   runtimeCheckpointSignature,
   runtimeSnapshotIsFresh,
-} from './swarm-dispatch'
+} from '../../server/swarm-dispatch.server'
 
 describe('checkpointFromRuntimeSnapshot', () => {
   it('maps runtime lifecycle fields into a structured checkpoint', () => {
