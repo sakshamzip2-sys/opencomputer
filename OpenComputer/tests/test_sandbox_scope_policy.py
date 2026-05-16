@@ -122,6 +122,91 @@ def test_post_init_rejects_unknown_scope_string() -> None:
         SandboxPolicy(scope="bogus")  # type: ignore[arg-type]
 
 
+# ─── M2: backend + fallback keys on SandboxPolicy ─────────────────────
+#
+# Milestone 2 widened SandboxPolicy (the ``sandbox:`` config block) with
+# ``backend`` (default sandbox backend name) and ``fallback`` (``local``
+# / ``error``), so the spec's ``sandbox.backend`` / ``sandbox.fallback``
+# key names are literally true. The per-tool-call resolver reads both.
+
+
+def test_default_policy_has_no_backend_and_error_fallback() -> None:
+    """The default policy is not opted into sandboxing — backend unset."""
+    pol = SandboxPolicy()
+    assert pol.backend is None
+    assert pol.fallback == "error"
+
+
+def test_post_init_rejects_unknown_fallback_string() -> None:
+    """A ``fallback`` typo fails loud, exactly like a bad ``scope``."""
+    with pytest.raises(ValueError, match="invalid sandbox.fallback"):
+        SandboxPolicy(fallback="bogus")
+
+
+def test_post_init_accepts_both_valid_fallbacks() -> None:
+    assert SandboxPolicy(fallback="error").fallback == "error"
+    assert SandboxPolicy(fallback="local").fallback == "local"
+
+
+def test_from_mapping_reads_backend_and_fallback() -> None:
+    pol = SandboxPolicy.from_mapping(
+        {"scope": "session", "backend": "e2b", "fallback": "local"}
+    )
+    assert pol.scope is SandboxScope.SESSION
+    assert pol.backend == "e2b"
+    assert pol.fallback == "local"
+
+
+def test_from_mapping_backend_defaults_unset_fallback_defaults_error() -> None:
+    """A ``sandbox:`` block with only ``scope`` leaves backend/fallback default."""
+    pol = SandboxPolicy.from_mapping({"scope": "tool"})
+    assert pol.backend is None
+    assert pol.fallback == "error"
+
+
+def test_from_mapping_blank_backend_string_counts_as_unset() -> None:
+    """A blank ``backend:`` line in YAML does not opt into a ""-named backend."""
+    assert SandboxPolicy.from_mapping({"backend": "   "}).backend is None
+    assert SandboxPolicy.from_mapping({"backend": ""}).backend is None
+
+
+def test_from_mapping_invalid_fallback_raises() -> None:
+    """A bad ``fallback`` in the config mapping fails loud."""
+    with pytest.raises(ValueError, match="invalid sandbox.fallback"):
+        SandboxPolicy.from_mapping({"fallback": "bogus"})
+
+
+def test_to_mapping_serializes_backend_and_non_default_fallback() -> None:
+    pol = SandboxPolicy(
+        scope=SandboxScope.SESSION, backend="e2b", fallback="local"
+    )
+    assert pol.to_mapping() == {
+        "scope": "session",
+        "backend": "e2b",
+        "fallback": "local",
+    }
+
+
+def test_to_mapping_omits_unset_backend_and_default_fallback() -> None:
+    """Default-valued backend/fallback are omitted — a minimal config stays minimal."""
+    assert SandboxPolicy(scope=SandboxScope.TOOL).to_mapping() == {"scope": "tool"}
+    # Backend set, fallback left at the default → only backend appears.
+    assert SandboxPolicy(scope=SandboxScope.TOOL, backend="e2b").to_mapping() == {
+        "scope": "tool",
+        "backend": "e2b",
+    }
+
+
+def test_backend_fallback_round_trip_through_from_and_to_mapping() -> None:
+    pol = SandboxPolicy(
+        scope=SandboxScope.AGENT,
+        tools_deny=("Bash",),
+        backend="docker",
+        fallback="local",
+    )
+    assert SandboxPolicy.from_mapping(pol.to_mapping()) == pol
+
+
 # ─── scope_key ────────────────────────────────────────────────────────
 
 
@@ -246,3 +331,30 @@ def test_default_sandbox_policy_not_serialized() -> None:
 def test_invalid_sandbox_scope_in_config_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="sandbox"):
         _load("sandbox:\n  scope: bogus\n")
+
+
+def test_sandbox_backend_and_fallback_load_from_yaml() -> None:
+    """M2 — ``sandbox.backend`` / ``sandbox.fallback`` parse off the YAML block."""
+    cfg = _load("sandbox:\n  backend: e2b\n  fallback: local\n")
+    assert cfg.sandbox.backend == "e2b"  # type: ignore[attr-defined]
+    assert cfg.sandbox.fallback == "local"  # type: ignore[attr-defined]
+
+
+def test_sandbox_backend_round_trips_through_save_and_load() -> None:
+    """M2 — a policy carrying backend + fallback survives a save/load cycle."""
+    import dataclasses
+
+    base = load_config(Path("/nonexistent/config.yaml"))
+    want = SandboxPolicy(
+        scope=SandboxScope.SESSION, backend="e2b", fallback="local"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "config.yaml"
+        save_config(dataclasses.replace(base, sandbox=want), path)
+        assert load_config(path).sandbox == want
+
+
+def test_invalid_sandbox_fallback_in_config_fails_loud() -> None:
+    """M2 — a ``sandbox.fallback`` typo fails loud, like an invalid scope."""
+    with pytest.raises(RuntimeError, match="sandbox"):
+        _load("sandbox:\n  fallback: bogus\n")

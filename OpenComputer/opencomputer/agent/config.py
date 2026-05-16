@@ -1761,6 +1761,11 @@ class Config:
     #: generic override walker — same handling as the ``routing:`` block.
     #: Annotated ``Any`` (not ``SandboxPolicy``) so ``get_type_hints(Config)``
     #: stays resolvable — ``SandboxPolicy`` is a ``TYPE_CHECKING``-only import.
+    #: Milestone 2 (2026-05-16) widened ``SandboxPolicy`` with the
+    #: ``backend`` + ``fallback`` keys the per-tool-call resolver
+    #: (:func:`opencomputer.sandbox.resolver.resolve_backend`) consumes;
+    #: they live on this same object so the spec's ``sandbox.backend`` /
+    #: ``sandbox.fallback`` key names are literally true.
     sandbox: Any = field(default_factory=_default_sandbox_policy)
     #: 2026-05-10 — Pinned files mechanism (Optimize Grade E mitigation).
     #: Files listed here get their content injected into the system prompt

@@ -199,6 +199,15 @@ browser = [
   # fastapi + uvicorn are now base deps (2026-05-07 — `oc dashboard` is
   # core). Kept commented here for reference; do not re-add.
 ]
+# Optional: E2B ephemeral cloud-sandbox backend (Milestone 2). The
+# E2BSandboxStrategy runs argv inside a transient E2B cloud VM via the
+# core ``e2b`` SDK (``commands.run``). Optional extra so the base install
+# stays dependency-light — only users who want the e2b backend pull it;
+# the docker / linux / macos / ssh strategies keep working with zero new
+# install weight. Install with `pip install opencomputer[e2b]`, then set
+# E2B_API_KEY (free Hobby tier at https://e2b.dev/dashboard). See
+# opencomputer/sandbox/e2b.py and docs/refs/e2b/2026-05-16-sdk-survey.md.
+e2b = ["e2b>=2.21,<3"]
 
 [project.scripts]
 oc = "opencomputer.cli:main"

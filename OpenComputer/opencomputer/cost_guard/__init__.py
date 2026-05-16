@@ -43,13 +43,25 @@ from opencomputer.cost_guard.pricing import (
     batch_discount_for,
     compute_call_cost,
 )
+from opencomputer.cost_guard.sandbox import (
+    DEFAULT_E2B_RATE_USD_PER_SECOND,
+    DEFAULT_SESSION_CAP_USD,
+    SandboxBudgetDecision,
+    SandboxCostGuard,
+    get_default_sandbox_cost_guard,
+)
 
 __all__ = [
+    "DEFAULT_E2B_RATE_USD_PER_SECOND",
+    "DEFAULT_SESSION_CAP_USD",
     "BudgetDecision",
     "BudgetExceeded",
     "CostGuard",
     "ProviderUsage",
+    "SandboxBudgetDecision",
+    "SandboxCostGuard",
     "batch_discount_for",
     "compute_call_cost",
     "get_default_guard",
+    "get_default_sandbox_cost_guard",
 ]

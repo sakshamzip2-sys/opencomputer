@@ -21,6 +21,10 @@ Strategies
 * :class:`SSHSandboxStrategy` — runs argv on a remote host via ``ssh``.
   *Not* a containment sandbox; the remote host is trusted by the user
   who configured ``ssh_host``. Phase 1.2 of catch-up plan.
+* :class:`E2BSandboxStrategy` — runs argv inside an ephemeral E2B cloud
+  sandbox. Requires the optional ``e2b`` extra + an ``E2B_API_KEY``.
+  Always networked — cannot enforce ``network_allowed=False`` (it warns
+  and proceeds). Milestone 2.
 * :class:`NoneSandboxStrategy` — no containment. For trusted internal
   callers and tests. Logs a WARNING on every invocation.
 
@@ -43,6 +47,7 @@ from __future__ import annotations
 
 from opencomputer.sandbox.auto import auto_strategy
 from opencomputer.sandbox.docker import DockerStrategy
+from opencomputer.sandbox.e2b import E2BSandboxStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
@@ -51,6 +56,7 @@ from opencomputer.sandbox.ssh import SSHSandboxStrategy
 
 __all__ = [
     "DockerStrategy",
+    "E2BSandboxStrategy",
     "LinuxBwrapStrategy",
     "MacOSSandboxExecStrategy",
     "NoneSandboxStrategy",

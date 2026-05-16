@@ -23,6 +23,7 @@ from dataclasses import replace
 
 from opencomputer.sandbox.auto import auto_strategy
 from opencomputer.sandbox.docker import DockerStrategy
+from opencomputer.sandbox.e2b import E2BSandboxStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
@@ -48,10 +49,12 @@ def _named_strategy(name: str) -> SandboxStrategy:
         s = DockerStrategy()
     elif name == "ssh":
         s = SSHSandboxStrategy()
+    elif name == "e2b":
+        s = E2BSandboxStrategy()
     else:
         raise SandboxUnavailable(
             f"unknown sandbox strategy {name!r}; "
-            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / none"
+            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / e2b / none"
         )
     if not s.is_available():
         raise SandboxUnavailable(
