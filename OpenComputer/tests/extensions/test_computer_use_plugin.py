@@ -421,6 +421,24 @@ class TestCuaBackendParsing:
         assert key == "t"
         assert set(mods) == {"ctrl", "option"}
 
+    def test_parse_key_combo_preserves_literal_minus_key(self):
+        """'cmd+-' (zoom out) must keep '-' as the key — splitting on '-'
+        used to drop it entirely, leaving key=None."""
+        key, mods = cua_backend_mod._parse_key_combo("cmd+-")
+        assert key == "-"
+        assert mods == ["cmd"]
+
+    def test_parse_key_combo_preserves_literal_plus_key(self):
+        """A trailing '+' after the separator is the literal '+' key."""
+        key, mods = cua_backend_mod._parse_key_combo("cmd++")
+        assert key == "+"
+        assert mods == ["cmd"]
+
+    def test_parse_key_combo_bare_minus(self):
+        key, mods = cua_backend_mod._parse_key_combo("-")
+        assert key == "-"
+        assert mods == []
+
     def test_parse_windows_from_listwindows_json(self):
         """cua-driver 0.1.9 list_windows returns JSON, not text."""
         out = {

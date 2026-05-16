@@ -204,7 +204,18 @@ def _parse_key_combo(keys: str) -> tuple[str | None, list[str]]:
     MODIFIER_NAMES = {"cmd", "command", "shift", "option", "alt", "ctrl", "control", "fn"}
     KEY_ALIASES = {"command": "cmd", "alt": "option", "control": "ctrl"}
 
-    parts = [p.strip().lower() for p in re.split(r'[+\-]', keys) if p.strip()]
+    # The schema documents '+' as the combo separator ('cmd+s', 'ctrl+alt+t').
+    # Split on '+' ONLY — never on '-' — so a literal '-' / '+' key survives:
+    # 'cmd+-' (zoom out) parses as key='-' instead of a silently-dropped key.
+    # A trailing empty segment after a '+' means the non-modifier key WAS '+'.
+    segments = keys.split("+")
+    parts: list[str] = []
+    for i, seg in enumerate(segments):
+        s = seg.strip().lower()
+        if s:
+            parts.append(s)
+        elif 0 < i == len(segments) - 1:
+            parts.append("+")
     modifiers = []
     key = None
     for part in parts:
