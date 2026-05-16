@@ -1,0 +1,87 @@
+"""LifeEventInjectionProvider — per-turn life-event hint + tone injection.
+
+The life-event registry observes the F2 SignalEvent bus and queues
+``surfacing="hint"`` :class:`PatternFiring` objects (job change, exam
+prep, burnout, travel — see ``registry.py``). This provider is the chat
+surfacer for that queue: at the start of every turn it drains the
+pending firings and, for each non-muted firing, contributes a
+``<life-event-hint>`` block to the system prompt carrying the firing's
+``hint_text`` plus a per-event tone directive.
+
+Why injection instead of mutating the system prompt directly?
+
+- The base system prompt is FROZEN per session for prefix-cache hits.
+  Mutating it mid-session would invalidate the cache.
+- The InjectionEngine adds text AFTER the cached system prompt every
+  turn; it's the canonical surface for per-turn cross-cutting context.
+
+This mirrors :class:`opencomputer.agent.path_rules_injection.PathGlobRulesProvider`,
+the other ``priority = 60`` per-turn provider.
+"""
+
+from __future__ import annotations
+
+from opencomputer.awareness.life_events.registry import get_global_registry
+from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
+
+#: Per-event tone directive appended after a firing's ``hint_text``. Keys
+#: are ``LifeEventPattern.pattern_id`` values. Patterns with ``surfacing
+#: ="silent"`` (health_event, relationship_shift) never reach the chat
+#: queue, so only the four ``"hint"`` patterns are mapped. A firing whose
+#: ``pattern_id`` is absent here still surfaces its hint — just with no
+#: directive line.
+_TONE_DIRECTIVES: dict[str, str] = {
+    "burnout": "Respond gently and concisely; do not pile on tasks.",
+    "exam_prep": (
+        "Keep replies focused and low-friction; the user is time-pressured."
+    ),
+    "job_change": "Be encouraging and practical about the transition.",
+    "travel": "Account for the user being away from their usual setup.",
+}
+
+
+class LifeEventInjectionProvider(DynamicInjectionProvider):
+    """Drain pending life-event ``"hint"`` firings into a system-prompt block.
+
+    Construction takes no arguments — the provider reads the process-wide
+    life-event registry singleton via :func:`get_global_registry`.
+
+    Each turn :meth:`collect` drains every queued firing. Firings whose
+    pattern is muted are dropped: ``LifeEventRegistry.on_event`` already
+    skips muted patterns at queue time, so the queue is normally
+    mute-free, but a firing queued *before* the user muted that pattern
+    (a mute-between-turns race) would still be present — the
+    :meth:`~opencomputer.awareness.life_events.registry.LifeEventRegistry.is_muted`
+    filter defensively catches it.
+    """
+
+    #: Lower runs first per InjectionEngine convention. 60 matches
+    #: :class:`~opencomputer.agent.path_rules_injection.PathGlobRulesProvider`:
+    #: between built-in modes (plan=10, yolo=20, custom 50+) and
+    #: user-added providers (>=100).
+    priority: int = 60
+
+    @property
+    def provider_id(self) -> str:
+        return "life_event_hint"
+
+    async def collect(self, ctx: InjectionContext) -> str | None:
+        """Return a ``<life-event-hint>`` block for this turn's firings.
+
+        ``ctx`` is unused — the firings come from the registry queue, not
+        the message history — but the argument is required by the ABC.
+        """
+        reg = get_global_registry()
+        firings = [f for f in reg.drain_pending() if not reg.is_muted(f.pattern_id)]
+        if not firings:
+            return None
+        lines: list[str] = []
+        for firing in firings:
+            lines.append(firing.hint_text)
+            directive = _TONE_DIRECTIVES.get(firing.pattern_id)
+            if directive:
+                lines.append(directive)
+        return "<life-event-hint>\n" + "\n".join(lines) + "\n</life-event-hint>"
+
+
+__all__ = ["LifeEventInjectionProvider"]
