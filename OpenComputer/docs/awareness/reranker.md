@@ -27,6 +27,11 @@ bm25 0.20, drift 0.0. The reranker **renormalises** the active weight set,
 so the composite is always in `[0, 1]` regardless of the configured weights
 or whether BM25 is active.
 
+**Overriding the weights.** Drop a `reranker_weights.json` into the profile
+home — e.g. `{"kind": 0.5, "bm25": 0.3}` — to override any subset; unset keys
+keep their default. A missing or corrupt file falls back to defaults.
+`oc awareness debug` prints the weights currently in effect.
+
 ## BM25 — the session-relevance term
 
 Pure-Python, no external dependency. The "query" is the session's opening
@@ -92,10 +97,9 @@ Raise `w_drift` to enable it once that signal exists.
 
 ## Deferred
 
-- **Config-yaml weight overrides.** The reranker ships with the
-  `RerankWeights` defaults; a `<profile>/config.yaml` override path is
-  deferred. `eval-ranker` and `explain --session` make the current ranking
-  inspectable in the meantime.
 - **A contradiction detector** to feed the drift term — `w_drift` stays 0
-  until one exists.
+  until something writes `contradicts` edges between live facts.
 - **Embedding-based relevance.** BM25 is the v1 relevance signal.
+- **Gradient weight auto-tuning.** `eval-ranker` compares rankings and
+  `reranker_weights.json` lets you tune by hand; an auto-tuner that adjusts
+  weights from thumbs-up/down feedback is v2.

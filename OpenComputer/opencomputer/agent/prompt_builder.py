@@ -492,7 +492,9 @@ class PromptBuilder:
         per session and freezes it onto the base prompt — re-ranking
         mid-session would invalidate the prefix cache.
         """
+        from opencomputer.agent.config import _home
         from opencomputer.user_model.reranker import (
+            RerankWeights,
             SessionContext,
             UserFactsReranker,
         )
@@ -529,7 +531,7 @@ class PromptBuilder:
             drift_scores = {
                 n.node_id: s.node_drift_score(n.node_id) for n in nodes
             }
-        ranked = UserFactsReranker().score(
+        ranked = UserFactsReranker(RerankWeights.load(_home())).score(
             nodes,
             ctx,
             recency_scores=recency_scores,

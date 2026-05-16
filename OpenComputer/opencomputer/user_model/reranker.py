@@ -13,11 +13,13 @@ output is cached per session by the caller. See
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -138,6 +140,41 @@ class RerankWeights:
     recency: float = 0.20
     bm25: float = 0.20
     drift: float = 0.0
+
+    @classmethod
+    def load(cls, home_dir: Path) -> RerankWeights:
+        """Load weights from ``<home_dir>/reranker_weights.json``, or defaults.
+
+        A profile-scoped JSON override, mirroring the other per-profile
+        knob files (``feature_flags.json``, ``cost_guard.json``, …).
+        Missing file → defaults; missing keys → per-field defaults;
+        corrupt JSON or a non-dict payload → defaults. Never raises — a
+        bad weights file must not break prompt assembly.
+        """
+        path = home_dir / "reranker_weights.json"
+        if not path.exists():
+            return cls()
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return cls()
+        if not isinstance(data, dict):
+            return cls()
+        d = cls()
+
+        def _f(key: str, default: float) -> float:
+            try:
+                return float(data.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        return cls(
+            kind=_f("kind", d.kind),
+            confidence=_f("confidence", d.confidence),
+            recency=_f("recency", d.recency),
+            bm25=_f("bm25", d.bm25),
+            drift=_f("drift", d.drift),
+        )
 
 
 @dataclass(frozen=True, slots=True)

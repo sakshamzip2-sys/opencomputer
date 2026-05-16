@@ -180,3 +180,30 @@ def test_default_weights_keep_drift_inert() -> None:
         drift_scores={a.node_id: 0.99, b.node_id: 0.0},
     )
     assert [s.score for s in without] == [s.score for s in with_drift]
+
+
+# ─── config-driven weights ────────────────────────────────────────────
+
+
+def test_rerank_weights_load_defaults_when_no_file(tmp_path) -> None:
+    """No reranker_weights.json → the built-in defaults."""
+    assert RerankWeights.load(tmp_path) == RerankWeights()
+
+
+def test_rerank_weights_load_from_json(tmp_path) -> None:
+    """A profile reranker_weights.json overrides; unset keys keep defaults."""
+    import json
+
+    (tmp_path / "reranker_weights.json").write_text(
+        json.dumps({"bm25": 0.5, "kind": 0.1})
+    )
+    w = RerankWeights.load(tmp_path)
+    assert w.bm25 == 0.5
+    assert w.kind == 0.1
+    assert w.confidence == RerankWeights().confidence  # unset → default
+
+
+def test_rerank_weights_load_tolerates_corrupt_file(tmp_path) -> None:
+    """A corrupt or non-dict weights file falls back to defaults."""
+    (tmp_path / "reranker_weights.json").write_text("{not valid json")
+    assert RerankWeights.load(tmp_path) == RerankWeights()

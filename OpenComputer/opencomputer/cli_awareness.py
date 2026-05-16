@@ -28,6 +28,7 @@ from rich.console import Console
 from rich.table import Table
 
 if TYPE_CHECKING:
+    from opencomputer.user_model.reranker import RerankWeights
     from opencomputer.user_model.store import UserModelStore
     from plugin_sdk.user_model import Node
 
@@ -243,6 +244,19 @@ def _rank_for_review(nodes: list[Node]) -> list[Node]:
     )
 
 
+def _reranker_weights() -> RerankWeights:
+    """Profile-configured reranker weights — defaults if unconfigured.
+
+    Reads ``<profile>/reranker_weights.json`` so ``review`` / ``explain
+    --session`` / ``eval-ranker`` / ``debug`` rank with the same weights
+    the prompt uses.
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.user_model.reranker import RerankWeights
+
+    return RerankWeights.load(_home())
+
+
 @awareness_app.command("review")
 def review(
     show_all: Annotated[
@@ -407,7 +421,7 @@ def _explain_session(console: Console, query: str | None) -> None:
             n.node_id: store.node_drift_score(n.node_id) for n in nodes
         }
     ctx = SessionContext(recent_messages=(query,) if query else ())
-    scored = UserFactsReranker().score(
+    scored = UserFactsReranker(_reranker_weights()).score(
         nodes, ctx, recency_scores=recency_scores, drift_scores=drift_scores
     )[:20]
     label = f"query={query!r}" if query else "context-free"
@@ -819,7 +833,10 @@ def eval_ranker(
         nodes, key=lambda n: (_KIND_ORDER.get(n.kind, 99), -n.confidence)
     )[:top_k]
     ctx = SessionContext(recent_messages=(query,) if query else ())
-    new = [sf.node for sf in UserFactsReranker().score(nodes, ctx)[:top_k]]
+    new = [
+        sf.node
+        for sf in UserFactsReranker(_reranker_weights()).score(nodes, ctx)[:top_k]
+    ]
 
     label = f"query={query!r}" if query else "context-free"
     table = Table(title=f"ranker comparison — top {top_k} ({label})")
@@ -858,7 +875,6 @@ def debug(
     breakdowns.
     """
     from opencomputer.user_model.reranker import (
-        RerankWeights,
         SessionContext,
         UserFactsReranker,
     )
@@ -888,11 +904,11 @@ def debug(
             n.node_id: store.node_drift_score(n.node_id) for n in live
         }
     ctx = SessionContext(recent_messages=(query,) if query else ())
-    scored = UserFactsReranker().score(
+    scored = UserFactsReranker(_reranker_weights()).score(
         live, ctx, recency_scores=recency_scores, drift_scores=drift_scores
     )[:20]
 
-    w = RerankWeights()
+    w = _reranker_weights()
     payload = {
         "query": query,
         "graph": {
