@@ -727,6 +727,35 @@ def _register_builtin_tools() -> None:
     registry.register(SystemKeystrokeTool())
     registry.register(SystemNotifyTool())
 
+    # M3 build-chunk 3 — Microsoft Graph tools (send mail / list calendar /
+    # list OneDrive files). Registered ONLY when the user has run
+    # ``oc auth login graph`` (a Graph token is stored): un-registered they
+    # are absent, so the agent never reaches for a tool that could only ever
+    # return "not authenticated". This is the survey's recommended
+    # "zero behavior change until opt-in" gating. ``execute`` ALSO re-checks
+    # ``tool_available()`` (defence in depth — covers a logout mid-session).
+    # ``has_stored_token()`` is a cheap local JSON read; a corrupt store is
+    # tolerated (treated as "no token") so it can never break registration.
+    try:
+        from opencomputer.tools._graph_common import tool_available
+
+        if tool_available():
+            from opencomputer.tools.graph_calendar import GraphListCalendarTool
+            from opencomputer.tools.graph_drive import GraphListDriveFilesTool
+            from opencomputer.tools.graph_mail import GraphSendMailTool
+
+            registry.register(GraphSendMailTool())
+            registry.register(GraphListCalendarTool())
+            registry.register(GraphListDriveFilesTool())
+    except Exception:  # noqa: BLE001
+        # A failure deciding whether to register the Graph tools must never
+        # break the rest of the bundle — the other ~50 tools must still load.
+        logging.getLogger("opencomputer.cli").warning(
+            "Could not evaluate Microsoft Graph tool registration; "
+            "Graph tools will be absent this run",
+            exc_info=True,
+        )
+
 
 def _resolve_plugin_filter():
     """Resolve the active ``enabled_ids`` filter for plugin loading.
