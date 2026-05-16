@@ -17,12 +17,25 @@ Why injection instead of mutating the system prompt directly?
 
 This mirrors :class:`opencomputer.agent.path_rules_injection.PathGlobRulesProvider`,
 the other ``priority = 60`` per-turn provider.
+
+Surfacing a hint also schedules its proactive follow-up: for each firing
+:meth:`collect` surfaces, it calls
+:func:`opencomputer.awareness.life_events.actions.schedule_followup`, which
+creates a one-shot "gentle check-in" cron N days out and records the
+``cron_id`` in ``life_event_state.json``. That call is fail-open — a cron
+backend failure must never break prompt assembly, so it is wrapped in a
+``try`` and ``collect`` still returns the ``<life-event-hint>`` block.
 """
 
 from __future__ import annotations
 
+import logging
+
+from opencomputer.awareness.life_events import actions
 from opencomputer.awareness.life_events.registry import get_global_registry
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
+
+_log = logging.getLogger(__name__)
 
 #: Per-event tone directive appended after a firing's ``hint_text``. Keys
 #: are ``LifeEventPattern.pattern_id`` values. Patterns with ``surfacing
@@ -68,8 +81,23 @@ class LifeEventInjectionProvider(DynamicInjectionProvider):
     async def collect(self, ctx: InjectionContext) -> str | None:
         """Return a ``<life-event-hint>`` block for this turn's firings.
 
-        ``ctx`` is unused — the firings come from the registry queue, not
-        the message history — but the argument is required by the ABC.
+        Each non-muted firing also gets its proactive follow-up scheduled
+        via :func:`actions.schedule_followup` — a one-shot check-in cron N
+        days out, recorded in ``life_event_state.json``. ``schedule_followup``
+        dedups internally (a re-fire while a follow-up is still active never
+        schedules a second cron) and records the ``cron_id`` itself, so this
+        method does not pre-check state or call ``mark_surfaced`` directly.
+
+        Cron scheduling is **fail-open**: a backend failure is caught and
+        logged at WARNING; ``collect`` still returns the hint block so a
+        cron outage never blocks prompt assembly.
+
+        ``ctx`` carries no active-channel coordinates —
+        :class:`~plugin_sdk.runtime_context.RuntimeContext` exposes mode
+        flags only, not the per-request ``platform``/``chat_id``/``thread_id``
+        (those live on the separate ``RequestContext``, not surfaced through
+        ``InjectionContext``). So ``origin=None`` is passed: the check-in
+        cron is still created, just without channel targeting.
         """
         reg = get_global_registry()
         firings = [f for f in reg.drain_pending() if not reg.is_muted(f.pattern_id)]
@@ -81,6 +109,18 @@ class LifeEventInjectionProvider(DynamicInjectionProvider):
             directive = _TONE_DIRECTIVES.get(firing.pattern_id)
             if directive:
                 lines.append(directive)
+            # Schedule the proactive follow-up cron for this surfaced hint.
+            # Fail-open: a cron failure must NOT break prompt assembly — the
+            # <life-event-hint> block is still returned below.
+            try:
+                actions.schedule_followup(firing, origin=None)
+            except Exception:  # noqa: BLE001 - fail-open; cron outage isolated
+                _log.warning(
+                    "failed to schedule life-event follow-up cron for %s; "
+                    "surfacing the hint anyway",
+                    firing.pattern_id,
+                    exc_info=True,
+                )
         return "<life-event-hint>\n" + "\n".join(lines) + "\n</life-event-hint>"
 
 
