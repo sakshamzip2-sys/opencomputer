@@ -98,6 +98,12 @@ class LifeEventInjectionProvider(DynamicInjectionProvider):
         (those live on the separate ``RequestContext``, not surfaced through
         ``InjectionContext``). So ``origin=None`` is passed: the check-in
         cron is still created, just without channel targeting.
+
+        ``ctx.turn_index`` (the 1-indexed turn this prompt is being
+        assembled for) IS threaded through as ``surfaced_turn`` — the
+        STOP-hook classifier compares the current turn against it so the
+        surfacing turn's own STOP is skipped and only the user's NEXT
+        reply is judged.
         """
         reg = get_global_registry()
         firings = [f for f in reg.drain_pending() if not reg.is_muted(f.pattern_id)]
@@ -110,10 +116,16 @@ class LifeEventInjectionProvider(DynamicInjectionProvider):
             if directive:
                 lines.append(directive)
             # Schedule the proactive follow-up cron for this surfaced hint.
+            # ``ctx.turn_index`` is threaded through so state records the
+            # turn the hint surfaced on — the STOP-hook classifier needs it
+            # to skip the surfacing turn's own STOP and judge only the
+            # user's NEXT reply.
             # Fail-open: a cron failure must NOT break prompt assembly — the
             # <life-event-hint> block is still returned below.
             try:
-                actions.schedule_followup(firing, origin=None)
+                actions.schedule_followup(
+                    firing, origin=None, surfaced_turn=ctx.turn_index
+                )
             except Exception:  # noqa: BLE001 - fail-open; cron outage isolated
                 _log.warning(
                     "failed to schedule life-event follow-up cron for %s; "

@@ -81,6 +81,7 @@ def schedule_followup(
     firing: PatternFiring,
     *,
     origin: Mapping[str, Any] | None = None,
+    surfaced_turn: int = 0,
 ) -> None:
     """Schedule a one-shot gentle check-in cron for a fired life-event hint.
 
@@ -100,6 +101,11 @@ def schedule_followup(
             (``platform`` / ``chat_id`` / ``thread_id``). When supplied,
             the check-in is delivered back to that chat; when ``None`` the
             cron is created without channel targeting.
+        surfaced_turn: The 1-indexed turn number the hint surfaced on.
+            Threaded straight into :func:`state.mark_surfaced` so the
+            STOP-hook classifier can skip the surfacing turn's own STOP.
+            Optional (defaults to ``0``) — callers that don't have a turn
+            index keep working; ``0`` means "always judge the next reply".
     """
     pattern_id = firing.pattern_id
 
@@ -153,7 +159,7 @@ def schedule_followup(
     )
 
     cron_id = job["id"]
-    state.mark_surfaced(pattern_id, cron_id)
+    state.mark_surfaced(pattern_id, cron_id, surfaced_turn)
     _log.info(
         "scheduled life-event check-in for %s in %dd (cron %s)",
         pattern_id,

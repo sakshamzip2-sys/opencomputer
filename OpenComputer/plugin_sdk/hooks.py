@@ -247,6 +247,13 @@ class HookContext:
     #: for FILE_CHANGED. ``change_kind`` carries the verb.
     file_path: str | None = None
     change_kind: str | None = None  # "created" | "modified" | "deleted"
+    #: 1-indexed turn number for the turn this event belongs to — populated
+    #: for STOP (and any future per-turn event that needs it). Mirrors
+    #: :attr:`plugin_sdk.injection.InjectionContext.turn_index` so a STOP
+    #: handler can correlate against the turn an injection provider ran on.
+    #: Default ``0`` is the "caller did not thread the counter" sentinel,
+    #: keeping every existing HookContext construction valid.
+    turn_index: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,7 +10,28 @@ that follow-up is still wanted:
 - Anything else — ambiguous, off-topic, empty   → ``"unclear"``  (keep the cron)
 
 ``classify_response`` is a **pure function** — no I/O, no state, no LLM. It is
-called by the STOP hook (Task 7), which owns the cron-cancel side effect.
+called by :func:`on_stop_hook`, the post-turn STOP-hook orchestrator, which
+owns the cron-cancel side effect.
+
+The surfacing-turn timing problem
+---------------------------------
+A life-event hint is injected by ``LifeEventInjectionProvider.collect()`` at
+turn N. The agent's turn-N reply acknowledges the life event; the user
+responds to *that* at turn **N+1**. But the STOP hook fires at the end of
+EVERY turn — including turn N's own.
+
+So :func:`on_stop_hook` must NOT classify the surfacing turn's own message:
+that message was typed by the user *before* they saw any hint-influenced
+reply. Classifying it would clear ``verdict_pending`` before the real
+reply-to-the-hint is ever judged — and a coincidental refutation phrase in
+that pre-hint message could wrongly cancel the cron.
+
+The fix is a turn-index comparison. ``schedule_followup`` records the turn
+the hint surfaced on (``surfaced_turn`` in ``life_event_state.json``); the
+STOP :class:`~plugin_sdk.hooks.HookContext` carries the *current* turn index.
+:func:`on_stop_hook` classifies a verdict-pending pattern ONLY when the
+current turn is STRICTLY LATER than that pattern's ``surfaced_turn`` — i.e.
+on turn N+1 or later, never on turn N.
 
 v1 is deliberately heuristic (lowercased substring matching). An LLM-backed
 classifier — which would actually *infer* sentiment rather than pattern-match
@@ -38,7 +59,11 @@ negator is part of the phrase.
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal
+
+from opencomputer.awareness.life_events import actions, state
+from plugin_sdk.hooks import HookContext
 
 Verdict = Literal["refuted", "confirmed", "unclear"]
 
@@ -282,3 +307,159 @@ def classify_response(user_text: str, pattern_id: str) -> Verdict:
     if confirmed:
         return "confirmed"
     return "unclear"
+
+
+# ── STOP-hook orchestrator ─────────────────────────────────────────────
+
+_log = logging.getLogger(__name__)
+
+
+def _last_user_text(ctx: HookContext) -> str:
+    """Return the most recent user message text from a STOP HookContext.
+
+    The STOP :class:`HookContext` carries ``messages`` — the conversation
+    history for the turn. The reply :func:`on_stop_hook` must judge is the
+    last ``role == "user"`` message in that list. Returns ``""`` when there
+    is no message history or no user message (the classifier treats an
+    empty string as ``"unclear"``).
+    """
+    messages = ctx.messages or []
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) == "user":
+            content = getattr(msg, "content", "")
+            return content if isinstance(content, str) else ""
+    return ""
+
+
+async def on_stop_hook(ctx: HookContext) -> None:
+    """Post-turn STOP-hook handler — judge the reply to a life-event hint.
+
+    Registered for :data:`~plugin_sdk.hooks.HookEvent.STOP`, so it fires at
+    the end of every turn. For each verdict-pending life-event pattern it
+    classifies the user's most recent reply and self-corrects the follow-up
+    cron:
+
+    - A **refuting** reply → :func:`actions.cancel_followup` (delete the
+      cron + clear the entry): the user said they're fine, drop the tooth.
+    - A **confirming** / **unclear** reply →
+      :func:`state.clear_verdict_pending` (keep the cron + entry, just
+      clear the flag): the reply has been judged, the gentle check-in
+      still fires.
+
+    The surfacing turn is SKIPPED. ``schedule_followup`` records the turn
+    the hint surfaced on (``surfaced_turn``); this handler classifies a
+    pattern ONLY when ``ctx.turn_index`` is strictly later than that — the
+    user's reply to a hint lands on the turn *after* the one it surfaced
+    on, never the same turn. A missing/zero ``surfaced_turn`` (pre-Task-7
+    entries) reads as turn 0, so a legacy entry's next reply is still
+    judged rather than ignored forever.
+
+    Fail-open: the whole body is wrapped in ``try``/``except``. A classifier
+    or state error must NEVER wedge the turn — it is logged at WARNING and
+    the cron is LEFT untouched (an error must never mis-cancel a wanted
+    check-in). Returns ``None`` always — STOP handlers are observers.
+    """
+    try:
+        pending = state.verdict_pending_patterns()
+        if not pending:
+            return  # common case — most turns have nothing pending
+
+        current_turn = ctx.turn_index
+        full_state = state.load_state()
+
+        for pattern_id in pending:
+            entry = full_state.get(pattern_id)
+            surfaced_turn = (
+                int(entry.get("surfaced_turn", 0))
+                if isinstance(entry, dict)
+                else 0
+            )
+            # Skip the surfacing turn itself — the user has not yet replied
+            # to the hint. Only a STRICTLY LATER turn carries the reply.
+            if current_turn <= surfaced_turn:
+                _log.debug(
+                    "life-event STOP: skipping %s — current turn %s is not "
+                    "past surfaced turn %s (no reply to judge yet)",
+                    pattern_id,
+                    current_turn,
+                    surfaced_turn,
+                )
+                continue
+
+            verdict = classify_response(_last_user_text(ctx), pattern_id)
+            if verdict == "refuted":
+                # The user said they're fine — drop the whole tooth.
+                actions.cancel_followup(pattern_id)
+                _log.info(
+                    "life-event STOP: %s refuted by the user's reply — "
+                    "cancelled the follow-up cron",
+                    pattern_id,
+                )
+            else:
+                # "confirmed" / "unclear" — keep the cron, the reply has
+                # been judged so it is no longer verdict-pending.
+                state.clear_verdict_pending(pattern_id)
+                _log.debug(
+                    "life-event STOP: %s reply classified %s — kept the "
+                    "follow-up cron, cleared verdict_pending",
+                    pattern_id,
+                    verdict,
+                )
+    except Exception:  # noqa: BLE001 — fail-open; never wedge the turn
+        _log.warning(
+            "life-event STOP hook failed; leaving any follow-up crons "
+            "untouched (an error must never mis-cancel a check-in)",
+            exc_info=True,
+        )
+
+
+# Process-wide guard — the hook ``engine`` is a singleton, so the STOP
+# handler must be registered exactly once. ``AgentLoop`` is constructed
+# per session and on every surface (CLI / gateway / wire / webui), so the
+# registration call lives in ``AgentLoop.__init__`` but is idempotent via
+# this flag.
+_STOP_HOOK_REGISTERED: bool = False
+
+
+def register_life_event_stop_hook() -> None:
+    """Register :func:`on_stop_hook` for :data:`HookEvent.STOP`, once.
+
+    Idempotent: a process-wide flag means repeated calls (one per
+    ``AgentLoop`` construction) register the handler exactly once against
+    the singleton hook engine. The handler is fire-and-forget — STOP is a
+    post-turn observer event and :func:`on_stop_hook` never blocks or gates
+    the turn.
+
+    Wrapped in a broad ``try``/``except``: a registration failure must not
+    break ``AgentLoop`` construction — the life-event self-correction
+    feature simply stays dormant.
+    """
+    global _STOP_HOOK_REGISTERED
+    if _STOP_HOOK_REGISTERED:
+        return
+    try:
+        from opencomputer.hooks.engine import engine
+        from plugin_sdk.hooks import HookEvent, HookSpec
+
+        engine.register(
+            HookSpec(
+                event=HookEvent.STOP,
+                handler=on_stop_hook,
+                fire_and_forget=True,
+            )
+        )
+        _STOP_HOOK_REGISTERED = True
+    except Exception:  # noqa: BLE001 — never break AgentLoop construction
+        _log.warning(
+            "failed to register the life-event STOP hook; life-event "
+            "self-correction will be inactive this process",
+            exc_info=True,
+        )
+
+
+__all__ = [
+    "Verdict",
+    "classify_response",
+    "on_stop_hook",
+    "register_life_event_stop_hook",
+]

@@ -9,9 +9,18 @@ the user's next reply. One entry per pattern::
         "firing_ts": <float>,       # when the hint was surfaced
         "cron_id": "<str>",         # the scheduled follow-up's cron job id
         "surfaced": <bool>,         # the hint has been shown
-        "verdict_pending": <bool>   # the user's next reply judges this hint
+        "verdict_pending": <bool>,  # the user's next reply judges this hint
+        "surfaced_turn": <int>      # the turn index the hint surfaced on
       }
     }
+
+``surfaced_turn`` is the 1-indexed turn number on which the hint was
+injected into the prompt. The STOP-hook classifier compares the *current*
+turn against it: only a STOP firing on a turn STRICTLY LATER than
+``surfaced_turn`` judges the reply, because the user's reply to a hint
+necessarily lands on the turn *after* the one the hint surfaced on. A
+missing/zero ``surfaced_turn`` (pre-Task-7 entries) is treated as turn 0
+so the next reply is always judged rather than ignored forever.
 
 The file lives at ``<profile-home>/life_event_state.json`` — sibling of the
 other per-profile knob files (``feature_flags.json``, ``cost_guard.json``,
@@ -99,12 +108,18 @@ def save_state(state: dict) -> None:
 # because per-profile state is written sequentially within one agent loop.
 # A concurrent writer (e.g. gateway + CLI session at once) would need a
 # file lock to avoid lost updates.
-def mark_surfaced(pattern_id: str, cron_id: str) -> None:
+def mark_surfaced(pattern_id: str, cron_id: str, surfaced_turn: int = 0) -> None:
     """Record (or overwrite) a freshly-surfaced life-event hint.
 
     Surfacing a hint ALWAYS makes the user's next reply verdict-pending
     (design spec §4.1), so the new entry carries ``surfaced=True`` and
     ``verdict_pending=True`` with ``firing_ts`` set to the current time.
+
+    ``surfaced_turn`` is the 1-indexed turn number the hint surfaced on.
+    The STOP-hook classifier uses it to skip the surfacing turn's own STOP
+    (see module docstring). It is optional — defaulting to ``0`` — so
+    existing callers and tests that don't thread a turn index keep working;
+    a ``0`` simply means "always judge the next reply".
     """
     state = load_state()
     state[pattern_id] = {
@@ -112,6 +127,7 @@ def mark_surfaced(pattern_id: str, cron_id: str) -> None:
         "cron_id": cron_id,
         "surfaced": True,
         "verdict_pending": True,
+        "surfaced_turn": int(surfaced_turn),
     }
     save_state(state)
 
