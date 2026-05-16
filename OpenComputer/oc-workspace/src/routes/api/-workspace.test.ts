@@ -2,7 +2,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { loadWorkspaceCatalog, saveWorkspaceSelection } from './workspace'
+import { loadWorkspaceCatalog, saveWorkspaceSelection } from '../../server/workspace.server'
 
 const originalEnv = { ...process.env }
 let tempRoot = ''

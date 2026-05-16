@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mergeModelEntries } from './models'
+import { mergeModelEntries } from '../../server/models.server'
 
 describe('mergeModelEntries', () => {
   it('keeps local catalog entries and appends Hermes backend models without duplicates', () => {
