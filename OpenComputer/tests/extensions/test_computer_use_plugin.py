@@ -48,6 +48,10 @@ backend_mod = _load("_cu_test_backend", PLUGIN_DIR / "cu_backend.py")
 sys.modules["cu_backend"] = backend_mod
 schema_mod = _load("_cu_test_schema", PLUGIN_DIR / "cu_schema.py")
 sys.modules["cu_schema"] = schema_mod
+# cu_cua_backend.py imports ``find_cua_driver`` from ``cu_installer`` — alias
+# it before loading the dependent module.
+installer_mod = _load("_cu_test_plugin_installer", PLUGIN_DIR / "cu_installer.py")
+sys.modules["cu_installer"] = installer_mod
 cua_backend_mod = _load(
     "_cu_test_cua_backend", PLUGIN_DIR / "cu_cua_backend.py"
 )
@@ -438,6 +442,24 @@ class TestCuaBackendParsing:
         b = cua_backend_mod.CuaDriverBackend()
         if sys.platform != "darwin":
             assert b.is_available() is False
+
+    def test_binary_available_delegates_to_find_cua_driver(self):
+        """``cua_driver_binary_available`` resolves via ``find_cua_driver`` —
+        so it stays True when the binary is reachable only via the upstream
+        installer's ``~/.local/bin`` symlink, not ``$PATH``."""
+        with patch.object(cua_backend_mod, "find_cua_driver",
+                          return_value="/Users/x/.local/bin/cua-driver"):
+            assert cua_backend_mod.cua_driver_binary_available() is True
+        with patch.object(cua_backend_mod, "find_cua_driver", return_value=None):
+            assert cua_backend_mod.cua_driver_binary_available() is False
+
+    def test_aenter_raises_install_hint_when_binary_unresolvable(self):
+        """The MCP session spawn raises the install-hint error cleanly when
+        ``find_cua_driver`` returns None at spawn time."""
+        b = cua_backend_mod.CuaDriverBackend()
+        with patch.object(cua_backend_mod, "find_cua_driver", return_value=None):
+            with pytest.raises(RuntimeError, match="cua-driver is not installed"):
+                asyncio.run(b._session._aenter())
 
 
 # ---------------------------------------------------------------------------

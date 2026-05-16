@@ -14,7 +14,6 @@ grants cannot be automated — the detail string surfaces the manual steps.
 
 from __future__ import annotations
 
-import shutil
 import sys
 
 from plugin_sdk.doctor import RepairResult
@@ -37,7 +36,9 @@ async def run(fix: bool) -> RepairResult:
             detail="computer-use is macOS only — skipped on this platform.",
         )
 
-    binary = shutil.which("cua-driver")
+    from cu_installer import find_cua_driver  # type: ignore[import-not-found]
+
+    binary = find_cua_driver()
 
     # 2) Missing binary — optionally repair.
     if not binary:
@@ -45,7 +46,7 @@ async def run(fix: bool) -> RepairResult:
             from cu_installer import install_cua_driver  # type: ignore[import-not-found]
 
             installed = install_cua_driver(upgrade=False)
-            if installed and shutil.which("cua-driver"):
+            if installed and find_cua_driver():
                 return RepairResult(
                     id=_DOCTOR_ID,
                     status="pass",

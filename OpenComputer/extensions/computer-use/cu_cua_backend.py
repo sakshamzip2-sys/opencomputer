@@ -24,7 +24,6 @@ import logging
 import os
 import platform
 import re
-import shutil
 import sys
 import threading
 from concurrent.futures import Future
@@ -36,6 +35,7 @@ from cu_backend import (  # type: ignore[import-not-found]
     ComputerUseBackend,
     UIElement,
 )
+from cu_installer import find_cua_driver  # type: ignore[import-not-found]
 
 logger = logging.getLogger("opencomputer.computer_use.cua_backend")
 
@@ -46,7 +46,9 @@ logger = logging.getLogger("opencomputer.computer_use.cua_backend")
 
 PINNED_CUA_DRIVER_VERSION = os.environ.get("OPENCOMPUTER_CUA_DRIVER_VERSION", "0.5.0")
 
-_CUA_DRIVER_CMD = os.environ.get("OPENCOMPUTER_CUA_DRIVER_CMD", "cua-driver")
+# The binary is resolved via ``find_cua_driver()`` (cu_installer.py), which
+# honors the ``OPENCOMPUTER_CUA_DRIVER_CMD`` env override and falls back to
+# the upstream installer's well-known locations when not on ``$PATH``.
 _CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP transport
 
 # Regex to parse list_windows text output lines:
@@ -77,8 +79,14 @@ def _is_arm_mac() -> bool:
 
 
 def cua_driver_binary_available() -> bool:
-    """True if ``cua-driver`` is on $PATH or the env override resolves."""
-    return bool(shutil.which(_CUA_DRIVER_CMD))
+    """True if the ``cua-driver`` binary can be resolved.
+
+    Resolution (via ``find_cua_driver``) honors the
+    ``OPENCOMPUTER_CUA_DRIVER_CMD`` override and the upstream installer's
+    well-known locations — so this stays true even when ``~/.local/bin`` is
+    not yet on ``$PATH`` in the current process.
+    """
+    return find_cua_driver() is not None
 
 
 def cua_driver_install_hint() -> str:
@@ -224,11 +232,12 @@ class _CuaDriverSession:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
-        if not cua_driver_binary_available():
+        binary = find_cua_driver()
+        if binary is None:
             raise RuntimeError(cua_driver_install_hint())
 
         params = StdioServerParameters(
-            command=_CUA_DRIVER_CMD,
+            command=binary,
             args=_CUA_DRIVER_ARGS,
             env={**os.environ},
         )

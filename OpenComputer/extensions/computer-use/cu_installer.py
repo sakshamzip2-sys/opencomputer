@@ -20,9 +20,11 @@ returns ``False`` on other platforms in ``upgrade`` mode.
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import subprocess
+from pathlib import Path
 
 logger = logging.getLogger("opencomputer.computer_use.installer")
 
@@ -49,11 +51,59 @@ def _print_warning(msg: str) -> None:
     print(msg)
 
 
+#: Well-known locations the upstream cua-driver installer writes to. It
+#: symlinks the binary into ``~/.local/bin`` and only APPENDS that dir to
+#: ``~/.zshrc`` — so a process started before the shell was restarted will
+#: not see it on ``$PATH``. The app-bundle path is the symlink's target.
+_LOCAL_BIN_CUA_DRIVER = Path.home() / ".local" / "bin" / "cua-driver"
+_APP_BUNDLE_CUA_DRIVER = Path(
+    "/Applications/CuaDriver.app/Contents/MacOS/cua-driver"
+)
+
+
+def find_cua_driver() -> str | None:
+    """Resolve the ``cua-driver`` binary, returning its path or ``None``.
+
+    Checks, in order:
+
+    1. ``OPENCOMPUTER_CUA_DRIVER_CMD`` — explicit override. An absolute path
+       to an existing file is used as-is; otherwise it is treated as a
+       command name and resolved via ``shutil.which``. If neither resolves,
+       fall through to auto-detection.
+    2. ``shutil.which("cua-driver")`` — already on ``$PATH``.
+    3. ``~/.local/bin/cua-driver`` — the symlink the upstream installer
+       creates (often not yet on ``$PATH`` in the installing process).
+    4. ``/Applications/CuaDriver.app/Contents/MacOS/cua-driver`` — the app
+       bundle binary.
+    """
+    override = os.environ.get("OPENCOMPUTER_CUA_DRIVER_CMD")
+    if override:
+        override_path = Path(override)
+        if override_path.is_absolute() and override_path.is_file():
+            return str(override_path)
+        resolved = shutil.which(override)
+        if resolved:
+            return resolved
+        # Neither form resolved — fall through to auto-detection.
+
+    on_path = shutil.which("cua-driver")
+    if on_path:
+        return on_path
+
+    if _LOCAL_BIN_CUA_DRIVER.is_file():
+        return str(_LOCAL_BIN_CUA_DRIVER)
+
+    if _APP_BUNDLE_CUA_DRIVER.is_file():
+        return str(_APP_BUNDLE_CUA_DRIVER)
+
+    return None
+
+
 def cua_driver_version() -> str:
     """Best-effort ``cua-driver --version``; empty string on any failure."""
     try:
         return subprocess.run(
-            ["cua-driver", "--version"],
+            [find_cua_driver() or "cua-driver", "--version"],
             capture_output=True, text=True, timeout=5,
         ).stdout.strip()
     except Exception:
@@ -72,7 +122,7 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
         _print_info(f"    {label} cua-driver...")
     try:
         result = subprocess.run(INSTALL_CMD, shell=True, timeout=300)
-        if result.returncode == 0 and shutil.which("cua-driver"):
+        if result.returncode == 0 and find_cua_driver():
             if verbose:
                 _print_success("    cua-driver installed.")
                 _print_info("    IMPORTANT — grant macOS permissions now:")
@@ -105,7 +155,7 @@ def install_cua_driver(upgrade: bool = False) -> bool:
         _print_warning("    Computer Use (cua-driver) is macOS-only; skipping.")
         return False
 
-    binary = shutil.which("cua-driver")
+    binary = find_cua_driver()
 
     # Not installed → fresh install path (only when caller asked for it).
     if not binary and not upgrade:
@@ -147,5 +197,6 @@ def install_cua_driver(upgrade: bool = False) -> bool:
 __all__ = [
     "install_cua_driver",
     "cua_driver_version",
+    "find_cua_driver",
     "INSTALL_CMD",
 ]
