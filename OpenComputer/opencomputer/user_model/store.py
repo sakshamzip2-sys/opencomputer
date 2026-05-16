@@ -613,6 +613,40 @@ class UserModelStore:
             return None
         return sum(e.recency_weight for e in incident.values()) / len(incident)
 
+    def node_recency_scores(
+        self, *, max_edges: int = 20_000
+    ) -> dict[str, float]:
+        """Bulk variant of :meth:`node_recency_score` — one query for all.
+
+        Returns ``{node_id: mean recency_weight}`` for every node with at
+        least one incident edge. The per-node method is O(incident
+        edges) and pathological on a large edge table; this does it in a
+        single aggregate pass.
+
+        **Cost guard:** returns an empty dict when the edge table
+        exceeds ``max_edges``. ``build_user_facts`` calls this on the
+        per-session hot path; on an un-collapsed graph (before
+        ``oc awareness migrate`` runs) even the single aggregate is
+        seconds-slow, so callers fall back to ``last_seen_at`` recency
+        instead. ``migrate`` collapses the edge table and restores the
+        edge-recency signal automatically.
+
+        Self-loop edges (none in practice) are counted twice; edgeless
+        nodes are absent from the result.
+        """
+        if self.count_edges() > max_edges:
+            return {}
+        sql = (
+            "SELECT node_id, AVG(rw) FROM ("
+            "  SELECT from_node AS node_id, recency_weight AS rw FROM edges"
+            "  UNION ALL"
+            "  SELECT to_node AS node_id, recency_weight AS rw FROM edges"
+            ") GROUP BY node_id"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return {r[0]: float(r[1]) for r in rows if r[1] is not None}
+
     def node_drift_score(self, node_id: str) -> float:
         """Return a ``[0, 1]`` drift penalty for a node.
 

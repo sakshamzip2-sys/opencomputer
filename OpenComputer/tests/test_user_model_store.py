@@ -375,3 +375,46 @@ def test_node_drift_score_combines_multiple_contradicts(
     drift = store.node_drift_score(target.node_id)
     assert drift == 0.75  # 1 - (1-0.5)*(1-0.5)
     assert 0.0 <= drift <= 1.0
+
+
+def test_node_recency_scores_bulk_matches_per_node(tmp_path: Path) -> None:
+    """The bulk accessor returns the same means as per-node, in one query."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    edgeless = store.upsert_node(kind="identity", value="name: C")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           recency_weight=0.5))
+    store.insert_edge(Edge(edge_id="e2", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           recency_weight=1.0))
+    bulk = store.node_recency_scores()
+    assert bulk[a.node_id] == store.node_recency_score(a.node_id)
+    assert bulk[b.node_id] == store.node_recency_score(b.node_id)
+    assert bulk[a.node_id] == 0.75
+    # An edgeless node is absent from the bulk result.
+    assert edgeless.node_id not in bulk
+
+
+def test_node_recency_scores_bulk_empty_graph(tmp_path: Path) -> None:
+    """No edges → empty dict, no crash."""
+    store = _store(tmp_path)
+    assert store.node_recency_scores() == {}
+
+
+def test_node_recency_scores_cost_guard_skips_huge_edge_table(
+    tmp_path: Path,
+) -> None:
+    """Above max_edges the bulk aggregate is skipped — returns {}."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id))
+    store.insert_edge(Edge(edge_id="e2", kind="asserts",
+                           from_node=b.node_id, to_node=a.node_id))
+    # 2 edges > max_edges=1 → cost guard trips, empty result.
+    assert store.node_recency_scores(max_edges=1) == {}
+    # Under the budget it computes normally.
+    assert store.node_recency_scores(max_edges=100) != {}

@@ -400,12 +400,12 @@ def _explain_session(console: Console, query: str | None) -> None:
     if not nodes:
         console.print("[dim]no facts to rank[/dim]")
         return
-    recency_scores: dict[str, float] = {}
-    for n in nodes:
-        rs = store.node_recency_score(n.node_id)
-        if rs is not None:
-            recency_scores[n.node_id] = rs
-    drift_scores = {n.node_id: store.node_drift_score(n.node_id) for n in nodes}
+    recency_scores = store.node_recency_scores()  # one query, all nodes
+    drift_scores: dict[str, float] = {}
+    if store.count_edges(kinds=("contradicts",)) > 0:
+        drift_scores = {
+            n.node_id: store.node_drift_score(n.node_id) for n in nodes
+        }
     ctx = SessionContext(recent_messages=(query,) if query else ())
     scored = UserFactsReranker().score(
         nodes, ctx, recency_scores=recency_scores, drift_scores=drift_scores
@@ -881,12 +881,12 @@ def debug(
         if not _node_is_deleted(n) and not n.metadata.get("needs_review")
     ]
 
-    recency_scores: dict[str, float] = {}
-    for n in live:
-        rs = store.node_recency_score(n.node_id)
-        if rs is not None:
-            recency_scores[n.node_id] = rs
-    drift_scores = {n.node_id: store.node_drift_score(n.node_id) for n in live}
+    recency_scores = store.node_recency_scores()  # one query, all nodes
+    drift_scores: dict[str, float] = {}
+    if store.count_edges(kinds=("contradicts",)) > 0:
+        drift_scores = {
+            n.node_id: store.node_drift_score(n.node_id) for n in live
+        }
     ctx = SessionContext(recent_messages=(query,) if query else ())
     scored = UserFactsReranker().score(
         live, ctx, recency_scores=recency_scores, drift_scores=drift_scores
