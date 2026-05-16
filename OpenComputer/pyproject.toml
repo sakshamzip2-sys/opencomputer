@@ -120,6 +120,11 @@ deepening = [
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
+  # Per-test timeout guard (2026-05-17): a hung test in the ~15k-test suite
+  # otherwise burns the full 6h GitHub Actions job ceiling. With this, a hang
+  # fails the run in minutes (see the --timeout addopts below) and prints a
+  # traceback that names the offending test.
+  "pytest-timeout>=2.3",
   "ruff>=0.7",
   "black>=24.0",
   "mypy>=1.11",
@@ -295,7 +300,13 @@ testpaths = ["tests"]
 # suite because the user's ANTHROPIC_API_KEY was a Claude-Router proxy
 # key not valid for direct Anthropic — the test should never have been
 # collected in the first place.
-addopts = "-m 'not benchmark and not integration'"
+# Per-test timeout (2026-05-17): no individual test runs anywhere near 600s
+# — the whole suite finishes in ~8 min. On a hang, pytest-timeout dumps every
+# thread's traceback (naming the stuck test) and the `thread` method
+# hard-stops the process, so CI fails in minutes instead of burning the 6-hour
+# Actions job ceiling. `thread` (not `signal`) is used because it terminates
+# even a C-extension-level deadlock that SIGALRM cannot interrupt.
+addopts = "-m 'not benchmark and not integration' --timeout=600 --timeout-method=thread"
 markers = [
   "benchmark: opt-in slow benchmark tests requiring a live LLM provider (run via `pytest -m benchmark`)",
   "integration: opt-in PTY-driven integration smoke tests that spawn the real `oc` CLI binary (run via `pytest -m integration`). Requires `oc` on PATH and a usable tty / pty subsystem.",
