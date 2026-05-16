@@ -1,15 +1,22 @@
 """T8 — `oc auth` CLI subcommand group.
 
-Hermes-doc parity. Four subcommands:
+Hermes-doc parity. Subcommands:
 
 * ``list [provider]``      — show pool entries (masked, table format)
 * ``add <provider>``       — append key (--key INLINE | --key-env ENV)
 * ``remove <provider> <i>``— remove by 0-based index
 * ``reset <provider>``     — write a force-reset marker so the running
                               pool clears all cooldowns on next refresh
+* ``login <provider>``     — run an OAuth login flow for an OAuth provider
+                              (currently ``graph`` — Microsoft Graph
+                              device-code flow). Net-new in Milestone 3:
+                              no ``oc auth login`` subcommand existed before.
+* ``logout <provider>``    — delete a stored OAuth token.
 
-State lives in ``<OPENCOMPUTER_HOME>/config.yaml`` under the existing
-``credential_pools:`` key. Reset markers under ``credential_pool_reset_at:``.
+Credential-pool state lives in ``<OPENCOMPUTER_HOME>/config.yaml`` under the
+existing ``credential_pools:`` key (reset markers under
+``credential_pool_reset_at:``). OAuth tokens are a separate concern — they
+live in ``auth_tokens.json`` via :mod:`opencomputer.auth.token_store`.
 """
 
 from __future__ import annotations
@@ -183,3 +190,102 @@ def reset(
         f"[green]Reset[/green] cooldowns for {provider}. "
         "Running processes pick up on next refresh."
     )
+
+
+# =============================================================================
+# OAuth login / logout
+# =============================================================================
+#
+# These are net-new in Milestone 3: before M3 there was no ``oc auth login``
+# subcommand anywhere (``oc auth`` was a credential-pool manager only, and
+# ``oc login`` is a separate API-key-into-.env tool). The first — and so far
+# only — OAuth provider wired here is ``graph`` (Microsoft Graph), which uses
+# the device-code flow from :mod:`opencomputer.auth.graph_oauth`.
+
+#: OAuth providers ``oc auth login`` / ``oc auth logout`` understand.
+_OAUTH_PROVIDERS = ("graph",)
+
+
+def _login_graph() -> None:
+    """Run the Microsoft Graph device-code login and persist the token."""
+    from opencomputer.auth.graph_oauth import (
+        GraphOAuthError,
+        begin_device_login,
+        complete_device_login,
+        stored_account_summary,
+    )
+
+    try:
+        prompt = begin_device_login()
+    except GraphOAuthError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    # Microsoft does not pre-fill the code into the URL — show the code on
+    # its own line so the user knows to type it.
+    console.print("\n[bold]Sign in to Microsoft Graph[/bold]")
+    console.print(
+        f"  1. Open [cyan]{prompt.verification_uri}[/cyan] in a browser."
+    )
+    console.print(f"  2. Enter the code: [bold yellow]{prompt.user_code}[/bold yellow]")
+    console.print(
+        f"  3. Approve the requested permissions "
+        f"(code expires in ~{prompt.expires_in // 60} min).\n"
+    )
+    console.print("[dim]Waiting for you to finish signing in…[/dim]")
+
+    try:
+        complete_device_login(prompt)
+    except GraphOAuthError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    summary = stored_account_summary()
+    detail = f" ({summary})" if summary else ""
+    console.print(f"[green]Signed in to Microsoft Graph.[/green]{detail}")
+
+
+@auth_app.command("login")
+def login(
+    provider: str = typer.Argument(
+        ..., help="OAuth provider to sign in to (e.g. graph)"
+    ),
+) -> None:
+    """Run an OAuth login flow for an OAuth-based provider.
+
+    ``oc auth login graph`` runs the Microsoft Graph device-code flow: it
+    prints a verification URL + one-time code, polls until you finish signing
+    in, then stores the resulting token in ``auth_tokens.json``.
+    """
+    key = provider.strip().lower()
+    if key == "graph":
+        _login_graph()
+        return
+    console.print(
+        f"[red]Unknown OAuth provider '{provider}'.[/red] "
+        f"Supported: {', '.join(_OAUTH_PROVIDERS)}."
+    )
+    raise typer.Exit(code=2)
+
+
+@auth_app.command("logout")
+def logout(
+    provider: str = typer.Argument(
+        ..., help="OAuth provider to sign out of (e.g. graph)"
+    ),
+) -> None:
+    """Delete a stored OAuth token (sign out of an OAuth provider)."""
+    key = provider.strip().lower()
+    if key == "graph":
+        from opencomputer.auth.graph_oauth import logout as graph_logout
+
+        if graph_logout():
+            console.print("[green]Signed out of Microsoft Graph.[/green]")
+        else:
+            console.print("[dim]Not signed in to Microsoft Graph — nothing to do.[/dim]")
+        return
+    console.print(
+        f"[red]Unknown OAuth provider '{provider}'.[/red] "
+        f"Supported: {', '.join(_OAUTH_PROVIDERS)}."
+    )
+    raise typer.Exit(code=2)
