@@ -63,6 +63,12 @@ class _Frame:
     text_window: deque[str] = field(default_factory=deque)
     consecutive_flags: int = 0
     last_warning: str = ""
+    #: True once a trip for the *current* must-stop episode has been
+    #: recorded to the audit log. Reset to False whenever a non-flagging
+    #: record clears ``consecutive_flags``. Lets observe-mode log exactly
+    #: one row per trip episode instead of one per iteration while the
+    #: agent keeps repeating (``must_stop`` stays True until a reset).
+    trip_recorded: bool = False
 
     def __post_init__(self) -> None:
         # ``maxlen`` can't be set via field(default_factory=...) without an
@@ -94,9 +100,12 @@ class LoopDetector:
         *,
         max_tool_repeats: int = 3,
         max_text_repeats: int = 2,
-        window_size: int = 10,
-        max_consecutive_flags: int = 2,
+        window_size: int = 8,
+        max_consecutive_flags: int = 1,
     ) -> None:
+        # Defaults match :class:`RepetitionDetectorConfig` and the M1 spec:
+        # an 8-call window, flag on the 3rd identical tool call, ``must_stop``
+        # on the first flag — so the 3rd identical call halts (enforce mode).
         self.max_tool_repeats = max_tool_repeats
         self.max_text_repeats = max_text_repeats
         self.window_size = window_size
@@ -137,6 +146,7 @@ class LoopDetector:
         frame.text_window.clear()
         frame.consecutive_flags = 0
         frame.last_warning = ""
+        frame.trip_recorded = False
 
     # ─── recording (the hot path called from the loop) ─────────────────
 
@@ -169,6 +179,7 @@ class LoopDetector:
         else:
             frame.consecutive_flags = 0
             frame.last_warning = ""
+            frame.trip_recorded = False
 
     def record_assistant_text(
         self, session_id: str, depth: int, text_hash: str
@@ -195,6 +206,7 @@ class LoopDetector:
         else:
             frame.consecutive_flags = 0
             frame.last_warning = ""
+            frame.trip_recorded = False
 
     # ─── queries ───────────────────────────────────────────────────────
 
@@ -215,14 +227,37 @@ class LoopDetector:
     def must_stop(self, session_id: str, depth: int) -> bool:
         """True once consecutive flags reach the configured threshold.
 
-        The agent loop checks this after every ``record_*`` call and
-        raises :class:`LoopAbortError` so the caller can surface a
-        single, clean stop signal rather than letting the model spin.
+        The agent loop checks this after every ``record_*`` call. In
+        ``enforce`` mode it raises :class:`LoopAbortError` so the caller
+        can surface a single, clean stop signal rather than letting the
+        model spin; in ``observe`` mode it only records the trip.
         """
         frame = self._frames.get((session_id, depth))
         if frame is None:
             return False
         return frame.consecutive_flags >= self.max_consecutive_flags
+
+    def claim_trip(self, session_id: str, depth: int) -> bool:
+        """Return True exactly once per must-stop episode, else False.
+
+        The agent loop calls this when :meth:`must_stop` is True to decide
+        whether to write a row to the ``tool_loop_trips`` audit table.
+        Because ``must_stop`` stays True on every subsequent record until
+        a non-flagging call resets the streak, a naive "log on must_stop"
+        would write one audit row per iteration in ``observe`` mode (where
+        the agent is not halted and keeps repeating). This method latches
+        a per-frame ``trip_recorded`` flag so only the FIRST call in a
+        trip episode returns True; the flag clears when the streak resets.
+
+        Absent frame → False (nothing to claim).
+        """
+        frame = self._frames.get((session_id, depth))
+        if frame is None:
+            return False
+        if frame.trip_recorded:
+            return False
+        frame.trip_recorded = True
+        return True
 
 
 def record_loop_trip(
@@ -233,33 +268,35 @@ def record_loop_trip(
     kind: str,
     detail: str,
 ) -> None:
-    """Append a loop-abort event to the ``tool_loop_trips`` table of audit.db.
+    """Append a loop trip to the ``tool_loop_trips`` table of audit.db.
 
-    Called by the agent loop when :meth:`LoopDetector.must_stop` fires and a
-    :class:`LoopAbortError` is about to be raised. ``kind`` is ``"tool"`` or
-    ``"text"`` — which repetition window tripped; ``detail`` is the
-    human-readable warning text.
+    Called by the agent loop whenever :meth:`LoopDetector.must_stop` fires
+    — in BOTH ``observe`` and ``enforce`` mode (observe-mode trips are
+    logged here even though the agent is not halted; that's the point of
+    observe mode — calibration data). ``kind`` is ``"tool"`` or ``"text"``
+    — which repetition window tripped; ``detail`` is the human-readable
+    warning text.
 
-    The table is created on first use (it co-exists with the F1 HMAC chain
-    tables in the same ``audit.db`` file — loop trips are operational
-    telemetry, not chained security events, so they get a plain table).
+    The ``tool_loop_trips`` table is part of the managed schema (created
+    by ``state._migrate_v19_to_v20`` — it co-exists with the F1 HMAC chain
+    tables in the same ``audit.db`` file). This function does NOT issue a
+    per-call ``CREATE TABLE``; it runs :func:`apply_migrations` so a
+    not-yet-migrated DB (legacy ``audit.db``, or one created before v20)
+    self-heals to the current schema, then INSERTs. ``apply_migrations``
+    is idempotent and cheap once the DB is already at the current version.
 
     Best-effort: a SQLite failure is logged at WARNING and swallowed — loop
     telemetry must never wedge the agent loop (the same three-tier-swallow
     contract the session counters follow).
     """
     try:
+        from opencomputer.agent.state import apply_migrations
+
         conn = sqlite3.connect(audit_db_path)
         try:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS tool_loop_trips ("
-                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                " ts REAL NOT NULL,"
-                " session_id TEXT NOT NULL,"
-                " depth INTEGER NOT NULL,"
-                " kind TEXT NOT NULL,"
-                " detail TEXT NOT NULL)"
-            )
+            # Bring the DB up to the current schema (idempotent) so the
+            # managed ``tool_loop_trips`` table exists. No per-call DDL.
+            apply_migrations(conn)
             conn.execute(
                 "INSERT INTO tool_loop_trips"
                 " (ts, session_id, depth, kind, detail)"
@@ -272,8 +309,7 @@ def record_loop_trip(
     except sqlite3.Error:
         _log.warning(
             "loop-detection: failed to write a trip to audit.db at %s "
-            "(the agent loop continues; the trip was still logged and "
-            "raised as LoopAbortError)",
+            "(the agent loop continues; the trip was still logged)",
             audit_db_path,
             exc_info=True,
         )

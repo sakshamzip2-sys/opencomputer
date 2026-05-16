@@ -86,7 +86,7 @@ class BaseTool(ABC):
     #: poller, a sleep-then-retry tool. Defaults False: a tool called
     #: ``threshold`` times with byte-identical args inside the detector's
     #: sliding window is treated as a stuck agent. See
-    #: ``opencomputer.agent.loop_detector.LoopDetector``.
+    #: ``opencomputer.agent.loop_safety.LoopDetector``.
     loop_safe: ClassVar[bool] = False
 
     @property

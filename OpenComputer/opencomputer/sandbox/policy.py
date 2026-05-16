@@ -184,16 +184,24 @@ def scope_key(policy: SandboxPolicy, ctx: SandboxScopeContext | None = None) -> 
     """Return the stable container key implied by ``policy``'s scope.
 
     A backend uses this key to decide whether two invocations share a
-    container. ``none`` / ``tool`` get a fresh random key every call (no
-    sharing); ``shared`` returns a constant; ``session`` / ``agent`` hash
-    the relevant id so repeat calls in the same scope collide onto one
-    key. The result is always a Docker-name-safe token (``[a-z0-9-]``,
-    ≤ 20 chars).
+    container. ``none`` means sandboxing is off — there is no container,
+    so it returns the empty string (a falsy "no key" sentinel, never a
+    valid container token). ``tool`` gets a fresh random key every call
+    (no sharing — its correct behavior is a transient container per
+    invocation). ``shared`` returns a constant; ``session`` / ``agent``
+    hash the relevant id so repeat calls in the same scope collide onto
+    one key. A non-empty result is always a Docker-name-safe token
+    (``[a-z0-9-]``, ≤ 20 chars).
     """
     ctx = ctx or SandboxScopeContext()
     scope = policy.scope
 
-    if scope in (SandboxScope.NONE, SandboxScope.TOOL):
+    if scope is SandboxScope.NONE:
+        # Sandboxing off — no container exists, so derive no key. An empty
+        # string is the falsy "no container" sentinel; returning a random
+        # uuid here would imply a phantom per-call container.
+        return ""
+    if scope is SandboxScope.TOOL:
         return uuid.uuid4().hex[:12]
     if scope is SandboxScope.SHARED:
         return "shared"

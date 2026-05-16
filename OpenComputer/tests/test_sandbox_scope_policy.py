@@ -125,10 +125,25 @@ def test_post_init_rejects_unknown_scope_string() -> None:
 # ─── scope_key ────────────────────────────────────────────────────────
 
 
-def test_scope_key_none_and_tool_are_unique_per_call() -> None:
-    for scope in (SandboxScope.NONE, SandboxScope.TOOL):
-        pol = SandboxPolicy(scope=scope)
-        assert scope_key(pol) != scope_key(pol)
+def test_scope_key_none_returns_empty_no_container() -> None:
+    """``none`` = sandboxing off — there is no container, so no key.
+
+    M1 fix: ``none`` returns the empty string (a falsy "no container"
+    sentinel), NOT a random uuid. A random key would imply a phantom
+    per-call container for a scope that runs everything on the host.
+    """
+    pol = SandboxPolicy(scope=SandboxScope.NONE)
+    assert scope_key(pol) == ""
+    assert scope_key(pol) == scope_key(pol) == ""
+
+
+def test_scope_key_tool_is_unique_per_call() -> None:
+    """``tool`` legitimately wants a fresh transient container per call."""
+    pol = SandboxPolicy(scope=SandboxScope.TOOL)
+    k1, k2 = scope_key(pol), scope_key(pol)
+    assert k1 != k2
+    # And it IS a real Docker-name-safe token (unlike ``none``'s empty key).
+    assert k1 and all(c.isalnum() or c == "-" for c in k1) and len(k1) <= 20
 
 
 def test_scope_key_shared_is_constant() -> None:

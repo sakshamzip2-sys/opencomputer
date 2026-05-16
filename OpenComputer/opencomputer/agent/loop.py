@@ -3089,16 +3089,22 @@ class AgentLoop:
                             self._loop_detector.warning(sid, _loop_depth)
                             or "loop detector aborted"
                         )
-                        # M1 (2026-05-16): record the abort to audit.db
-                        # before raising — telemetry for post-hoc tuning.
-                        record_loop_trip(
-                            self.config.home / "audit.db",
-                            session_id=sid,
-                            depth=_loop_depth,
-                            kind="text",
-                            detail=_trip_detail,
-                        )
-                        raise LoopAbortError(_trip_detail)
+                        # M1 (2026-05-16): ALWAYS record the trip to
+                        # audit.db (observe mode is logging-only — that's
+                        # its whole point: calibration data). ``claim_trip``
+                        # gates so observe mode logs ONE row per episode,
+                        # not one per iteration. Only ``enforce`` mode
+                        # raises to halt the agent.
+                        if self._loop_detector.claim_trip(sid, _loop_depth):
+                            record_loop_trip(
+                                self.config.home / "audit.db",
+                                session_id=sid,
+                                depth=_loop_depth,
+                                kind="text",
+                                detail=_trip_detail,
+                            )
+                        if self.config.loop.repetition.mode == "enforce":
+                            raise LoopAbortError(_trip_detail)
 
                 # PR #221 follow-up Item 2 — persist the per-turn deltas onto
                 # the ``sessions`` row so ``/usage`` (and any future analytics)
@@ -3791,16 +3797,22 @@ class AgentLoop:
                             self._loop_detector.warning(sid, _loop_depth)
                             or "loop detector aborted"
                         )
-                        # M1 (2026-05-16): record the abort to audit.db
-                        # before raising — telemetry for post-hoc tuning.
-                        record_loop_trip(
-                            self.config.home / "audit.db",
-                            session_id=sid,
-                            depth=_loop_depth,
-                            kind="tool",
-                            detail=_trip_detail,
-                        )
-                        raise LoopAbortError(_trip_detail)
+                        # M1 (2026-05-16): ALWAYS record the trip to
+                        # audit.db (observe mode is logging-only — that's
+                        # its whole point: calibration data). ``claim_trip``
+                        # gates so observe mode logs ONE row per episode,
+                        # not one per iteration. Only ``enforce`` mode
+                        # raises to halt the agent.
+                        if self._loop_detector.claim_trip(sid, _loop_depth):
+                            record_loop_trip(
+                                self.config.home / "audit.db",
+                                session_id=sid,
+                                depth=_loop_depth,
+                                kind="tool",
+                                detail=_trip_detail,
+                            )
+                        if self.config.loop.repetition.mode == "enforce":
+                            raise LoopAbortError(_trip_detail)
                     if (
                         not _flagged_this_turn
                         and self._loop_detector.flagged(sid, _loop_depth)
@@ -3848,12 +3860,15 @@ class AgentLoop:
             raise
         except LoopAbortError as exc:
             # OpenClaw 1.C — anti-loop / repetition detector signalled
-            # ``must_stop()``. Surface a single clean assistant message
-            # rather than re-raising so CLI/gateway callers don't have
-            # to special-case a new exception type. Persist the synthetic
-            # assistant turn so a resumed session sees the same final
-            # state. ``end_reason`` flags this as an error-class exit so
-            # the SessionEndEvent reflects truth.
+            # ``must_stop()`` and the detector is in ``enforce`` mode (in
+            # ``observe`` mode the trip is logged but never raised, so
+            # reaching here always means an enforced loop halt). Surface a
+            # single clean assistant message rather than re-raising so
+            # CLI/gateway callers don't have to special-case a new
+            # exception type. Persist the synthetic assistant turn so a
+            # resumed session sees the same final state. ``end_reason``
+            # flags this as an error-class exit so the SessionEndEvent
+            # reflects truth.
             _session_end_reason = "loop_aborted"
             _session_had_errors = True
             final = Message(
@@ -3871,7 +3886,9 @@ class AgentLoop:
                 iterations=iterations,
                 input_tokens=total_input,
                 output_tokens=total_output,
-                stop_reason=StopReason.ERROR,
+                # M1 (2026-05-16): a loop trip gets its own canonical stop
+                # reason, distinct from a generic unrecoverable error.
+                stop_reason=StopReason.TOOL_LOOP,
             )
         except Exception:
             _session_end_reason = "error"

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # Note: AuxiliaryConfig + AuxSlotConfig are defined in this module (see
 # below) — single source of truth. ``opencomputer.agent.auxiliary_client``
@@ -375,22 +375,41 @@ class DelegationConfig:
 
 @dataclass(frozen=True, slots=True)
 class RepetitionDetectorConfig:
-    """Thresholds for the agent-loop repetition detector.
+    """Thresholds + mode for the agent-loop repetition detector.
 
     Consumed by ``opencomputer.agent.loop_safety.LoopDetector`` (the
-    OpenClaw-1.C anti-loop / repetition detector). Defaults match that
-    class's own constructor defaults, so a config that omits the
-    ``loop.repetition`` block behaves exactly as before this was added.
+    OpenClaw-1.C anti-loop / repetition detector). M1 of the Hermes +
+    OpenClaw parity plan tuned these to the spec's "Done when": the
+    agent halts on a *3rd identical tool-call within an 8-call window*.
+
+    ``mode`` decides what a tripped detector does. Per PART-2 §4.1, loop
+    detection ships in **observe-only mode by default** — a trip is
+    written to the audit log but the agent is NOT halted, so one week of
+    real use can be used to calibrate the threshold before anyone opts
+    into halting. Set ``mode: enforce`` to make a trip actually stop the
+    agent loop.
     """
 
     max_tool_repeats: int = 3
-    """Identical ``(tool, args)`` calls within the window that flag a loop."""
+    """Identical ``(tool, args)`` calls within the window that flag a loop.
+
+    At 3, the *3rd* identical call flags — matching the M1 spec."""
     max_text_repeats: int = 2
     """Identical assistant-message repeats within the window that flag a loop."""
-    window_size: int = 10
-    """Sliding-window size — how many recent calls / messages are tracked."""
-    max_consecutive_flags: int = 2
-    """Consecutive flagged records before the loop hard-stops (``must_stop``)."""
+    window_size: int = 8
+    """Sliding-window size — how many recent calls / messages are tracked.
+
+    8 per the M1 spec ("within an 8-call window")."""
+    max_consecutive_flags: int = 1
+    """Consecutive flagged records before the detector ``must_stop``s.
+
+    At 1, the first flag trips ``must_stop`` — so with ``max_tool_repeats``
+    = 3 the 3rd identical tool call halts the loop (in ``enforce`` mode)."""
+    mode: Literal["observe", "enforce"] = "observe"
+    """``observe`` (default) — a trip is logged to ``audit.db`` but the
+    agent loop is NOT halted. ``enforce`` — a trip is logged AND halts
+    the loop with a clean "Agent loop stopped" message. Default observe
+    per PART-2 §4.1: soft-launch first, flip to enforce after calibration."""
 
 
 @dataclass(frozen=True, slots=True)
