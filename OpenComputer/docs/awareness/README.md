@@ -49,6 +49,9 @@ developer CRUD surface.)
 - **[cli.md](cli.md)** — every `oc awareness` subcommand, with examples.
 - **[reranker.md](reranker.md)** — the scoring model: terms, weights, BM25,
   decay, drift.
+- **[life-events.md](life-events.md)** — life-event "teeth": hint injection and
+  tone directives for detected life events, self-correcting check-in crons, CLI
+  controls, and v1 limitations.
 - **[../refs/oc-user-model-baseline.md](../refs/oc-user-model-baseline.md)** —
   what was wired vs. dormant before the cleanup.
 - **[../refs/oc-user-model-writers.md](../refs/oc-user-model-writers.md)** —
