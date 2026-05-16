@@ -2141,7 +2141,20 @@ class AgentLoop:
                 # A graph read failure must NEVER break agent startup,
                 # so swallow exceptions and degrade to "no facts".
                 try:
-                    user_facts = self.prompt_builder.build_user_facts()
+                    # Rank facts against the opening message so the
+                    # injected block reflects what THIS session is about.
+                    # Computed once here, on the frozen base prompt —
+                    # re-ranking per turn would break the prefix cache.
+                    from opencomputer.user_model.reranker import SessionContext
+
+                    _facts_ctx = SessionContext(
+                        recent_messages=(
+                            (user_message,) if user_message.strip() else ()
+                        )
+                    )
+                    user_facts = self.prompt_builder.build_user_facts(
+                        session_context=_facts_ctx,
+                    )
                 except Exception:  # noqa: BLE001 — defensive: never break loop
                     _log.debug("build_user_facts failed; degrading to empty", exc_info=True)
                     user_facts = ""
