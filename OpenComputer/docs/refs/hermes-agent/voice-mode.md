@@ -100,7 +100,7 @@ Stages, in code:
 | STT | `transcribe_recording` → `transcription_tools.transcribe_audio` (`voice_mode.py:789`) | `{success, transcript}` dict |
 | Hallucination filter | `is_whisper_hallucination` (`voice_mode.py:772`) | drops phantom transcripts |
 | Agent turn | `process_loop` consumes `_pending_input` queue (`cli.py:11454`) | reply text |
-| TTS synth | `tools.tts_tool.text_to_speech_tool` (`cli.py:8419`) | MP3 file |
+| TTS synth | `tools.tts_tool.text_to_speech_tool` (`cli.py:8419`) | MP3 file (whole reply). ElevenLabs instead streams sentence-by-sentence via `stream_tts_to_speaker` — see §3. |
 | Playback | `play_audio_file` (`voice_mode.py:843`) | audio out, interruptable |
 
 ---
@@ -134,7 +134,7 @@ Barge-in is **not** acoustic (the agent does not stop speaking because it hears 
    - Discord's `VoiceReceiver` has `pause()`/`resume()` (`discord.py:192-196`); `play_in_voice_channel` pauses the receiver around playback (`discord.py:1663-1697`).
 3. **Re-arm after TTS.** `speak_text` restarts the recorder in its `finally` block once `paused_recording` is true and the loop is still active (`hermes_cli/voice.py:536-548`).
 
-There is **no** mid-sentence interruption: TTS is synthesised and played as one MP3 per agent reply. (The user-facing doc claims "sentence-by-sentence streaming TTS" at `website/docs/user-guide/features/voice-mode.md:158`, but the code in this checkout synthesises the **whole** reply text in one `text_to_speech_tool` call — `cli.py:8396-8419`. Treat the streaming claim as aspirational / out of this checkout.)
+Mid-sentence interruption depends on the TTS provider. Streaming **sentence-by-sentence** TTS *is* implemented, but it is **provider-gated to ElevenLabs**: when ElevenLabs is the configured TTS provider and `sounddevice` is importable, the CLI sets `use_streaming_tts` and runs `stream_tts_to_speaker` in a daemon thread, which buffers the agent's generated tokens into sentences and streams each sentence to the speaker as it completes (`cli.py:9157-9214` streaming setup; `tts_tool.py:1916` `stream_tts_to_speaker`, `_speak_sentence` ~`tts_tool.py:1991`). For **all other** TTS providers the fallback path is `_voice_speak_response` — the whole reply text synthesised and played as one MP3 — selected at `cli.py:9545` (`if self._voice_tts and response and not use_streaming_tts:`). This non-streaming fallback path has **no** mid-sentence interruption.
 
 ---
 
@@ -193,7 +193,7 @@ Swapping a provider = editing `stt.provider` (+ `stt.local.model`) in `config.ya
 
 | Provider | Type | Key | Notes |
 |----------|------|-----|-------|
-| `edge` (default) | cloud, free | none | Microsoft Edge neural voices, 322 voices. Needs ffmpeg for Opus. |
+| `edge` (default) | cloud, free | none | Microsoft Edge neural voices. Needs ffmpeg for Opus. |
 | `elevenlabs` | cloud, paid | `ELEVENLABS_API_KEY` | premium. |
 | `openai` | cloud, paid | OpenAI key | `gpt-4o-mini-tts`. |
 | `minimax` | cloud, paid | `MINIMAX_API_KEY` | voice cloning. |
@@ -306,7 +306,7 @@ Flags: `_voice_mode` (master on/off), `_voice_recording`, `_voice_processing`, `
 
 ## 11. CLI surface
 
-`/voice [on|off|tts|status]` — handler `_handle_voice_command` (`cli.py:8439`):
+`/voice [on|off|tts|status]` — handler `_handle_voice_command` (`cli.py:8438`):
 - `/voice on` → `_enable_voice_mode` (`cli.py:8472`) — runs `check_voice_requirements`, may auto-enable TTS if `voice.auto_tts: true`.
 - `/voice off` → `_disable_voice_mode` (`cli.py:8532`) — stops playback, resets flags.
 - `/voice tts` → `_toggle_voice_tts` (`cli.py:8564`).

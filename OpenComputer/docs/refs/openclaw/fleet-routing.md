@@ -84,7 +84,7 @@ spine. Operators *and* nodes connect to the same port, distinguished by
 
 ### 3.1 The Gateway WS control plane (the spine)
 
-- One Gateway per host, recommended (`docs/gateway/discovery.md:22`). Owns
+- One Gateway per host, recommended (`docs/gateway/discovery.md:21`). Owns
   sessions, pairing, and the node registry.
 - WS server: `src/gateway/server/ws-connection.ts`. Bind mode is
   `gateway.bind` ∈ `auto | lan | loopback | custom | tailnet`
@@ -158,7 +158,7 @@ CLI: `openclaw node run` (foreground) / `openclaw node install|start|stop|
 restart|uninstall` (service) — `src/cli/node-cli/register.ts`. Flags:
 `--host --port --tls --tls-fingerprint --node-id --display-name --runtime`.
 A headless node host also **auto-advertises a browser proxy**
-(`docs/cli/node.md:29`), so the Gateway can drive a browser on that node.
+(`docs/cli/node.md:31`), so the Gateway can drive a browser on that node.
 
 There is also a `macOS node mode` (the menubar app connects as a node) and an
 iOS/Android node, but those are app-side; the headless `node run` is the
@@ -193,7 +193,7 @@ the Gateway calls `advertise(ctx)` at startup.
   `openclaw plugins disable bonjour`. Auto-disables inside detected containers
   (`advertiser.ts:137` `isContainerEnvironment`).
 
-**Limitation, stated explicitly** (`docs/gateway/discovery.md:49`): multicast
+**Limitation, stated explicitly** (`docs/gateway/discovery.md:51`): multicast
 mDNS does not cross networks. That is what wide-area DNS solves.
 
 ### 3.5 wide-area DNS — cross-network discovery
@@ -252,7 +252,7 @@ CLI**. Two distinct uses:
    - `serve` → `tailscale serve --bg --yes <port>` — tailnet-only HTTPS,
      Gateway stays on loopback, Tailscale injects identity headers.
    - `funnel` → `tailscale funnel ...` — public HTTPS; OpenClaw refuses unless
-     `gateway.auth.mode == password` (`docs/gateway/tailscale.md:117`).
+     `gateway.auth.mode == password` (`docs/gateway/tailscale.md:120`).
    - `resetOnExit` undoes serve/funnel on shutdown.
    - Alternatively `gateway.bind:"tailnet"` binds the WS directly to the
      tailnet IP (no Serve, no HTTPS).
@@ -332,7 +332,7 @@ Client transport-selection policy (`docs/gateway/discovery.md:126`):
 
 Routing must use the **resolved SRV+A/AAAA endpoint**, never the unauthenticated
 TXT hints (`lanHost`, `tailnetDns`, `gatewayPort`) — TXT is UX-only
-(`docs/gateway/bonjour.md:108`).
+(`docs/gateway/bonjour.md:112`).
 
 ### 4.3 Request routing: node → Gateway → another node
 
@@ -372,7 +372,7 @@ never peers.
   requires app-layer pairing on top.
 - **Transport auth** to the Gateway WS — `gateway.auth.mode`:
   `none | token | password | trusted-proxy`. Non-loopback binds require a real
-  auth path (`docs/network.md:18`).
+  auth path (`docs/network.md:21`).
 - **Node identity**: each node has an Ed25519-style device keypair. Connect
   sends `device:{id,publicKey,signature,signedAt,nonce}`; the Gateway verifies
   the signature over a versioned payload (`buildDeviceAuthPayloadV3`,
@@ -391,17 +391,17 @@ never peers.
 - **Tailscale identity-header auth** (Serve mode only): with
   `gateway.auth.allowTailscale:true`, Control-UI/WS auth can use the
   `tailscale-user-login` header, verified by resolving `x-forwarded-for` via
-  `tailscale whois` (`docs/gateway/tailscale.md:33`). Does **not** apply to
+  `tailscale whois` (`docs/gateway/tailscale.md:35`). Does **not** apply to
   HTTP API endpoints or node-role connections — nodes always do normal pairing.
 - **TXT records are unauthenticated**: clients must not trust mDNS/DNS-SD TXT
   for routing or TLS pins; a discovered `gatewayTlsSha256` must never override
-  a stored pin (`docs/gateway/bonjour.md:108-114`).
+  a stored pin (`docs/gateway/bonjour.md:110-114`).
 - **Exec approvals are per-node-host**, enforced locally on the node at
   `~/.openclaw/exec-approvals.json` — the Gateway forwards a stored canonical
-  `systemRunPlan`, not later-edited fields (`docs/cli/node.md:160`).
+  `systemRunPlan`, not later-edited fields (`docs/cli/node.md:165`).
 - **Insecure private WS opt-in**: a node connecting to a non-loopback plaintext
   `ws://` Gateway must set `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`, else startup
-  fails closed (`docs/cli/node.md:77`).
+  fails closed (`docs/cli/node.md:81`).
 
 ---
 
@@ -556,11 +556,11 @@ UX sugar layered on top.
   one if starting fresh, but be deliberate about it.
 - Discovery never relaxes transport security: a discovered tailnet IP is a
   *routing hint*, not permission for plaintext `ws://`
-  (`docs/gateway/discovery.md:113`).
+  (`docs/gateway/discovery.md:117`).
 - `gateway discover` exists as a CLI but there is **no automatic** "connect to
   the discovered gateway" — discovery only produces a pick-list; the human or a
   client policy chooses and stores the endpoint.
 - The legacy TCP "bridge protocol" for nodes is **removed** from current builds
-  (`docs/gateway/discovery.md:25`) — do not port it; WS is the only node
+  (`docs/gateway/discovery.md:26`) — do not port it; WS is the only node
   transport.
 ```

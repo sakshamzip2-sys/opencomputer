@@ -17,7 +17,7 @@ This is **not** part of the `extensions/browser/` plugin's browser-core. It is h
 | In-container display + VNC + websockify launch | `scripts/sandbox-browser-entrypoint.sh` |
 | Sandbox-browser Docker image (installs `novnc`/`x11vnc`/`xvfb`/`websockify`) | `scripts/docker/sandbox/Dockerfile.browser` |
 | Bridge HTTP route that serves the noVNC bootstrap page | `extensions/browser/src/browser/bridge-server.ts` (lines 57–145) |
-| Config shape (`vncPort`, `noVncPort`, `enableNoVnc`, `headless`) | `src/config/types.sandbox.ts:74–78`, `src/agents/sandbox/types.ts:32–47` |
+| Config shape (`vncPort`, `noVncPort`, `enableNoVnc`, `headless`) | `src/config/types.sandbox.ts:75–78`, `src/agents/sandbox/types.ts:32–47` |
 | Defaults (`5900` / `6080`) | `src/agents/sandbox/constants.ts:46–49` |
 | Config resolution / defaulting | `src/agents/sandbox/config.ts:145–155` |
 | Config-hash inputs (recreate trigger) | `src/agents/sandbox/config-hash.ts:13–25` |
@@ -36,7 +36,7 @@ The browser core (`03`/`04`) already gives the *agent* eyes — `POST /screensho
 - Screenshots are a poll: discrete frames, agent-driven, no input path back.
 - noVNC is a **live, interactive RDP-style channel** — the human sees every frame of what the agent's browser is doing in real time, and (because RFB is bidirectional) can take the mouse/keyboard to rescue a stuck login, solve a CAPTCHA, or correct the agent.
 
-So the design intent: the agent drives via CDP; the human observes — and optionally co-drives — via noVNC. The `mantis.md` concept doc (`docs/concepts/mantis.md:305,322`) names this explicitly as the "observer browser" + "VNC or noVNC for rescue" pattern.
+So the design intent: the agent drives via CDP; the human observes — and optionally co-drives — via noVNC. The `mantis.md` concept doc (`docs/concepts/mantis.md:295,322`) names this explicitly as the "observer browser" + "VNC or noVNC for rescue" pattern.
 
 ## The in-container pipeline (`scripts/sandbox-browser-entrypoint.sh`)
 
@@ -124,7 +124,7 @@ So the observer token is: random 48-hex, **60-second** lifetime, **one-time** (c
 `bridge-server.ts:83–105` registers `GET /sandbox/novnc` **only if** `params.resolveSandboxNoVncToken` was supplied (it is — `browser.ts:427` passes `consumeNoVncObserverToken`). The handler:
 
 1. `if (!hasVerifiedBrowserAuth(req))` → **401** (line 85). **Gate 1**: the request must already carry the bridge's Bearer/password — `installBrowserAuthMiddleware` ran first, `hasVerifiedBrowserAuth` reads the flag it set.
-2. Sets hard anti-leak headers (lines 88–92): `Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate`, `Pragma: no-cache`, `Expires: 0`, `Referrer-Policy: no-referrer`.
+2. Sets hard anti-leak headers (lines 89–92): `Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate`, `Pragma: no-cache`, `Expires: 0`, `Referrer-Policy: no-referrer`.
 3. `rawToken = req.query.token` → **400** if missing (lines 93–97).
 4. `resolved = resolveSandboxNoVncToken(rawToken)` → **404** "Invalid or expired token" if `null` (lines 98–102). **Gate 2**: `consumeNoVncObserverToken` validates + burns the one-time token.
 5. On success, returns a **bootstrap HTML page** (`buildNoVncBootstrapHtml`, lines 28–55) — *not* a redirect.
