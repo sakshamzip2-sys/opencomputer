@@ -48,7 +48,8 @@ One consolidated tool with an `action` discriminator:
 | `capture` | none | screenshot + element index (`mode`: `som` / `vision` / `ax`) |
 | `list_apps` | none | enumerate running apps |
 | `wait` | none | sleep up to 30 s |
-| `click` / `double_click` / `right_click` / `middle_click` | mutating | click by `element` index or `coordinate` |
+| `click` / `double_click` / `right_click` | mutating | click by `element` index or `coordinate` |
+| `middle_click` | — | unsupported — cua-driver 0.1.9 has no middle-click primitive; fails cleanly with an explanatory message |
 | `scroll` | mutating | wheel scroll |
 | `type` | mutating | type text (dangerous shell patterns hard-blocked) |
 | `key` | mutating | key combo, e.g. `cmd+s` (destructive system combos hard-blocked) |

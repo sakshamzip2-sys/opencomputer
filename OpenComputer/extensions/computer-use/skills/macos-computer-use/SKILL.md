@@ -69,7 +69,7 @@ capture           mode=som|vision|ax   app=…  (default: current app)
 click             element=N     OR     coordinate=[x, y]
 double_click      element=N     OR     coordinate=[x, y]
 right_click       element=N     OR     coordinate=[x, y]
-middle_click      element=N     OR     coordinate=[x, y]
+middle_click      UNSUPPORTED — no macOS middle-click primitive; fails cleanly
 drag              from_coordinate=[x,y], to_coordinate=[x,y]   (pixel-only)
 scroll            direction=up|down|left|right   amount=3 (ticks)
 type              text="…"

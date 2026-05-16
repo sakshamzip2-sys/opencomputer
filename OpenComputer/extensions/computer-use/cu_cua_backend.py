@@ -451,10 +451,14 @@ class CuaDriverBackend(ComputerUseBackend):
 
         Maps ``capture(mode, app)`` → cua-driver 0.1.9 ``list_windows`` +
         ``get_window_state`` (som/ax) or ``screenshot`` (vision). Window
-        geometry is derived from the ``list_windows`` ``bounds`` (logical
-        screen points) and refined from ``get_window_state``'s
-        ``screenshot_original_width/height`` when available — the
-        screenshot-pixel space that ``click(x, y)`` / ``drag`` address.
+        geometry starts from the ``list_windows`` ``bounds`` (logical
+        screen points) but is OVERRIDDEN by ``get_window_state``'s
+        ``screenshot_width``/``screenshot_height`` whenever present — those
+        are the actual PNG-pixel dimensions, which is the space
+        ``click(x, y)`` / ``drag`` address. On a Retina display the two
+        differ by ``screenshot_scale_factor`` (logical points vs pixels),
+        so reporting the screenshot dims is required for correct
+        coordinate-space addressing.
         """
         windows = self._select_windows(app)
         if not windows:
@@ -533,19 +537,23 @@ class CuaDriverBackend(ComputerUseBackend):
             tree = ""
             if payload:
                 tree = str(payload.get("tree_markdown", "") or "")
-                # The screenshot-pixel space click(x,y)/drag address: the
-                # ORIGINAL (pre-resize) window pixels. Fall back to the
-                # resized screenshot dims, then to list_windows bounds.
-                ow = payload.get("screenshot_original_width")
-                oh = payload.get("screenshot_original_height")
-                if isinstance(ow, int) and ow > 0:
-                    width = ow
-                if isinstance(oh, int) and oh > 0:
-                    height = oh
-                if width == 0 and isinstance(payload.get("screenshot_width"), int):
-                    width = payload["screenshot_width"]
-                if height == 0 and isinstance(payload.get("screenshot_height"), int):
-                    height = payload["screenshot_height"]
+                # click(x,y)/drag address the screenshot-pixel space of the
+                # PNG get_window_state returns. cua-driver 0.1.9's
+                # structuredContent reports that as ``screenshot_width`` /
+                # ``screenshot_height`` (NOT ``screenshot_original_*`` —
+                # those fields do not exist in 0.1.9). Prefer them over the
+                # list_windows ``bounds``, which are logical screen points
+                # and diverge from screenshot pixels by
+                # ``screenshot_scale_factor`` on a Retina display. The
+                # bounds remain the fallback for the degraded transport
+                # where structuredContent is absent (``ax`` capture_mode
+                # also omits ``screenshot_*`` — bounds are the only signal).
+                sw = payload.get("screenshot_width")
+                sh = payload.get("screenshot_height")
+                if isinstance(sw, int) and sw > 0:
+                    width = sw
+                if isinstance(sh, int) and sh > 0:
+                    height = sh
             elif isinstance(data, str):
                 # Degraded transport — the tree is embedded in the text block.
                 tree = data

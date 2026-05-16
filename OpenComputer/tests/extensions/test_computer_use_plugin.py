@@ -976,25 +976,28 @@ class TestCuaBackend0_1_9CallSites:
                         "element_index": 2, "value": "Blue"}
 
     def test_capture_geometry_from_get_window_state(self):
-        """capture() reports real window dimensions — not 0x0."""
+        """capture() reports the cua-driver 0.1.9 ``screenshot_width`` /
+        ``screenshot_height`` — the actual PNG-pixel dimensions, the space
+        click(x,y) addresses — and they OVERRIDE the list_windows bounds
+        (which are logical screen points)."""
         gws = {
             "data": {
                 "tree_markdown": '- AXApplication "Safari"\n'
                                  '  - [0] AXWindow "example.com"\n'
                                  '    - [1] AXButton (Back) actions=[AXPress]\n',
                 "element_count": 2,
-                "screenshot_width": 1568, "screenshot_height": 980,
-                "screenshot_original_width": 1440,
-                "screenshot_original_height": 900,
-                "screenshot_scale_factor": 1,
+                # The real 0.1.9 structuredContent keys — verified live.
+                "screenshot_width": 2880, "screenshot_height": 1800,
+                "screenshot_scale_factor": 2,
             },
             "images": [], "structuredContent": None, "isError": False,
         }
         b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
                                    "get_window_state": gws})
         cap = b.capture(mode="som")
-        assert cap.width == 1440  # original (pre-resize) screenshot pixels
-        assert cap.height == 900
+        # screenshot_* (PNG pixels) win over list_windows bounds 1440x900.
+        assert cap.width == 2880
+        assert cap.height == 1800
         assert cap.app == "Safari"
         assert cap.window_title == "example.com"
         assert {e.index for e in cap.elements} == {0, 1}
@@ -1012,6 +1015,27 @@ class TestCuaBackend0_1_9CallSites:
                                    "get_window_state": gws})
         cap = b.capture(mode="som")
         assert cap.width == 1440 and cap.height == 900  # list_windows bounds
+
+    def test_capture_geometry_ignores_nonexistent_original_fields(self):
+        """Regression: cua-driver 0.1.9 has NO ``screenshot_original_width`` /
+        ``screenshot_original_height`` keys. Even if a payload carried them,
+        the backend must report ``screenshot_width``/``screenshot_height``
+        (the actual PNG pixels) — never the fictional ``_original`` keys."""
+        gws = {
+            "data": {
+                "tree_markdown": '- [0] AXWindow "x"\n',
+                "element_count": 1,
+                "screenshot_width": 2560, "screenshot_height": 1600,
+                # A stray key the parser must NOT honour.
+                "screenshot_original_width": 99999,
+                "screenshot_original_height": 88888,
+            },
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws})
+        cap = b.capture(mode="som")
+        assert cap.width == 2560 and cap.height == 1600
 
     def test_capture_vision_uses_screenshot_tool_with_window_id(self):
         shot = {"data": "", "images": ["Zm9v"], "structuredContent": None,
@@ -1066,7 +1090,9 @@ class TestCuaBackend0_1_9CallSites:
 
     def test_capture_geometry_from_structured_content(self):
         """get_window_state ships its payload as structuredContent over the
-        real MCP transport — capture must read it, not just ``data``."""
+        real MCP transport — capture must read it, not just ``data`` — and
+        ``screenshot_width``/``screenshot_height`` (PNG pixels) win over the
+        list_windows bounds."""
         gws = {
             "data": "✅ Safari — 2 elements, turn 1 + screenshot",
             "images": [], "isError": False,
@@ -1075,15 +1101,14 @@ class TestCuaBackend0_1_9CallSites:
                                  '  - [0] AXWindow "example.com"\n'
                                  '    - [1] AXButton (Back) actions=[AXPress]\n',
                 "element_count": 2,
-                "screenshot_width": 1568, "screenshot_height": 980,
-                "screenshot_original_width": 1440,
-                "screenshot_original_height": 900,
+                "screenshot_width": 2880, "screenshot_height": 1800,
+                "screenshot_scale_factor": 2,
             },
         }
         b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
                                    "get_window_state": gws})
         cap = b.capture(mode="som")
-        assert cap.width == 1440 and cap.height == 900
+        assert cap.width == 2880 and cap.height == 1800
         assert {e.index for e in cap.elements} == {0, 1}
 
     def test_capture_no_windows_sets_error(self):
