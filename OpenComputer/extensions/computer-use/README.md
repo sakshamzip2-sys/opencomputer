@@ -54,12 +54,19 @@ One consolidated tool with an `action` discriminator:
 | `key` | mutating | key combo, e.g. `cmd+s` (destructive system combos hard-blocked) |
 | `set_value` | mutating | set a popup / slider value directly (no menu open) |
 | `focus_app` | mutating | route input to an app without raising its window |
-| `drag` | mutating | not supported by the cua-driver backend |
+| `drag` | mutating | press-drag-release between pixel coordinates (`from_coordinate`/`to_coordinate`); element-indexed drag is not supported |
 
-Preferred workflow for vision models: `capture(mode='som')` returns a
-screenshot with numbered overlays on every interactable element plus an
-accessibility tree — then `click(element=N)`. Far more reliable than pixel
-coordinates. Text-only models can drive via `mode='ax'` (tree only, no image).
+Preferred workflow for vision models: `capture(mode='som')` returns a plain
+screenshot plus an indexed list of every interactable element (1-based
+index, AX role, label) — then `click(element=N)`. Far more reliable than
+pixel coordinates. The index numbers are not drawn onto the image; the model
+correlates an element to the screenshot by its role and label. Text-only
+models can drive via `mode='ax'` (element list only, no image).
+
+Raw coordinates (`coordinate`, `from_coordinate`, `to_coordinate`) are in
+**window-local screenshot pixels** — the space of the capture image, not
+logical screen points. On a Retina display screenshot pixels are 2x the
+logical points, so always measure off the returned capture image.
 
 ### Screenshot return shape
 
@@ -90,7 +97,7 @@ uses. Captures older than 24 h are pruned automatically.
 |---|---|---|
 | `OPENCOMPUTER_COMPUTER_USE_BACKEND` | `cua` | `cua` or `noop` (tests) |
 | `OPENCOMPUTER_CUA_DRIVER_CMD` | `cua-driver` | binary name / path |
-| `OPENCOMPUTER_CUA_DRIVER_VERSION` | `0.5.0` | version pin reference |
+| `OPENCOMPUTER_CUA_DRIVER_VERSION` | `0.1.9` | version pin reference |
 
 ## Architecture
 

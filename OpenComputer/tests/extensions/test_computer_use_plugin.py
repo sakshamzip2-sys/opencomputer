@@ -368,6 +368,88 @@ class TestMalformedArgs:
 
 
 # ---------------------------------------------------------------------------
+# Loop-4: integer ``element`` index coercion. Loop 3 added ``_coerce_xy`` for
+# coordinate fields but left the ``integer``-typed ``element`` /
+# ``from_element`` / ``to_element`` fields un-coerced — strict_mode is off,
+# so a model can hand a string/float/list and it would reach cua-driver's
+# strict ``integer`` MCP arg mistyped. These confirm coercion at every site.
+# ---------------------------------------------------------------------------
+
+class TestElementCoercion:
+    @pytest.mark.parametrize("raw,expected", [
+        ("14", 14), (14, 14), (14.0, 14), ("  9 ", 9),
+        (None, None), ("nope", None), (14.5, None), ([14], None),
+        (True, None), (False, None),
+    ])
+    def test_coerce_element_normalises(self, raw, expected):
+        assert tool_mod._coerce_element(raw) == expected
+
+    def test_click_coerces_string_element(self, noop_backend):
+        out = _dispatch("click", {"element": "14"})
+        assert "error" not in out
+        click_kw = next(c[1] for c in noop_backend.calls if c[0] == "click")
+        assert click_kw["element"] == 14 and isinstance(click_kw["element"], int)
+
+    def test_click_drops_unparseable_element(self, noop_backend):
+        _dispatch("click", {"element": "abc"})
+        click_kw = next(c[1] for c in noop_backend.calls if c[0] == "click")
+        assert click_kw["element"] is None
+
+    def test_scroll_coerces_float_element(self, noop_backend):
+        _dispatch("scroll", {"direction": "down", "element": 12.0})
+        scroll_kw = next(c[1] for c in noop_backend.calls if c[0] == "scroll")
+        assert scroll_kw["element"] == 12 and isinstance(scroll_kw["element"], int)
+
+    def test_set_value_coerces_string_element(self, noop_backend):
+        _dispatch("set_value", {"value": "Blue", "element": "7"})
+        sv_kw = next(c[1] for c in noop_backend.calls if c[0] == "set_value")
+        assert sv_kw["element"] == 7 and isinstance(sv_kw["element"], int)
+
+    def test_drag_coerces_both_element_indices(self, noop_backend):
+        _dispatch("drag", {"from_element": "3", "to_element": 5.0})
+        drag_kw = next(c[1] for c in noop_backend.calls if c[0] == "drag")
+        assert drag_kw["from_element"] == 3
+        assert drag_kw["to_element"] == 5
+
+    def test_bool_element_is_not_an_index(self, noop_backend):
+        # ``isinstance(True, int)`` holds — but True is not element 1.
+        _dispatch("click", {"element": True})
+        click_kw = next(c[1] for c in noop_backend.calls if c[0] == "click")
+        assert click_kw["element"] is None
+
+
+# ---------------------------------------------------------------------------
+# Loop-4: documentation-vs-behaviour. The schema/docs must describe what the
+# cua-driver 0.1.9 backend actually does — coordinate space, SOM overlays.
+# ---------------------------------------------------------------------------
+
+class TestSchemaContractTruth:
+    def test_coordinate_space_is_screenshot_pixels_not_logical(self):
+        """The schema must NOT promise logical screen space — cua-driver's
+        click/drag x,y are window-local screenshot pixels."""
+        desc = COMPUTER_USE_SCHEMA["parameters"]["properties"]["coordinate"]["description"]
+        low = desc.lower()
+        assert "screenshot" in low
+        assert "logical screen space" not in low
+
+    def test_drag_coordinate_descriptions_name_screenshot_space(self):
+        props = COMPUTER_USE_SCHEMA["parameters"]["properties"]
+        for field in ("from_coordinate", "to_coordinate"):
+            assert "screenshot" in props[field]["description"].lower()
+
+    def test_som_mode_does_not_claim_drawn_overlays(self):
+        """cua-driver 0.1.9 returns a plain screenshot — the plugin draws no
+        overlays. The mode description must not claim numbered overlays."""
+        desc = COMPUTER_USE_SCHEMA["parameters"]["properties"]["mode"]["description"]
+        assert "numbered overlays" not in desc.lower()
+        assert "indexed list" in desc.lower() or "element list" in desc.lower()
+
+    def test_tool_description_does_not_claim_overlays(self):
+        desc = COMPUTER_USE_SCHEMA["description"].lower()
+        assert "overlay" not in desc
+
+
+# ---------------------------------------------------------------------------
 # Capture → screenshot persistence
 # ---------------------------------------------------------------------------
 
@@ -437,6 +519,21 @@ class TestCaptureResponse:
         assert "#1" in out["summary"]
         assert "AXButton" in out["summary"]
         assert out["elements"][1]["role"] == "AXTextField"
+
+    def test_summary_omits_zero_sentinel_bounds(self, tmp_path):
+        """The cua-driver backend's AX tree carries no per-element bounds —
+        the (0,0,0,0) sentinel must not be rendered as a real ``@`` position."""
+        elements = [
+            UIElement(index=1, role="AXButton", label="Back"),  # bounds=(0,0,0,0)
+            UIElement(index=2, role="AXLink", label="Home", bounds=(5, 6, 7, 8)),
+        ]
+        tool_mod.reset_backend_for_tests()
+        with patch.dict(os.environ, {"OPENCOMPUTER_PROFILE_HOME": str(tmp_path)}), \
+             patch.object(tool_mod, "_get_backend",
+                          return_value=_FakeBackend(elements=elements)):
+            out = tool_mod.run_computer_use({"action": "capture", "mode": "som"})
+        assert "(0, 0, 0, 0)" not in out["summary"]
+        assert "@ (5, 6, 7, 8)" in out["summary"]  # real bounds still shown
 
     def test_capture_after_includes_follow_up_capture(self, tmp_path):
         tool_mod.reset_backend_for_tests()

@@ -20,11 +20,12 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
         "Drive the macOS desktop in the background — screenshots, mouse, "
         "keyboard, scroll, drag — without stealing the user's cursor, "
         "keyboard focus, or Space. Preferred workflow: call with "
-        "action='capture' (mode='som' gives numbered element overlays), "
-        "then click by `element` index for reliability. Pixel coordinates "
-        "are supported for models trained on them. Works on any window — "
-        "hidden, minimized, on another Space, or behind another app. "
-        "macOS only; requires cua-driver to be installed."
+        "action='capture' (mode='som' returns a screenshot plus an indexed "
+        "list of every interactable element), then click by `element` index "
+        "for reliability. Pixel coordinates are supported for models trained "
+        "on them. Works on any window — hidden, minimized, on another Space, "
+        "or behind another app. macOS only; requires cua-driver to be "
+        "installed."
     ),
     "parameters": {
         "type": "object",
@@ -59,12 +60,15 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "enum": ["som", "vision", "ax"],
                 "description": (
-                    "Capture mode. `som` (default) is a screenshot with "
-                    "numbered overlays on every interactable element plus "
-                    "the AX tree — best for vision models, lets you click "
-                    "by element index. `vision` is a plain screenshot. "
-                    "`ax` is the accessibility tree only (no image; useful "
-                    "for text-only models)."
+                    "Capture mode. `som` (default) returns a screenshot plus "
+                    "an indexed list of every interactable element (role, "
+                    "label, 1-based index) walked from the accessibility "
+                    "tree — best for vision models, lets you click by "
+                    "element index. The numbers are NOT drawn onto the "
+                    "image; correlate by role/label from the element list. "
+                    "`vision` is a plain screenshot, no element list. "
+                    "`ax` is the element list only (no image; useful for "
+                    "text-only models)."
                 ),
             },
             "app": {
@@ -91,9 +95,14 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "minItems": 2,
                 "maxItems": 2,
                 "description": (
-                    "Pixel coordinates [x, y] in logical screen space (as "
-                    "returned by capture width/height). Only use this if "
-                    "no element index is available."
+                    "Pixel coordinates [x, y] in WINDOW-LOCAL SCREENSHOT "
+                    "pixels — the space of the PNG the last `capture` "
+                    "returned, top-left origin, sized by that capture's "
+                    "`width`/`height`. NOT logical screen points: on a "
+                    "Retina display screenshot pixels are 2x the logical "
+                    "points, so read the coordinate off the capture image, "
+                    "not the physical screen. Only use this if no element "
+                    "index is available."
                 ),
             },
             "button": {
@@ -110,21 +119,35 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "description": "Modifier keys held during the action.",
             },
             # ── drag ───────────────────────────────────────────────
+            # NOTE: drag is pixel-only on the cua-driver backend (macOS AX
+            # has no semantic drag action). These element fields are kept
+            # for forward compatibility but are rejected at dispatch — pass
+            # from_coordinate / to_coordinate instead.
             "from_element": {"type": "integer",
-                              "description": "Source element index (drag)."},
+                              "description": "Source element index. UNSUPPORTED "
+                              "for drag (pixel-only) — use from_coordinate."},
             "to_element": {"type": "integer",
-                            "description": "Target element index (drag)."},
+                            "description": "Target element index. UNSUPPORTED "
+                            "for drag (pixel-only) — use to_coordinate."},
             "from_coordinate": {
                 "type": "array",
                 "items": {"type": "integer"},
                 "minItems": 2, "maxItems": 2,
-                "description": "Source [x,y] (drag; use when no element available).",
+                "description": (
+                    "Drag-start [x,y] in window-local screenshot pixels "
+                    "(same space as `coordinate`). drag is pixel-only — "
+                    "element-indexed drag is not supported."
+                ),
             },
             "to_coordinate": {
                 "type": "array",
                 "items": {"type": "integer"},
                 "minItems": 2, "maxItems": 2,
-                "description": "Target [x,y] (drag; use when no element available).",
+                "description": (
+                    "Drag-end [x,y] in window-local screenshot pixels "
+                    "(same space as `coordinate`). drag is pixel-only — "
+                    "element-indexed drag is not supported."
+                ),
             },
             # ── scroll ─────────────────────────────────────────────
             "direction": {

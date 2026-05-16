@@ -278,7 +278,12 @@ def _format_elements(elements: list[UIElement], max_lines: int = 40) -> list[str
     out: list[str] = []
     for e in elements[:max_lines]:
         label = e.label.replace("\n", " ")[:60]
-        out.append(f"  #{e.index} {e.role} {label!r} @ {e.bounds}"
+        # The cua-driver backend's AX-tree rendering carries no per-element
+        # pixel bounds — `bounds` is the (0,0,0,0) sentinel there. Emitting
+        # ``@ (0, 0, 0, 0)`` for every row would falsely suggest every
+        # element sits at the origin; only show bounds when they are real.
+        bounds = "" if e.bounds == (0, 0, 0, 0) else f" @ {e.bounds}"
+        out.append(f"  #{e.index} {e.role} {label!r}{bounds}"
                    + (f" [{e.app}]" if e.app else ""))
     if len(elements) > max_lines:
         out.append(f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)")
@@ -351,6 +356,33 @@ def _action_payload(res: ActionResult) -> dict[str, Any]:
 # Dispatch — pure functions, exercised directly by tests
 # ---------------------------------------------------------------------------
 
+def _coerce_element(raw: Any) -> int | None:
+    """Coerce an ``element`` / ``from_element`` / ``to_element`` arg to an int.
+
+    The schema types these ``integer``, but ``strict_mode`` is off (the
+    action discriminator makes most params conditionally-unused), so the API
+    does NOT enforce it. A model can hand us ``"14"`` (string), ``14.0``
+    (float), or ``[14]`` (list). cua-driver's MCP ``element_index`` arg is a
+    strict ``integer`` — a mistyped value is a bad-typed MCP call exactly
+    like a mistyped coordinate. Coerce to a clean ``int`` or ``None`` (the
+    "no element index" sentinel) so the backend never forwards a bad type.
+    A bare ``bool`` is rejected: ``True``/``False`` are not element indices
+    even though ``isinstance(True, int)`` holds.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw.is_integer():
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _coerce_xy(raw: Any) -> tuple[int, int] | None:
     """Coerce a ``coordinate``-shaped arg into an ``(x, y)`` int pair.
 
@@ -417,11 +449,11 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
             button = "middle"
         else:
             button = button or "left"
-        element = args.get("element")
+        element = _coerce_element(args.get("element"))
         xy = _coerce_xy(args.get("coordinate"))
         x, y = xy if xy is not None else (None, None)
         res = backend.click(
-            element=element if element is not None else None,
+            element=element,
             x=x, y=y, button=button or "left", click_count=click_count,
             modifiers=args.get("modifiers"),
         )
@@ -429,8 +461,8 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
 
     if action == "drag":
         res = backend.drag(
-            from_element=args.get("from_element"),
-            to_element=args.get("to_element"),
+            from_element=_coerce_element(args.get("from_element")),
+            to_element=_coerce_element(args.get("to_element")),
             from_xy=_coerce_xy(args.get("from_coordinate")),
             to_xy=_coerce_xy(args.get("to_coordinate")),
             button=args.get("button", "left"),
@@ -447,7 +479,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         res = backend.scroll(
             direction=args.get("direction", "down"),
             amount=amount,
-            element=args.get("element"),
+            element=_coerce_element(args.get("element")),
             x=xy[0] if xy is not None else None,
             y=xy[1] if xy is not None else None,
             modifiers=args.get("modifiers"),
@@ -470,7 +502,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         set_value = getattr(backend, "set_value", None)
         if set_value is None:
             return {"error": "set_value is not supported by the active backend"}
-        res = set_value(value=str(value), element=args.get("element"))
+        res = set_value(value=str(value), element=_coerce_element(args.get("element")))
         return _maybe_follow_capture(backend, res, capture_after)
 
     return {"error": f"unknown action {action!r}"}
