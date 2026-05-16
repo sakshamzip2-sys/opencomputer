@@ -79,11 +79,14 @@ _BLOCKED_KEY_COMBOS = {
 
 _KEY_ALIASES = {"command": "cmd", "control": "ctrl", "alt": "option", "⌘": "cmd", "⌥": "option"}
 
-# Dangerous text patterns for the `type` action.
+# Dangerous text patterns for free-text-entry actions (`type`, `set_value`).
+# The curl/wget remote-pipe patterns cover BOTH ``| bash`` and ``| sh``
+# (and ``| zsh``) — an attacker piping a fetched script to ``sh`` is exactly
+# as dangerous as piping it to ``bash``, so a ``bash``-only wget rule was a
+# blocklist gap.
 _BLOCKED_TYPE_PATTERNS = [
-    re.compile(r"curl\s+[^|]*\|\s*bash", re.IGNORECASE),
-    re.compile(r"curl\s+[^|]*\|\s*sh", re.IGNORECASE),
-    re.compile(r"wget\s+[^|]*\|\s*bash", re.IGNORECASE),
+    re.compile(r"curl\s+[^|]*\|\s*(?:bash|sh|zsh)\b", re.IGNORECASE),
+    re.compile(r"wget\s+[^|]*\|\s*(?:bash|sh|zsh)\b", re.IGNORECASE),
     re.compile(r"\bsudo\s+rm\s+-[rf]", re.IGNORECASE),
     re.compile(r"\brm\s+-rf\s+/\s*$", re.IGNORECASE),
     re.compile(r":\s*\(\)\s*\{\s*:\|:\s*&\s*\}", re.IGNORECASE),  # fork bomb
@@ -348,6 +351,27 @@ def _action_payload(res: ActionResult) -> dict[str, Any]:
 # Dispatch — pure functions, exercised directly by tests
 # ---------------------------------------------------------------------------
 
+def _coerce_xy(raw: Any) -> tuple[int, int] | None:
+    """Coerce a ``coordinate``-shaped arg into an ``(x, y)`` int pair.
+
+    ``strict_mode`` is off (the action discriminator makes most params
+    conditionally-unused), so the API does NOT enforce the schema's
+    ``[integer, integer]`` ``minItems/maxItems`` on coordinate fields. A
+    model can therefore hand us a scalar, a one-element list, or strings.
+    Coerce defensively: return a clean ``(x, y)`` or ``None`` — never let a
+    malformed coordinate raise inside ``_dispatch`` or reach the backend as
+    a bad-typed MCP arg.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list | tuple) or len(raw) != 2:
+        return None
+    try:
+        return int(raw[0]), int(raw[1])
+    except (TypeError, ValueError):
+        return None
+
+
 def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) -> dict[str, Any]:
     """Route one action to the backend and return a JSON-serialisable dict."""
     capture_after = bool(args.get("capture_after"))
@@ -356,11 +380,19 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         mode = str(args.get("mode", "som"))
         if mode not in {"som", "vision", "ax"}:
             return {"error": f"bad mode {mode!r}; use som|vision|ax"}
-        cap = backend.capture(mode=mode, app=args.get("app"))
+        raw_app = args.get("app")
+        # strict_mode is off, so the schema's ``string`` type on ``app`` is
+        # not API-enforced — normalise a non-string/empty form to None so the
+        # backend's ``app.lower()`` filter never trips on a bad type.
+        app = str(raw_app) if isinstance(raw_app, str) and raw_app.strip() else None
+        cap = backend.capture(mode=mode, app=app)
         return _capture_payload(cap)
 
     if action == "wait":
-        seconds = float(args.get("seconds", 1.0))
+        try:
+            seconds = float(args.get("seconds", 1.0))
+        except (TypeError, ValueError):
+            return {"error": "wait `seconds` must be a number"}
         return _action_payload(backend.wait(seconds))
 
     if action == "list_apps":
@@ -368,10 +400,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         return {"apps": apps, "count": len(apps)}
 
     if action == "focus_app":
-        app = args.get("app")
-        if not app:
-            return {"error": "focus_app requires `app`"}
-        res = backend.focus_app(app, raise_window=bool(args.get("raise_window")))
+        raw_app = args.get("app")
+        if not isinstance(raw_app, str) or not raw_app.strip():
+            return {"error": "focus_app requires `app` (a non-empty app name or bundle ID)"}
+        res = backend.focus_app(raw_app, raise_window=bool(args.get("raise_window")))
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action in {"click", "double_click", "right_click", "middle_click"}:
@@ -386,8 +418,8 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         else:
             button = button or "left"
         element = args.get("element")
-        coord = args.get("coordinate") or (None, None)
-        x, y = (coord[0], coord[1]) if coord and coord[0] is not None else (None, None)
+        xy = _coerce_xy(args.get("coordinate"))
+        x, y = xy if xy is not None else (None, None)
         res = backend.click(
             element=element if element is not None else None,
             x=x, y=y, button=button or "left", click_count=click_count,
@@ -399,21 +431,25 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         res = backend.drag(
             from_element=args.get("from_element"),
             to_element=args.get("to_element"),
-            from_xy=tuple(args["from_coordinate"]) if args.get("from_coordinate") else None,
-            to_xy=tuple(args["to_coordinate"]) if args.get("to_coordinate") else None,
+            from_xy=_coerce_xy(args.get("from_coordinate")),
+            to_xy=_coerce_xy(args.get("to_coordinate")),
             button=args.get("button", "left"),
             modifiers=args.get("modifiers"),
         )
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "scroll":
-        coord = args.get("coordinate") or (None, None)
+        xy = _coerce_xy(args.get("coordinate"))
+        try:
+            amount = int(args.get("amount", 3))
+        except (TypeError, ValueError):
+            amount = 3
         res = backend.scroll(
             direction=args.get("direction", "down"),
-            amount=int(args.get("amount", 3)),
+            amount=amount,
             element=args.get("element"),
-            x=coord[0] if coord and coord[0] is not None else None,
-            y=coord[1] if coord and coord[1] is not None else None,
+            x=xy[0] if xy is not None else None,
+            y=xy[1] if xy is not None else None,
             modifiers=args.get("modifiers"),
         )
         return _maybe_follow_capture(backend, res, capture_after)
@@ -470,17 +506,28 @@ def run_computer_use(args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "missing `action`"}
 
     # Safety: validate destructive payloads before touching the backend.
-    if action == "type":
-        text = args.get("text", "")
-        pat = _is_blocked_type(text)
+    # Both `type` (text=) and `set_value` (value=) inject arbitrary free
+    # text into a UI element — a Terminal text field accepts a piped-curl
+    # payload just as readily through `set_value` as through `type`, so the
+    # dangerous-shell-pattern guard MUST cover both. Checking only `type`
+    # would leave `set_value` as an open bypass of the hard block.
+    if action in {"type", "set_value"}:
+        injected = args.get("text" if action == "type" else "value", "")
+        pat = _is_blocked_type("" if injected is None else str(injected))
         if pat:
+            field = "type text" if action == "type" else "set_value value"
             return {
-                "error": f"blocked pattern in type text: {pat!r}",
-                "hint": "Dangerous shell patterns cannot be typed via computer_use.",
+                "error": f"blocked pattern in {field}: {pat!r}",
+                "hint": "Dangerous shell patterns cannot be entered via computer_use.",
             }
 
     if action == "key":
-        keys = args.get("keys", "")
+        # strict_mode is off — coerce a non-string ``keys`` to str so the
+        # combo parse (here and in the backend) never trips on a bad type
+        # and the hard-block check still runs on the security-critical path.
+        raw_keys = args.get("keys", "")
+        keys = raw_keys if isinstance(raw_keys, str) else str(raw_keys or "")
+        args["keys"] = keys
         combo = _canon_key_combo(keys)
         for blocked in _BLOCKED_KEY_COMBOS:
             if blocked.issubset(combo) and len(blocked) <= len(combo):
