@@ -1,7 +1,7 @@
 """Shared session-fork helper.
 
 Pure helper extracted from ``cli_session.py::session_fork`` so both the
-CLI path and the ``/fork`` slash command share one implementation.
+CLI path and the ``/branch`` slash command share one implementation.
 
 Cloning a session means:
 
@@ -54,17 +54,25 @@ class ForkResult:
     messages_copied: int
 
 
-def _resolve_new_title(source_title: str | None, user_title: str | None) -> str:
+def _resolve_new_title(
+    source_title: str | None,
+    user_title: str | None,
+    fallback_title: str | None = None,
+) -> str:
     """Pick the title for the forked session.
 
-    Rules:
+    Rules, in priority order:
 
     * If the user passed a non-empty title, use it (truncated to
       ``TITLE_MAX_LEN``).
     * Else if source had a title, use ``"<source title> (fork)"``.
+    * Else if the caller supplied a non-empty ``fallback_title``, use it
+      (truncated). The dashboard ``/fork`` endpoint passes its
+      ``"Fork of <id8>"`` placeholder here.
     * Else default to ``"(fork)"``.
 
-    Whitespace-only user input is treated as no input.
+    Whitespace-only input (user title or fallback) is treated as no
+    input.
     """
     user_clean = (user_title or "").strip()
     if user_clean:
@@ -73,6 +81,10 @@ def _resolve_new_title(source_title: str | None, user_title: str | None) -> str:
     src_clean = (source_title or "").strip()
     if src_clean:
         return f"{src_clean} (fork)"[:TITLE_MAX_LEN]
+
+    fb_clean = (fallback_title or "").strip()
+    if fb_clean:
+        return fb_clean[:TITLE_MAX_LEN]
 
     return "(fork)"
 
@@ -83,6 +95,7 @@ def fork_session(
     *,
     title: str | None = None,
     record_parent: bool = False,
+    fallback_title: str | None = None,
 ) -> ForkResult:
     """Clone the message history of ``source_id`` into a new session.
 
@@ -109,6 +122,12 @@ def fork_session(
         ``False`` to preserve the historical ``oc session fork`` CLI
         behaviour, which did not record lineage. The ``/branch`` slash
         opts in (Phase H, 2026-05-11).
+    fallback_title:
+        Placeholder title used only when there is neither a
+        caller-supplied ``title`` nor a source title. ``None`` (the
+        default) falls back to the bare ``"(fork)"``. The dashboard
+        ``/fork`` endpoint passes ``"Fork of <id8>"`` here so its
+        untitled-source forks keep their historical label.
 
     Returns
     -------
@@ -128,7 +147,7 @@ def fork_session(
     msgs = db.get_messages(source_id)
 
     new_id = uuid.uuid4().hex
-    new_title = _resolve_new_title(src.get("title"), title)
+    new_title = _resolve_new_title(src.get("title"), title, fallback_title)
 
     create_kwargs: dict[str, Any] = {
         "platform": src.get("platform", "") or "cli",

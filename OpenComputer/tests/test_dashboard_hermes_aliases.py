@@ -8,6 +8,8 @@ to ``available``.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -491,83 +493,136 @@ def test_delete_session_returns_ok_json(auth_headers: dict[str, str]) -> None:
     assert resp.json()["ok"] is True
 
 
+# The fork tests below run against a real SessionDB at a tmp path so
+# the migrated endpoint exercises the genuine get_messages /
+# append_messages_batch round-trip the shared helper relies on. The
+# old hand-rolled in-memory-sqlite fakes were coupled to the
+# pre-migration raw-SQL implementation and could not satisfy the
+# helper's method set.
+
+
+@contextmanager
+def _db_cm(db: Any) -> Generator[Any]:
+    """Wrap a SessionDB to satisfy the route's ``with get_session_db()``."""
+    yield db
+
+
+def _fork_seed_db(tmp_path: Path) -> Any:
+    """Real SessionDB with a titled source ``src`` plus a tool-call
+    message and a reasoning-bearing message."""
+    from opencomputer.agent.state import SessionDB
+    from plugin_sdk.core import Message, ToolCall
+
+    db = SessionDB(tmp_path / "sessions.db")
+    db.create_session(
+        "src", platform="webui", model="claude-opus-4-7", title="source title"
+    )
+    db.append_messages_batch(
+        "src",
+        [
+            Message(role="user", content="hi"),
+            Message(
+                role="assistant",
+                content="calling",
+                tool_calls=[ToolCall(id="t1", name="Bash", arguments={})],
+                reasoning="think first",
+            ),
+            Message(role="tool", content="ok", tool_call_id="t1", name="Bash"),
+        ],
+    )
+    return db
+
+
 def test_fork_session_response_includes_forked_from(
-    auth_headers: dict[str, str],
+    tmp_path: Path, auth_headers: dict[str, str]
 ) -> None:
-    """Workspace's dashboard-shape forkSession expects ``{session, forked_from}``."""
-    import sqlite3 as _sqlite
-
-    class _DB:
-        def __init__(self) -> None:
-            self.conn = _sqlite.connect(":memory:", check_same_thread=False)
-            self.conn.row_factory = _sqlite.Row
-            self.conn.execute(
-                "CREATE TABLE sessions(id TEXT PRIMARY KEY, platform TEXT, title TEXT)"
-            )
-            self.conn.execute(
-                "CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT, "
-                "tool_calls TEXT, name TEXT, timestamp REAL)"
-            )
-            self.conn.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?)",
-                ("src", "webui", "source title"),
-            )
-
-        def get_session(self, sid: str) -> dict[str, Any] | None:
-            row = self.conn.execute(
-                "SELECT * FROM sessions WHERE id = ?", (sid,)
-            ).fetchone()
-            return dict(row) if row else None
-
-        def create_session(self, *, session_id: str, platform: str, title: str | None) -> None:
-            self.conn.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?)",
-                (session_id, platform, title),
-            )
-
-        def _connect(self) -> _sqlite.Connection:
-            return self.conn
-
-        def __enter__(self) -> _DB:
-            return self
-
-        def __exit__(self, *a: Any) -> None:
-            pass
-
-    fake = _DB()
-    app = _build_app(with_token=True)
-    client = TestClient(app)
+    """Workspace's dashboard-shape forkSession expects ``{session,
+    forked_from}``; a titled source forks to ``"<title> (fork)"``."""
+    db = _fork_seed_db(tmp_path)
+    client = TestClient(_build_app(with_token=True))
     with patch(
         "opencomputer.dashboard.routes._common.get_session_db",
-        return_value=fake,
+        lambda: _db_cm(db),
     ):
         resp = client.post("/api/sessions/src/fork", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.json()
     assert "session" in body
     assert body["forked_from"] == "src"
+    assert body["session"]["title"] == "source title (fork)"
 
 
-def test_fork_session_404_when_source_missing(auth_headers: dict[str, str]) -> None:
-    class _DB:
-        def get_session(self, sid: str) -> None:
-            return None
+def test_fork_session_404_when_source_missing(
+    tmp_path: Path, auth_headers: dict[str, str]
+) -> None:
+    """A missing source yields 404 — the helper's
+    SourceSessionNotFoundError translated to HTTP."""
+    from opencomputer.agent.state import SessionDB
 
-        def __enter__(self) -> _DB:
-            return self
-
-        def __exit__(self, *a: Any) -> None:
-            pass
-
-    app = _build_app(with_token=True)
-    client = TestClient(app)
+    db = SessionDB(tmp_path / "sessions.db")  # empty
+    client = TestClient(_build_app(with_token=True))
     with patch(
         "opencomputer.dashboard.routes._common.get_session_db",
-        return_value=_DB(),
+        lambda: _db_cm(db),
     ):
         resp = client.post("/api/sessions/missing/fork", headers=auth_headers)
     assert resp.status_code == 404
+
+
+def test_fork_session_inherits_source_model(
+    tmp_path: Path, auth_headers: dict[str, str]
+) -> None:
+    """The fork keeps the source's model. The pre-migration raw-SQL
+    endpoint dropped it — it never passed model to create_session."""
+    db = _fork_seed_db(tmp_path)
+    client = TestClient(_build_app(with_token=True))
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        lambda: _db_cm(db),
+    ):
+        resp = client.post("/api/sessions/src/fork", headers=auth_headers)
+    assert resp.status_code == 200
+    new_id = resp.json()["session"]["id"]
+    forked = db.get_session(new_id)
+    assert forked is not None
+    assert forked["model"] == "claude-opus-4-7"
+
+
+def test_fork_session_untitled_source_uses_fork_of_label(
+    tmp_path: Path, auth_headers: dict[str, str]
+) -> None:
+    """An untitled source forks to ``"Fork of <id8>"`` — the historical
+    dashboard label, preserved across the migration via fallback_title."""
+    from opencomputer.agent.state import SessionDB
+
+    db = SessionDB(tmp_path / "sessions.db")
+    db.create_session("untitled", platform="webui", model="m")  # no title
+    client = TestClient(_build_app(with_token=True))
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        lambda: _db_cm(db),
+    ):
+        resp = client.post("/api/sessions/untitled/fork", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["session"]["title"] == "Fork of untitled"
+
+
+def test_fork_session_copies_messages_through_endpoint(
+    tmp_path: Path, auth_headers: dict[str, str]
+) -> None:
+    """The fork gets a full, faithful message copy — tool fields AND
+    reasoning. The pre-migration raw SQL never copied the reasoning
+    column, silently dropping extended-thinking blocks."""
+    db = _fork_seed_db(tmp_path)
+    client = TestClient(_build_app(with_token=True))
+    with patch(
+        "opencomputer.dashboard.routes._common.get_session_db",
+        lambda: _db_cm(db),
+    ):
+        resp = client.post("/api/sessions/src/fork", headers=auth_headers)
+    assert resp.status_code == 200
+    new_id = resp.json()["session"]["id"]
+    assert db.get_messages(new_id) == db.get_messages("src")
 
 
 # ---------------------------------------------------------------------------

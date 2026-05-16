@@ -322,62 +322,50 @@ async def fork_session(
     session_id: str,
     _: None = Depends(require_session_token),
 ) -> dict[str, Any]:
-    """Clone a session's messages into a new session. Returns ``{session}``.
+    """Clone a session's messages into a new session. Returns
+    ``{session, forked_from}``.
 
-    Uses raw SQL inside the SessionDB connection so timestamps and ordering
-    are preserved exactly. The new session id is a fresh UUID4 hex.
+    Delegates to the shared
+    :func:`opencomputer.agent.session_fork.fork_session` helper — the
+    same code path behind ``oc session fork`` and the ``/branch`` slash
+    command. The helper copies every ``Message`` field (tool calls,
+    reasoning, attachments, timestamps) through
+    ``append_messages_batch``; the hand-rolled raw SQL this replaced
+    copied only six columns and silently dropped reasoning blocks and
+    image attachments.
+
+    ``fallback_title`` keeps this route's historical ``"Fork of <id8>"``
+    label for an untitled source; a titled source still forks to
+    ``"<title> (fork)"``.
     """
-    import uuid as _uuid
-
+    from opencomputer.agent.session_fork import (
+        SourceSessionNotFoundError,
+    )
+    from opencomputer.agent.session_fork import (
+        fork_session as _fork_session,
+    )
     from opencomputer.dashboard.routes._common import get_session_db
 
     if not isinstance(session_id, str) or not session_id.strip():
         raise HTTPException(status_code=400, detail="empty session id")
 
-    new_id = _uuid.uuid4().hex
     try:
         with get_session_db() as db:
-            src = db.get_session(session_id)
-            if not src:
-                raise HTTPException(
-                    status_code=404,
-                    detail="source session not found",
-                )
-            src_title = (src.get("title") or "").strip()
-            new_title = (
-                f"{src_title} (fork)" if src_title else f"Fork of {session_id[:8]}"
+            result = _fork_session(
+                db,
+                session_id,
+                fallback_title=f"Fork of {session_id[:8]}",
             )
-            db.create_session(
-                session_id=new_id,
-                platform=src.get("platform") or "webui",
-                title=new_title,
-            )
-            with db._connect() as conn:  # noqa: SLF001
-                rows = conn.execute(
-                    "SELECT role, content, tool_call_id, tool_calls, "
-                    "name, timestamp FROM messages WHERE session_id = ? "
-                    "ORDER BY id",
-                    (session_id,),
-                ).fetchall()
-                for r in rows:
-                    conn.execute(
-                        "INSERT INTO messages (session_id, role, content, "
-                        "tool_call_id, tool_calls, name, timestamp) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            new_id,
-                            r["role"],
-                            r["content"],
-                            r["tool_call_id"],
-                            r["tool_calls"],
-                            r["name"],
-                            r["timestamp"],
-                        ),
-                    )
-                conn.commit()
-            new_row = db.get_session(new_id) or {"id": new_id, "title": new_title}
+            new_row = db.get_session(result.new_session_id) or {
+                "id": result.new_session_id,
+                "title": result.new_title,
+            }
     except HTTPException:
         raise
+    except SourceSessionNotFoundError:
+        raise HTTPException(
+            status_code=404, detail="source session not found"
+        ) from None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "hermes_aliases: fork_session failed: sid=%s exc=%s",
