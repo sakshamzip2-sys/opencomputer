@@ -1808,6 +1808,27 @@ def _run_chat_session(
             exc_info=True,
         )
 
+    # life-event teeth (2026-05-16) — register the per-turn life-event hint
+    # provider so surfacing="hint" PatternFirings (job change, exam prep,
+    # burnout, travel) drain into a <life-event-hint> system-prompt block.
+    # Safe to register globally: collect() returns None when the registry
+    # has no pending firings (the normal case), so a registered-but-idle
+    # provider is inert. Idempotent — unregister first to dodge the
+    # "already registered" ValueError on session re-init.
+    try:
+        from opencomputer.awareness.life_events.injection import (
+            LifeEventInjectionProvider,
+        )
+
+        injection_engine.unregister("life_event_hint")
+        injection_engine.register(LifeEventInjectionProvider())
+    except Exception:  # noqa: BLE001 — never break loop boot
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").warning(
+            "life-event injection provider registration failed",
+            exc_info=True,
+        )
+
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     loop._runtime = runtime
 
