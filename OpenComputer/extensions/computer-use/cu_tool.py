@@ -200,12 +200,14 @@ class NoopBackend(ComputerUseBackend):
 # Screenshot persistence
 # ---------------------------------------------------------------------------
 
-def _screenshots_dir() -> Path:
-    """Directory where capture PNGs are persisted.
+def _screenshots_dir() -> Path | None:
+    """Directory where capture PNGs are persisted, or ``None`` if uncreatable.
 
     Honors ``OPENCOMPUTER_PROFILE_HOME`` (set by the hook env / runtime) so
     captures land inside the active profile; falls back to the system
-    temp dir when no profile home is known.
+    temp dir when no profile home is known. Returns ``None`` (rather than
+    raising) when the directory cannot be created — a non-writable cache
+    must degrade to "no screenshot path", never kill the whole capture.
     """
     base = os.environ.get("OPENCOMPUTER_PROFILE_HOME")
     if base:
@@ -213,22 +215,33 @@ def _screenshots_dir() -> Path:
     else:
         import tempfile
         out = Path(tempfile.gettempdir()) / "opencomputer_computer_use_screenshots"
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("computer_use screenshot dir uncreatable (%s): %s", out, e)
+        return None
     return out
 
 
 def _cleanup_old_screenshots(directory: Path, max_age_hours: float = 24.0) -> None:
-    """Prune capture PNGs older than ``max_age_hours`` to bound disk usage."""
+    """Prune capture images older than ``max_age_hours`` to bound disk usage.
+
+    Globs both ``.png`` and ``.jpg`` — ``_persist_png`` writes either,
+    depending on whether cua-driver returned PNG or JPEG bytes.
+    """
     cutoff = time.time() - max_age_hours * 3600.0
     try:
-        for p in directory.glob("computer_use_*.png"):
-            try:
-                if p.stat().st_mtime < cutoff:
-                    p.unlink()
-            except OSError:
-                pass
+        stale = [p for p in directory.iterdir()
+                 if p.name.startswith("computer_use_")
+                 and p.suffix in (".png", ".jpg")]
     except OSError:
-        pass
+        return
+    for p in stale:
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
 
 
 def _persist_png(png_b64: str) -> str | None:
@@ -237,9 +250,13 @@ def _persist_png(png_b64: str) -> str | None:
         raw = base64.b64decode(png_b64, validate=False)
     except Exception:
         return None
+    if not raw:
+        return None
     # Detect format from magic bytes — cua-driver may return JPEG or PNG.
     ext = "jpg" if raw[:3] == b"\xff\xd8\xff" else "png"
     directory = _screenshots_dir()
+    if directory is None:
+        return None
     _cleanup_old_screenshots(directory)
     path = directory / f"computer_use_{uuid.uuid4().hex}.{ext}"
     try:
@@ -298,6 +315,15 @@ def _capture_payload(cap: CaptureResult) -> dict[str, Any]:
         "summary": summary,
         "png_bytes": cap.png_bytes_len,
     }
+    # A failed capture must not masquerade as a clean "0 elements" result —
+    # surface the backend's error so the agent retries (re-list windows,
+    # switch capture mode) instead of acting on stale assumptions.
+    if cap.error:
+        payload["error"] = cap.error
+        payload["hint"] = (
+            "capture did not complete — re-run capture (optionally with a "
+            "different app=) or, for screenshot failures, try mode='ax'."
+        )
     if cap.png_b64 and cap.mode != "ax":
         screenshot_path = _persist_png(cap.png_b64)
         if screenshot_path:
@@ -316,30 +342,6 @@ def _action_payload(res: ActionResult) -> dict[str, Any]:
     if res.meta:
         payload["meta"] = res.meta
     return payload
-
-
-def _summarize_action(action: str, args: dict[str, Any]) -> str:
-    if action in {"click", "double_click", "right_click", "middle_click"}:
-        if args.get("element") is not None:
-            return f"{action} element #{args['element']}"
-        coord = args.get("coordinate")
-        if coord:
-            return f"{action} at {tuple(coord)}"
-        return action
-    if action == "drag":
-        src = args.get("from_element") or args.get("from_coordinate")
-        dst = args.get("to_element") or args.get("to_coordinate")
-        return f"drag {src} → {dst}"
-    if action == "scroll":
-        return f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}"
-    if action == "type":
-        text = args.get("text", "")
-        return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "")
-    if action == "key":
-        return f"key {args.get('keys', '')!r}"
-    if action == "focus_app":
-        return f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else "")
-    return action
 
 
 # ---------------------------------------------------------------------------

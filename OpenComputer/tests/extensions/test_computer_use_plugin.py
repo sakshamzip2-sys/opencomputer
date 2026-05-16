@@ -11,10 +11,12 @@ without the binary installed.
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -358,6 +360,62 @@ class TestCaptureResponse:
         assert out["action"] == "click"
         assert out["ok"] is True
         assert "screenshot_path" in out
+
+
+class TestScreenshotPersistence:
+    """Disk-write behaviour for capture PNG/JPEG persistence."""
+
+    def test_cleanup_prunes_both_png_and_jpg(self, tmp_path):
+        """The 24h prune must reap JPEG captures too — _persist_png writes
+        .jpg when cua-driver returns JPEG bytes."""
+        old = time.time() - 48 * 3600
+        fresh = time.time()
+        for name, mtime in [
+            ("computer_use_a.png", old), ("computer_use_b.jpg", old),
+            ("computer_use_c.png", fresh), ("computer_use_d.jpg", fresh),
+        ]:
+            p = tmp_path / name
+            p.write_bytes(b"x")
+            os.utime(p, (mtime, mtime))
+        tool_mod._cleanup_old_screenshots(tmp_path)
+        survivors = {p.name for p in tmp_path.iterdir()}
+        assert survivors == {"computer_use_c.png", "computer_use_d.jpg"}
+
+    def test_persist_png_detects_jpeg_magic_bytes(self, tmp_path):
+        """JPEG bytes (FF D8 FF) must persist with a .jpg extension."""
+        jpeg = base64.b64encode(b"\xff\xd8\xff\xe0rest").decode()
+        with patch.dict(os.environ, {"OPENCOMPUTER_PROFILE_HOME": str(tmp_path)}):
+            path = tool_mod._persist_png(jpeg)
+        assert path is not None and path.endswith(".jpg")
+
+    def test_persist_png_degrades_when_dir_uncreatable(self, tmp_path):
+        """An uncreatable cache dir must yield None — never raise and kill
+        the whole capture payload."""
+        # Point the profile home at a path whose parent is a file → mkdir fails.
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_bytes(b"x")
+        with patch.dict(os.environ,
+                        {"OPENCOMPUTER_PROFILE_HOME": str(blocker)}):
+            assert tool_mod._screenshots_dir() is None
+            assert tool_mod._persist_png(_FakeBackend.FAKE_PNG) is None
+
+    def test_capture_payload_survives_unwritable_cache(self, tmp_path):
+        """A capture whose screenshot can't be persisted still returns the
+        element payload — just without screenshot_path."""
+        blocker = tmp_path / "blocked"
+        blocker.write_bytes(b"x")
+        tool_mod.reset_backend_for_tests()
+        with patch.dict(os.environ, {"OPENCOMPUTER_PROFILE_HOME": str(blocker)}), \
+             patch.object(tool_mod, "_get_backend", return_value=_FakeBackend()):
+            out = tool_mod.run_computer_use({"action": "capture", "mode": "vision"})
+        assert "screenshot_path" not in out
+        assert "error" not in out  # capture itself succeeded
+        assert out["mode"] == "vision"
+
+    def test_persist_png_rejects_empty_payload(self):
+        """Empty / undecodable base64 must yield None, not an empty file."""
+        assert tool_mod._persist_png("") is None
+        assert tool_mod._persist_png("!!!not-base64!!!") is None
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +899,153 @@ class TestCuaBackend0_1_9CallSites:
         cap = b.capture(mode="som")
         assert cap.width == 1440 and cap.height == 900
         assert {e.index for e in cap.elements} == {0, 1}
+
+    def test_capture_no_windows_sets_error(self):
+        """No on-screen window must surface an explicit error, not a silent
+        empty CaptureResult that reads as '0 interactable elements'."""
+        empty_lw = {"data": None, "images": [], "isError": False,
+                    "structuredContent": {"windows": [], "current_space_id": 1}}
+        b = _backend_with_session({"list_windows": empty_lw})
+        cap = b.capture(mode="som")
+        assert cap.error
+        assert "no on-screen" in cap.error.lower()
+        cap_app = b.capture(mode="som", app="Safari")
+        assert "safari" in cap_app.error.lower()
+
+    def test_capture_app_filter_miss_is_surfaced(self):
+        """_select_windows falls back to all windows when the app filter
+        misses — capture(app=X) must say so instead of silently capturing
+        the wrong app."""
+        gws = {"data": {"tree_markdown": '- [0] AXWindow "x"\n'},
+               "images": [], "structuredContent": None, "isError": False}
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws})
+        cap = b.capture(mode="som", app="ZZNoSuchApp")
+        assert cap.error
+        assert "ZZNoSuchApp" in cap.error
+        assert "Safari" in cap.error  # tells the agent what it got instead
+
+    def test_capture_app_filter_match_has_no_error(self):
+        """An app filter that DOES match (incl. bundle-id form) is clean."""
+        gws = {"data": {"tree_markdown": '- [0] AXWindow "x"\n'},
+               "images": [], "structuredContent": None, "isError": False}
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws})
+        assert b.capture(mode="som", app="Safari").error == ""
+        # bundle-id form — matched leniently against the trailing segment
+        assert b.capture(mode="som", app="com.apple.Safari").error == ""
+
+    def test_capture_surfaces_get_window_state_iserror(self):
+        """get_window_state isError (window off-Space / pid mismatch) must
+        propagate to CaptureResult.error — not be swallowed as 0 elements."""
+        gws_err = {
+            "data": {"message": "window_id 88 is not on the current Space"},
+            "images": [], "structuredContent": None, "isError": True,
+        }
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws_err})
+        cap = b.capture(mode="som")
+        assert cap.error
+        assert "current Space" in cap.error
+        assert cap.elements == []
+
+    def test_capture_vision_surfaces_screenshot_iserror(self):
+        """The documented SCK -3801 screenshot refusal must surface as an
+        error rather than a silent png_b64=None capture."""
+        shot_err = {"data": "SCStreamError -3801: Could not start streaming",
+                    "images": [], "structuredContent": None, "isError": True}
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "screenshot": shot_err})
+        cap = b.capture(mode="vision")
+        assert cap.error
+        assert "-3801" in cap.error
+        assert cap.png_b64 is None
+
+    def test_capture_error_propagates_through_dispatch(self):
+        """A failed capture must mark the tool result is_error=True via the
+        ``error`` key on the dispatch payload."""
+        gws_err = {"data": "AX walk refused", "images": [],
+                   "structuredContent": None, "isError": True}
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws_err})
+        out = tool_mod._dispatch(b, "capture", {"mode": "som"})
+        assert "error" in out
+        assert "hint" in out
+
+    def test_error_message_helper_handles_dict_and_str(self):
+        """_error_message extracts a message from both shapes cua-driver
+        uses for isError detail (plain text and {'message': ...} JSON)."""
+        em = cua_backend_mod._error_message
+        assert em({"data": {"message": "boom"}}) == "boom"
+        assert em({"data": {"error": "bad"}}) == "bad"
+        assert em({"data": "  raw text  "}) == "raw text"
+        assert em({"data": None}) == ""
+        assert em({"data": {}}) == ""
+
+
+class TestAsyncBridgeLifecycle:
+    """The asyncio bridge + session must be start/stop idempotent and never
+    hang or raise on teardown — including teardown that never started."""
+
+    def test_bridge_double_start_is_idempotent(self):
+        bridge = cua_backend_mod._AsyncBridge()
+        bridge.start()
+        try:
+            first_thread = bridge._thread
+            bridge.start()  # second start must be a no-op
+            assert bridge._thread is first_thread
+            assert first_thread is not None and first_thread.is_alive()
+        finally:
+            bridge.stop()
+
+    def test_bridge_stop_is_idempotent_and_clears_state(self):
+        bridge = cua_backend_mod._AsyncBridge()
+        bridge.start()
+        bridge.stop()
+        assert bridge._thread is None and bridge._loop is None
+        bridge.stop()  # second stop must not raise
+        assert bridge._thread is None
+
+    def test_bridge_stop_without_start_does_not_raise(self):
+        cua_backend_mod._AsyncBridge().stop()  # must be a clean no-op
+
+    def test_run_on_unstarted_bridge_raises_clean_runtimeerror(self):
+        bridge = cua_backend_mod._AsyncBridge()
+
+        async def _noop():
+            return 1
+
+        coro = _noop()
+        try:
+            with pytest.raises(RuntimeError, match="not started"):
+                bridge.run(coro)
+        finally:
+            coro.close()  # bridge rejected before awaiting — close cleanly
+
+    def test_session_stop_without_start_is_noop(self):
+        bridge = cua_backend_mod._AsyncBridge()
+        session = cua_backend_mod._CuaDriverSession(bridge)
+        session.stop()  # not started — must not raise or touch the bridge
+        assert session._started is False
+
+    def test_backend_stop_is_idempotent(self):
+        """CuaDriverBackend.stop() must be safe to call twice / before start."""
+        b = cua_backend_mod.CuaDriverBackend()
+        b.stop()  # never started
+        b.stop()  # twice
+
+
+class TestDeadCodeRemoved:
+    """Regression guards for the audit's dead-code removal."""
+
+    def test_no_parse_element_json_helper(self):
+        """0.1.9 never emits per-element JSON — the _parse_element helper
+        was dead and must stay removed."""
+        assert not hasattr(cua_backend_mod, "_parse_element")
+
+    def test_no_arm_mac_helper(self):
+        """_is_arm_mac was never referenced — must stay removed."""
+        assert not hasattr(cua_backend_mod, "_is_arm_mac")
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,11 @@ class CaptureResult:
     window_title: str = ""
     # Raw byte length of the decoded image, for token estimation.
     png_bytes_len: int = 0
+    # Non-empty when the backend could not complete the capture cleanly
+    # (no window found, MCP-side ``isError``, screenshot refused, …). The
+    # tool layer surfaces this so the agent retries instead of silently
+    # treating a failed capture as "0 interactable elements".
+    error: str = ""
 
 
 @dataclass

@@ -22,7 +22,6 @@ import base64
 import json
 import logging
 import os
-import platform
 import re
 import sys
 import threading
@@ -85,10 +84,6 @@ _ELEMENT_LINE_RE = re.compile(
 
 def _is_macos() -> bool:
     return sys.platform == "darwin"
-
-
-def _is_arm_mac() -> bool:
-    return _is_macos() and platform.machine() == "arm64"
 
 
 def cua_driver_binary_available() -> bool:
@@ -389,6 +384,23 @@ def _extract_tool_result(mcp_result: Any) -> dict[str, Any]:
     return {"data": data, "images": images, "structuredContent": structured, "isError": is_error}
 
 
+def _error_message(out: dict[str, Any]) -> str:
+    """Best-effort human-readable message from an ``isError`` tool result.
+
+    cua-driver delivers error detail as the text content block (so it lands
+    in ``data``) — either a plain string or a ``{"message": ...}`` JSON dict.
+    """
+    data = out.get("data")
+    if isinstance(data, dict):
+        msg = data.get("message") or data.get("error")
+        if msg:
+            return str(msg)
+        return ""
+    if isinstance(data, str):
+        return data.strip()
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # The backend itself
 # ---------------------------------------------------------------------------
@@ -446,8 +458,12 @@ class CuaDriverBackend(ComputerUseBackend):
         """
         windows = self._select_windows(app)
         if not windows:
-            return CaptureResult(mode=mode, width=0, height=0, png_b64=None,
-                                 elements=[], app="", window_title="", png_bytes_len=0)
+            return CaptureResult(
+                mode=mode, width=0, height=0, png_b64=None, elements=[],
+                app="", window_title="", png_bytes_len=0,
+                error=(f"no on-screen window found for app {app!r}"
+                       if app else "no on-screen windows found"),
+            )
 
         target = next((w for w in windows if not w["off_screen"]), windows[0])
         self._active_pid = target["pid"]
@@ -460,6 +476,23 @@ class CuaDriverBackend(ComputerUseBackend):
 
         png_b64: str | None = None
         elements: list[UIElement] = []
+        error = ""
+
+        # ``_select_windows`` falls back to ALL on-screen windows when an
+        # ``app`` filter matches nothing (resilient targeting). For an
+        # explicit ``capture(app=...)`` that fallback is misleading — the
+        # caller asked for app X and would otherwise get app Y with no
+        # signal. Surface the miss so the agent can correct the name.
+        # ``list_windows`` records only carry ``app_name`` (no bundle_id),
+        # so a bundle-ID form ("com.apple.Safari") is matched leniently
+        # against the trailing identifier segment.
+        if app:
+            app_l = app.lower()
+            name_l = app_name.lower()
+            tail = app_l.rsplit(".", 1)[-1]
+            if app_l not in name_l and name_l not in app_l and tail not in name_l:
+                error = (f"no on-screen window matched app {app!r}; captured "
+                         f"frontmost window ({app_name!r}) instead")
 
         if mode == "vision":
             sc_out = self._session.call_tool(
@@ -468,11 +501,22 @@ class CuaDriverBackend(ComputerUseBackend):
             )
             if sc_out["images"]:
                 png_b64 = sc_out["images"][0]
+            elif sc_out.get("isError"):
+                # The documented macOS 26.4.x SCK -3801 regression lands
+                # here — surface it instead of returning png_b64=None silently.
+                error = (_error_message(sc_out)
+                         or "screenshot capture failed (try capture mode 'ax')")
         else:
             gws_out = self._session.call_tool(
                 "get_window_state",
                 {"pid": self._active_pid, "window_id": self._active_window_id},
             )
+            if gws_out.get("isError"):
+                # window_id not on the current Space, pid mismatch, AX
+                # walk refused — surface it rather than reporting "0
+                # interactable elements" and misleading the agent.
+                error = (_error_message(gws_out)
+                         or "get_window_state failed for the target window")
             # 0.1.9 ships the structured payload (tree_markdown +
             # screenshot_* dims) as MCP ``structuredContent``; the text
             # block is a human summary with the tree embedded. Prefer the
@@ -531,6 +575,7 @@ class CuaDriverBackend(ComputerUseBackend):
             app=app_name,
             window_title=window_title,
             png_bytes_len=png_bytes_len,
+            error=error,
         )
 
     # ── Pointer ────────────────────────────────────────────────────
@@ -832,32 +877,6 @@ class CuaDriverBackend(ComputerUseBackend):
             message = data
         return ActionResult(ok=ok, action=name, message=message,
                             meta=data if isinstance(data, dict) else {})
-
-
-def _parse_element(d: dict[str, Any]) -> UIElement:
-    bounds = d.get("bounds") or (0, 0, 0, 0)
-    if isinstance(bounds, dict):
-        bounds = (
-            int(bounds.get("x", 0)),
-            int(bounds.get("y", 0)),
-            int(bounds.get("w", bounds.get("width", 0))),
-            int(bounds.get("h", bounds.get("height", 0))),
-        )
-    elif isinstance(bounds, list | tuple) and len(bounds) == 4:
-        bounds = tuple(int(v) for v in bounds)
-    else:
-        bounds = (0, 0, 0, 0)
-    return UIElement(
-        index=int(d.get("index", 0)),
-        role=str(d.get("role", "") or ""),
-        label=str(d.get("label", "") or ""),
-        bounds=bounds,  # type: ignore[arg-type]
-        app=str(d.get("app", "") or ""),
-        pid=int(d.get("pid", 0) or 0),
-        window_id=int(d.get("windowId", 0) or 0),
-        attributes={k: v for k, v in d.items()
-                    if k not in {"index", "role", "label", "bounds", "app", "pid", "windowId"}},
-    )
 
 
 __all__ = [
