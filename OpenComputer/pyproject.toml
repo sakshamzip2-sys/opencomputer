@@ -208,6 +208,15 @@ browser = [
 # E2B_API_KEY (free Hobby tier at https://e2b.dev/dashboard). See
 # opencomputer/sandbox/e2b.py and docs/refs/e2b/2026-05-16-sdk-survey.md.
 e2b = ["e2b>=2.21,<3"]
+# Optional: NeuTTS local neural text-to-speech (Milestone 4). NeuTTS is an
+# on-device, voice-cloning TTS model — the VoiceSynthesizeLocal tool
+# synthesizes speech with no API call and no per-call cost. Heavy: it pulls
+# torch + transformers, so it is an optional extra — the base install stays
+# light, and VoiceSynthesizeLocal is registered only when this is present.
+# Install with `pip install opencomputer[neutts]`, then run
+# `oc voice install-neutts` to pre-download the model. See
+# opencomputer/voice/tts_neutts.py.
+neutts = ["neutts>=1.2.1,<2"]
 
 [project.scripts]
 oc = "opencomputer.cli:main"
