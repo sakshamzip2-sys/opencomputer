@@ -51,68 +51,47 @@ def test_peek_returns_most_recent_firing():
         hint_text="3 days of intense studying",
         timestamp=2000.0,
     )
-    reg._queue.append(older)
-    reg._queue.append(newer)
-    firing = reg.peek_most_recent_firing()
-    assert firing is not None
-    assert firing.pattern_id == "exam_prep"
+    # Mirror what on_event does for each non-silent firing: queue it AND
+    # record it as the most-recent firing.
+    for firing in (older, newer):
+        reg._queue.append(firing)
+        reg._last_firing = firing
+    peeked = reg.peek_most_recent_firing()
+    assert peeked is not None
+    assert peeked.pattern_id == "exam_prep"
     # Peek does NOT drain
     assert len(reg._queue) == 2
 
 
-def test_peek_picks_max_timestamp_even_when_appended_out_of_order():
-    """Defensive: registry queue is append-only today, but peek uses max
-    by timestamp so any future re-ordering doesn't break the contract."""
-    reg = get_global_registry()
-    reg._queue.append(
-        PatternFiring(
-            pattern_id="newer",
-            confidence=0.9,
-            evidence_count=2,
-            surfacing="hint",
-            hint_text="newer event",
-            timestamp=2000.0,
-        )
-    )
-    reg._queue.append(
-        PatternFiring(
-            pattern_id="older",
-            confidence=0.5,
-            evidence_count=1,
-            surfacing="hint",
-            hint_text="older event",
-            timestamp=500.0,
-        )
-    )
-    firing = reg.peek_most_recent_firing()
-    assert firing is not None
-    assert firing.pattern_id == "newer"
-
-
 def test_drain_still_works_after_peek():
     reg = get_global_registry()
-    reg._queue.append(
-        PatternFiring(
-            pattern_id="burnout",
-            confidence=0.8,
-            evidence_count=4,
-            surfacing="hint",
-            hint_text="late-night coding",
-            timestamp=1500.0,
-        )
+    firing = PatternFiring(
+        pattern_id="burnout",
+        confidence=0.8,
+        evidence_count=4,
+        surfacing="hint",
+        hint_text="late-night coding",
+        timestamp=1500.0,
     )
+    reg._queue.append(firing)
+    reg._last_firing = firing
     peeked = reg.peek_most_recent_firing()
     assert peeked is not None
     drained = reg.drain_pending()
     assert len(drained) == 1
     assert drained[0].pattern_id == "burnout"
-    assert reg.peek_most_recent_firing() is None
+    # The injection provider drains every turn; peek must survive that so
+    # the companion overlay still has an anchor for the rest of the turn.
+    survivor = reg.peek_most_recent_firing()
+    assert survivor is not None
+    assert survivor.pattern_id == "burnout"
 
 
 def test_companion_overlay_skips_anchor_when_no_firing():
     """Empty global registry → companion overlay base form does NOT
     already contain the anchor marker."""
     persona = get_persona("companion")
+    assert persona is not None
     overlay = persona["system_prompt_overlay"]
     assert "RECENT LIFE EVENT" not in overlay
 
@@ -121,16 +100,16 @@ def test_loop_builds_overlay_with_anchor_under_companion():
     """End-to-end-ish: AgentLoop._build_persona_overlay augments the
     companion overlay with the most-recent firing when one is queued."""
     reg = get_global_registry()
-    reg._queue.append(
-        PatternFiring(
-            pattern_id="exam_prep",
-            confidence=0.82,
-            evidence_count=4,
-            surfacing="hint",
-            hint_text="user studying for licensing exam, intensity rising",
-            timestamp=1700000000.0,
-        )
+    firing = PatternFiring(
+        pattern_id="exam_prep",
+        confidence=0.82,
+        evidence_count=4,
+        surfacing="hint",
+        hint_text="user studying for licensing exam, intensity rising",
+        timestamp=1700000000.0,
     )
+    reg._queue.append(firing)
+    reg._last_firing = firing
 
     stand_in = MagicMock()
     stand_in._active_persona_id = ""
@@ -149,16 +128,16 @@ def test_loop_omits_anchor_under_non_companion_personas():
     """A coding-question that routes to coding persona must NOT get the
     life-event anchor (it's companion-only)."""
     reg = get_global_registry()
-    reg._queue.append(
-        PatternFiring(
-            pattern_id="exam_prep",
-            confidence=0.82,
-            evidence_count=4,
-            surfacing="hint",
-            hint_text="user studying intensely",
-            timestamp=1700000000.0,
-        )
+    firing = PatternFiring(
+        pattern_id="exam_prep",
+        confidence=0.82,
+        evidence_count=4,
+        surfacing="hint",
+        hint_text="user studying intensely",
+        timestamp=1700000000.0,
     )
+    reg._queue.append(firing)
+    reg._last_firing = firing
 
     stand_in = MagicMock()
     stand_in._active_persona_id = ""

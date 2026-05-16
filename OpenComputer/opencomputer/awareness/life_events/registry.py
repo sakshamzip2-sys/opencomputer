@@ -37,6 +37,9 @@ class LifeEventRegistry:
         self._patterns: dict[str, LifeEventPattern] = {p.pattern_id: p for p in patterns}
         self._muted: set[str] = set()
         self._queue: list[PatternFiring] = []
+        # Latest queued firing, retained independently of the queue so that
+        # peek_most_recent_firing survives drain_pending (see that method).
+        self._last_firing: PatternFiring | None = None
 
     def is_muted(self, pattern_id: str) -> bool:
         return pattern_id in self._muted
@@ -71,6 +74,7 @@ class LifeEventRegistry:
                 _log.debug("Silent firing %s confidence=%.2f", pattern_id, firing.confidence)
                 continue
             self._queue.append(firing)
+            self._last_firing = firing
 
     def drain_pending(self) -> list[PatternFiring]:
         """Pop all queued firings (called by chat surfacer at turn start)."""
@@ -78,22 +82,23 @@ class LifeEventRegistry:
         return out
 
     def peek_most_recent_firing(self) -> PatternFiring | None:
-        """Return the most-recent firing WITHOUT draining the queue.
+        """Return the most-recent queued firing, decoupled from the queue.
 
         Path A.3 (2026-04-27): the companion-persona overlay augmentation
-        wants to read the freshest firing as anchor context for the LLM,
-        but the firing is still legitimate input for the chat surfacer
-        (which drains the queue at the start of each turn). Peeking is
-        non-destructive.
+        wants to read the freshest firing as anchor context for the LLM.
 
-        Returns None if the queue is empty. Most-recent = highest
-        ``timestamp`` (the queue is append-only so the last entry wins,
-        but we ``max`` over the list to be robust against any future
-        reordering of the queue).
+        The firing is also legitimate input for the chat surfacer / injection
+        provider, which calls ``drain_pending`` at the start of each turn.
+        Reading from ``_queue`` here would mean peek returns ``None`` for the
+        rest of the turn after a drain. ``_last_firing`` is updated alongside
+        every ``_queue.append`` and is never cleared by ``drain_pending``, so
+        peeking stays non-destructive AND survives a drain.
+
+        Returns None until the first non-silent firing is queued. Silent
+        firings are not retained — they never reach this method, matching
+        their exclusion from the chat-surfacer queue.
         """
-        if not self._queue:
-            return None
-        return max(self._queue, key=lambda f: f.timestamp)
+        return self._last_firing
 
 
 # ── Module-level singleton (Path A.3) ─────────────────────────────────
