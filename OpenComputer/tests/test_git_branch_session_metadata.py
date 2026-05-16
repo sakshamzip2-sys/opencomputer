@@ -28,7 +28,12 @@ from pathlib import Path
 
 import pytest
 
-from opencomputer.agent.state import SessionDB, _migrate_v18_to_v19, apply_migrations
+from opencomputer.agent.state import (
+    SCHEMA_VERSION,
+    SessionDB,
+    _migrate_v18_to_v19,
+    apply_migrations,
+)
 from opencomputer.cli_ui.resume_picker import SessionRow
 from opencomputer.worktree import current_git_branch
 
@@ -240,12 +245,12 @@ def test_migration_v18_to_v19_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_apply_migrations_advances_to_19(tmp_path: Path) -> None:
-    """A fresh DB must end up at schema_version == 19."""
+    """A fresh DB must end up at the latest schema version (``SCHEMA_VERSION``)."""
     db_path = tmp_path / "sessions.db"
     SessionDB(db_path)
     with sqlite3.connect(db_path) as raw:
         (v,) = raw.execute("SELECT version FROM schema_version").fetchone()
-    assert v == 19
+    assert v == SCHEMA_VERSION
 
 
 # ─── ensure_session / create_session persist git_branch ──────────────

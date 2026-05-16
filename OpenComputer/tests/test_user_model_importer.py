@@ -155,10 +155,13 @@ def test_import_idempotent_for_same_motif(tmp_path: Path) -> None:
     n2_count = store.count_nodes()
     # Node count unchanged (upsert ignores duplicates).
     assert n1_count == n2_count
-    # Edge count DOES grow — edges carry fresh UUIDs on each import.
-    # Phase 3.D drift detection is responsible for folding duplicates.
+    # Edge count is stable too: M2 gave importer edges a deterministic id
+    # derived from (kind, from, to, source), so re-importing the same
+    # motif REPLACEs rather than appends. (Previously a fresh UUID per
+    # import — the cause of the edge explosion, see
+    # docs/refs/oc-user-model-writers.md §4.)
     e2_count = store.count_edges()
-    assert e2_count > e1_count
+    assert e2_count == e1_count
 
 
 def test_import_returns_count_tuple(tmp_path: Path) -> None:

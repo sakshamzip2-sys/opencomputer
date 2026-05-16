@@ -177,6 +177,8 @@ from plugin_sdk.user_model import (
     EdgeKind,
     Node,
     NodeKind,
+    NodeKindValidator,
+    NodeValidation,
     UserModelQuery,
     UserModelSnapshot,
 )
@@ -321,6 +323,8 @@ __all__ = [
     # user-model graph (Phase 3.C, F4 layer)
     "Node",
     "NodeKind",
+    "NodeKindValidator",
+    "NodeValidation",
     "Edge",
     "EdgeKind",
     "UserModelQuery",

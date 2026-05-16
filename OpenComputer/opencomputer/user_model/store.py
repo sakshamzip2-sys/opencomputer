@@ -427,6 +427,24 @@ class UserModelStore:
             )
             return int(cur.rowcount or 0)
 
+    def update_node_metadata(
+        self, node_id: str, metadata: dict[str, Any]
+    ) -> None:
+        """Replace one node's ``metadata`` JSON in place.
+
+        A plain ``UPDATE`` — unlike :meth:`insert_node`, which is
+        ``INSERT OR REPLACE`` and therefore delete-then-reinserts the
+        row, cascade-dropping the node's incident edges via the
+        ``ON DELETE CASCADE`` foreign keys. Soft-delete / tombstone
+        flows MUST use this so a node's edges survive a metadata-only
+        change. A no-op when ``node_id`` does not exist.
+        """
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE nodes SET metadata_json = ? WHERE node_id = ?",
+                (json.dumps(dict(metadata)), node_id),
+            )
+
     # ─── Edge CRUD ────────────────────────────────────────────────────
 
     @staticmethod
@@ -540,6 +558,126 @@ class UserModelStore:
                 "UPDATE edges SET recency_weight = ? WHERE edge_id = ?",
                 (clamped, edge_id),
             )
+
+    #: Inner SELECT — every edge that is NOT the newest of its
+    #: (kind, from_node, to_node, source) identity group, i.e. the
+    #: redundant duplicates left by the pre-M2 fresh-uuid importer.
+    _DUP_EDGE_INNER = """
+        SELECT edge_id FROM (
+            SELECT edge_id, ROW_NUMBER() OVER (
+                PARTITION BY kind, from_node, to_node, source
+                ORDER BY created_at DESC, edge_id
+            ) AS rn FROM edges
+        ) WHERE rn > 1
+    """
+
+    def collapse_duplicate_edges(self, *, dry_run: bool = False) -> int:
+        """Delete redundant edges, keeping the newest per identity group.
+
+        Identity is ``(kind, from_node, to_node, source)``. The motif
+        importer historically inserted a fresh-uuid edge on every cron
+        tick; M2 fixed that at source (deterministic edge ids) but the
+        legacy backlog still needs collapsing. With ``dry_run=True`` the
+        redundant rows are counted, not deleted. Returns the number of
+        edges deleted — or, in dry-run, that would be deleted.
+        """
+        if dry_run:
+            with self._connect() as conn:
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM ({self._DUP_EDGE_INNER})"
+                ).fetchone()
+            return int(row[0]) if row else 0
+        with self._txn() as conn:
+            cur = conn.execute(
+                f"DELETE FROM edges WHERE edge_id IN ({self._DUP_EDGE_INNER})"
+            )
+            return int(cur.rowcount or 0)
+
+    def node_recency_score(self, node_id: str) -> float | None:
+        """Return the mean ``recency_weight`` of edges incident to a node.
+
+        Both incoming and outgoing edges count; self-loops de-dup.
+        Returns ``None`` when the node has no incident edges — many
+        profile-bootstrap nodes are edgeless, and the caller falls back
+        to a ``last_seen_at``-based recency for those. The decay engine
+        (:mod:`opencomputer.user_model.decay`) keeps ``recency_weight``
+        current.
+        """
+        incident: dict[str, Edge] = {}
+        for e in (
+            *self.list_edges(from_node=node_id, limit=10_000),
+            *self.list_edges(to_node=node_id, limit=10_000),
+        ):
+            incident[e.edge_id] = e
+        if not incident:
+            return None
+        return sum(e.recency_weight for e in incident.values()) / len(incident)
+
+    def vacuum(self) -> None:
+        """Rebuild the database file, reclaiming free pages.
+
+        Run after a bulk delete (e.g. :meth:`collapse_duplicate_edges`
+        on a graph with a huge legacy edge backlog) — SQLite keeps freed
+        pages otherwise, so the 194 MB file from a 393 K-edge graph would
+        not shrink even after the rows are gone. ``VACUUM`` cannot run
+        inside a transaction, so this uses a plain autocommit connection.
+        """
+        conn = self._connect()
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+
+    def node_recency_scores(
+        self, *, max_edges: int = 20_000
+    ) -> dict[str, float]:
+        """Bulk variant of :meth:`node_recency_score` — one query for all.
+
+        Returns ``{node_id: mean recency_weight}`` for every node with at
+        least one incident edge. The per-node method is O(incident
+        edges) and pathological on a large edge table; this does it in a
+        single aggregate pass.
+
+        **Cost guard:** returns an empty dict when the edge table
+        exceeds ``max_edges``. ``build_user_facts`` calls this on the
+        per-session hot path; on an un-collapsed graph (before
+        ``oc awareness migrate`` runs) even the single aggregate is
+        seconds-slow, so callers fall back to ``last_seen_at`` recency
+        instead. ``migrate`` collapses the edge table and restores the
+        edge-recency signal automatically.
+
+        Self-loop edges (none in practice) are counted twice; edgeless
+        nodes are absent from the result.
+        """
+        if self.count_edges() > max_edges:
+            return {}
+        sql = (
+            "SELECT node_id, AVG(rw) FROM ("
+            "  SELECT from_node AS node_id, recency_weight AS rw FROM edges"
+            "  UNION ALL"
+            "  SELECT to_node AS node_id, recency_weight AS rw FROM edges"
+            ") GROUP BY node_id"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return {r[0]: float(r[1]) for r in rows if r[1] is not None}
+
+    def node_drift_score(self, node_id: str) -> float:
+        """Return a ``[0, 1]`` drift penalty for a node.
+
+        Drift rises with the number and reliability of ``contradicts``
+        edges pointing AT the node, combined as
+        ``1 - Π(1 - source_reliability)`` — each contradiction chips
+        away at the node's standing without the total ever exceeding
+        1.0. A node nothing contradicts scores ``0.0``.
+        """
+        survive = 1.0
+        for e in self.list_edges(
+            kind="contradicts", to_node=node_id, limit=10_000
+        ):
+            sr = max(0.0, min(1.0, float(e.source_reliability)))
+            survive *= 1.0 - sr
+        return 1.0 - survive
 
     # ─── helpers ──────────────────────────────────────────────────────
 

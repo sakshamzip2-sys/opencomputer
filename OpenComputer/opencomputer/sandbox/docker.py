@@ -192,7 +192,12 @@ class DockerStrategy(SandboxStrategy):
         return cmd
 
     def explain(self, argv: list[str], *, config: SandboxConfig) -> list[str]:
-        return self._wrap(argv, config=config, container_name="oc-sandbox-explain")
+        name = (
+            f"oc-sandbox-{config.container_key}"
+            if config.container_key
+            else "oc-sandbox-explain"
+        )
+        return self._wrap(argv, config=config, container_name=name)
 
     async def run(
         self,
@@ -202,7 +207,10 @@ class DockerStrategy(SandboxStrategy):
         stdin: bytes | None = None,
         cwd: str | None = None,
     ) -> SandboxResult:
-        container_name = f"oc-sandbox-{uuid.uuid4().hex[:12]}"
+        # Scope-keyed name when the runner derived one (session / agent /
+        # shared scope); a fresh uuid otherwise (tool / none scope, or no
+        # policy) — preserving the historical transient-per-call behavior.
+        container_name = f"oc-sandbox-{config.container_key or uuid.uuid4().hex[:12]}"
         wrapped = self._wrap(argv, config=config, container_name=container_name)
         # Docker daemon already isolates env from the host shell, so we
         # don't need to pass ``env=`` here (the ``-e`` flags inside

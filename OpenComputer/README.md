@@ -13,6 +13,7 @@ A synthesis of the best ideas from [Claude Code](https://github.com/anthropics/c
 - **Multi-channel gateway:** run as a daemon; chat via Telegram and Discord today, Slack coming.
 - **Multiple providers:** Anthropic (native + proxy-compatible), OpenAI, any OpenAI-compatible endpoint (OpenRouter, Ollama, etc.).
 - **MCP integration:** plug in any [Model Context Protocol](https://modelcontextprotocol.io) server — its tools become native tools.
+- **Sandboxed execution & loop safety:** scope tool execution to a container per [session / agent / shared](docs/sandbox-and-scope.md); an in-loop [repetition detector](docs/loop-detection.md) halts an agent stuck repeating a tool call.
 
 ## Status
 
@@ -81,6 +82,7 @@ opencomputer skills          # list available skills (bundled + user)
 opencomputer plugins         # list installed plugins
 opencomputer setup           # first-run wizard
 opencomputer doctor          # diagnose config/env issues
+opencomputer awareness review # inspect/correct the user-model graph (forget, correct, migrate, …)
 opencomputer config show     # print effective config
 opencomputer config get KEY  # read one config value (e.g. model.provider)
 opencomputer config set KEY VALUE

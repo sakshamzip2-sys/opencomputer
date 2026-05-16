@@ -48,7 +48,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 #: Five node kinds covering the user-model taxonomy. Extending this
 #: tuple is a **breaking change** — consumers dispatch on the literal.
@@ -227,6 +227,100 @@ class UserModelSnapshot:
     truncated: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Write-boundary validation (awareness-cleanup Milestone 2)
+# ---------------------------------------------------------------------------
+
+#: Resolved once — the acceptable node kinds, derived from the
+#: :data:`NodeKind` literal so the validator and the type never drift.
+_VALID_NODE_KINDS: frozenset[str] = frozenset(get_args(NodeKind))
+
+#: Case-insensitive substrings that mark a node value as agent-internal
+#: machinery rather than a fact about the user. The behavioral-inference
+#: engine mints motifs over the agent's own event lifecycle; the motif
+#: importer then faithfully converts them into nodes. A value embedding
+#: one of these is not user behaviour. Each token is distinctive enough
+#: for a plain substring test — ``cron`` is deliberately excluded as too
+#: ambiguous a substring. See ``docs/refs/oc-user-model-writers.md``.
+AGENT_INTERNAL_TOKENS: tuple[str, ...] = (
+    "agent_loop",
+    "ambient-sensors",
+    "gateway.dispatch",
+    "tool_call/",
+    "turn_start/",
+    "turn_completed/",
+    "session_start/",
+    "session_end/",
+    "foreground_app/",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NodeValidation:
+    """Verdict from :meth:`NodeKindValidator.check`.
+
+    Attributes
+    ----------
+    valid:
+        ``True`` if the prospective node write is acceptable.
+    reason:
+        Human-readable explanation when ``valid`` is ``False`` — suitable
+        for an audit-log line. Empty string when ``valid``.
+    """
+
+    valid: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class NodeKindValidator:
+    """Validate a prospective user-model node write against the taxonomy.
+
+    Stateless and pure — it inspects only the ``(kind, value)`` pair, so
+    it is safe to call from any writer. The *caller* decides what to do
+    with a negative verdict: core writers (the motif importer) reject and
+    log; plugin / user-explicit writers may warn only.
+
+    The check is intentionally minimal — it catches the failure mode that
+    actually pollutes the graph (agent-internal machinery imported as
+    user behaviour) without inventing speculative per-kind format rules.
+    See ``docs/refs/oc-user-model-writers.md`` §3.
+
+    Attributes
+    ----------
+    agent_internal_tokens:
+        Case-insensitive substrings that disqualify a value. Defaults to
+        :data:`AGENT_INTERNAL_TOKENS`; pass a custom tuple to replace it.
+    """
+
+    agent_internal_tokens: tuple[str, ...] = AGENT_INTERNAL_TOKENS
+
+    def check(self, kind: str, value: str) -> NodeValidation:
+        """Return a :class:`NodeValidation` verdict for one node write.
+
+        A write is rejected when ``kind`` is outside :data:`NodeKind`,
+        ``value`` is empty / whitespace-only, or ``value`` embeds an
+        agent-internal token.
+        """
+        if kind not in _VALID_NODE_KINDS:
+            return NodeValidation(
+                False,
+                f"unknown node kind {kind!r} — not in the NodeKind taxonomy",
+            )
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return NodeValidation(False, "empty node value")
+        lowered = cleaned.lower()
+        for token in self.agent_internal_tokens:
+            if token.lower() in lowered:
+                return NodeValidation(
+                    False,
+                    f"agent-internal label {token!r} — machinery, not a "
+                    "fact about the user",
+                )
+        return NodeValidation(True)
+
+
 __all__ = [
     "NodeKind",
     "EdgeKind",
@@ -234,4 +328,7 @@ __all__ = [
     "Edge",
     "UserModelQuery",
     "UserModelSnapshot",
+    "NodeValidation",
+    "NodeKindValidator",
+    "AGENT_INTERNAL_TOKENS",
 ]

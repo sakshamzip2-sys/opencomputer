@@ -34,7 +34,11 @@ from opencomputer.agent.compaction import CompactionEngine
 from opencomputer.agent.config import Config
 from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
-from opencomputer.agent.loop_safety import LoopAbortError, LoopDetector
+from opencomputer.agent.loop_safety import (
+    LoopAbortError,
+    LoopDetector,
+    record_loop_trip,
+)
 from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.agent.memory_context import MemoryContext
@@ -1078,7 +1082,13 @@ class AgentLoop:
         # can't poison the parent's window even if a future refactor
         # hot-paths a single LoopDetector across loops. Default thresholds
         # are permissive; healthy sessions never trip.
-        self._loop_detector = LoopDetector()
+        _rep_cfg = config.loop.repetition
+        self._loop_detector = LoopDetector(
+            max_tool_repeats=_rep_cfg.max_tool_repeats,
+            max_text_repeats=_rep_cfg.max_text_repeats,
+            window_size=_rep_cfg.window_size,
+            max_consecutive_flags=_rep_cfg.max_consecutive_flags,
+        )
 
         # Wave-5 T1 — Hermes-port tool-loop guard. Detects identical
         # tool-name+args repetition within a turn and either warns
@@ -2131,7 +2141,20 @@ class AgentLoop:
                 # A graph read failure must NEVER break agent startup,
                 # so swallow exceptions and degrade to "no facts".
                 try:
-                    user_facts = self.prompt_builder.build_user_facts()
+                    # Rank facts against the opening message so the
+                    # injected block reflects what THIS session is about.
+                    # Computed once here, on the frozen base prompt —
+                    # re-ranking per turn would break the prefix cache.
+                    from opencomputer.user_model.reranker import SessionContext
+
+                    _facts_ctx = SessionContext(
+                        recent_messages=(
+                            (user_message,) if user_message.strip() else ()
+                        )
+                    )
+                    user_facts = self.prompt_builder.build_user_facts(
+                        session_context=_facts_ctx,
+                    )
                 except Exception:  # noqa: BLE001 — defensive: never break loop
                     _log.debug("build_user_facts failed; degrading to empty", exc_info=True)
                     user_facts = ""
@@ -3075,10 +3098,26 @@ class AgentLoop:
                         sid, _loop_depth, _text_hash,
                     )
                     if self._loop_detector.must_stop(sid, _loop_depth):
-                        raise LoopAbortError(
+                        _trip_detail = (
                             self._loop_detector.warning(sid, _loop_depth)
-                            or "loop detector aborted",
+                            or "loop detector aborted"
                         )
+                        # M1 (2026-05-16): ALWAYS record the trip to
+                        # audit.db (observe mode is logging-only — that's
+                        # its whole point: calibration data). ``claim_trip``
+                        # gates so observe mode logs ONE row per episode,
+                        # not one per iteration. Only ``enforce`` mode
+                        # raises to halt the agent.
+                        if self._loop_detector.claim_trip(sid, _loop_depth):
+                            record_loop_trip(
+                                self.config.home / "audit.db",
+                                session_id=sid,
+                                depth=_loop_depth,
+                                kind="text",
+                                detail=_trip_detail,
+                            )
+                        if self.config.loop.repetition.mode == "enforce":
+                            raise LoopAbortError(_trip_detail)
 
                 # PR #221 follow-up Item 2 — persist the per-turn deltas onto
                 # the ``sessions`` row so ``/usage`` (and any future analytics)
@@ -3741,6 +3780,15 @@ class AgentLoop:
                 # message rather than letting the model spin.
                 _flagged_this_turn = False
                 for _tc in step.assistant_message.tool_calls or []:
+                    # M1 (2026-05-16): tools that declare ``loop_safe`` —
+                    # build-status pollers, retry-with-backoff tools — opt
+                    # out of repetition detection; their correct use IS to
+                    # repeat with identical args.
+                    _rec_tool = registry.get(_tc.name)
+                    if _rec_tool is not None and getattr(
+                        _rec_tool, "loop_safe", False
+                    ):
+                        continue
                     try:
                         _args_blob = json.dumps(
                             _tc.arguments or {}, sort_keys=True, default=str,
@@ -3758,10 +3806,26 @@ class AgentLoop:
                         sid, _loop_depth, _tc.name, _args_hash,
                     )
                     if self._loop_detector.must_stop(sid, _loop_depth):
-                        raise LoopAbortError(
+                        _trip_detail = (
                             self._loop_detector.warning(sid, _loop_depth)
-                            or "loop detector aborted",
+                            or "loop detector aborted"
                         )
+                        # M1 (2026-05-16): ALWAYS record the trip to
+                        # audit.db (observe mode is logging-only — that's
+                        # its whole point: calibration data). ``claim_trip``
+                        # gates so observe mode logs ONE row per episode,
+                        # not one per iteration. Only ``enforce`` mode
+                        # raises to halt the agent.
+                        if self._loop_detector.claim_trip(sid, _loop_depth):
+                            record_loop_trip(
+                                self.config.home / "audit.db",
+                                session_id=sid,
+                                depth=_loop_depth,
+                                kind="tool",
+                                detail=_trip_detail,
+                            )
+                        if self.config.loop.repetition.mode == "enforce":
+                            raise LoopAbortError(_trip_detail)
                     if (
                         not _flagged_this_turn
                         and self._loop_detector.flagged(sid, _loop_depth)
@@ -3809,12 +3873,15 @@ class AgentLoop:
             raise
         except LoopAbortError as exc:
             # OpenClaw 1.C — anti-loop / repetition detector signalled
-            # ``must_stop()``. Surface a single clean assistant message
-            # rather than re-raising so CLI/gateway callers don't have
-            # to special-case a new exception type. Persist the synthetic
-            # assistant turn so a resumed session sees the same final
-            # state. ``end_reason`` flags this as an error-class exit so
-            # the SessionEndEvent reflects truth.
+            # ``must_stop()`` and the detector is in ``enforce`` mode (in
+            # ``observe`` mode the trip is logged but never raised, so
+            # reaching here always means an enforced loop halt). Surface a
+            # single clean assistant message rather than re-raising so
+            # CLI/gateway callers don't have to special-case a new
+            # exception type. Persist the synthetic assistant turn so a
+            # resumed session sees the same final state. ``end_reason``
+            # flags this as an error-class exit so the SessionEndEvent
+            # reflects truth.
             _session_end_reason = "loop_aborted"
             _session_had_errors = True
             final = Message(
@@ -3832,7 +3899,9 @@ class AgentLoop:
                 iterations=iterations,
                 input_tokens=total_input,
                 output_tokens=total_output,
-                stop_reason=StopReason.ERROR,
+                # M1 (2026-05-16): a loop trip gets its own canonical stop
+                # reason, distinct from a generic unrecoverable error.
+                stop_reason=StopReason.TOOL_LOOP,
             )
         except Exception:
             _session_end_reason = "error"

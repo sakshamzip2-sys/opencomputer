@@ -1023,6 +1023,26 @@ tuple[Edge, ...]` (incident edges of selected nodes), `total_score:
 float` (sum of per-node scores), `truncated: bool` (`True` if
 `token_budget` cut selection short).
 
+### `NodeValidation`
+
+Frozen+slots dataclass — the verdict from `NodeKindValidator.check()`.
+Fields: `valid: bool` and `reason: str` (empty when valid; an
+audit-log-ready explanation otherwise).
+
+### `NodeKindValidator`
+
+Frozen+slots dataclass — the write-boundary guard for the user-model
+graph. `check(kind, value) -> NodeValidation` rejects a prospective node
+write when the `kind` is outside `NodeKind`, the `value` is empty, or the
+`value` embeds an agent-internal token (machinery names like `agent_loop`
+or event prefixes like `tool_call/`). The motif importer calls it before
+every node write; see `docs/awareness/cli.md`.
+
+```python
+from plugin_sdk import NodeKindValidator
+NodeKindValidator().check("attribute", "uses agent_loop").valid  # False
+```
+
 ---
 
 ## Sandbox (Phase 3.E)

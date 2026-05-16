@@ -134,7 +134,12 @@ class PromptCheckpoint:
 #: detached HEAD. Backfill is impossible (we don't know history); the
 #: picker renders the segment only when the value is present, so old
 #: rows degrade gracefully.
-SCHEMA_VERSION = 19
+#: v20 = tool_loop_trips (2026-05-16) — M1 loop-detection audit table.
+#: The repetition detector records a row per trip (observe + enforce
+#: mode both) so thresholds can be tuned against real data. Plain
+#: append table in the F1 ``audit.db`` — replaces a per-call
+#: ``CREATE TABLE IF NOT EXISTS`` that previously ran on every trip.
+SCHEMA_VERSION = 20
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -373,6 +378,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (16, 17): "_migrate_v16_to_v17",
     (17, 18): "_migrate_v17_to_v18",
     (18, 19): "_migrate_v18_to_v19",
+    (19, 20): "_migrate_v19_to_v20",
 }
 
 
@@ -1109,6 +1115,42 @@ def _migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "git_branch" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN git_branch TEXT")
+
+
+def _migrate_v19_to_v20(conn: sqlite3.Connection) -> None:
+    """tool_loop_trips (2026-05-16) — M1 loop-detection audit table.
+
+    Adds the ``tool_loop_trips`` table. The repetition detector
+    (:class:`opencomputer.agent.loop_safety.LoopDetector`) records a row
+    here every time it trips — in both ``observe`` and ``enforce`` mode —
+    so detection thresholds can be tuned against real-world data.
+
+    The table lives in the SAME DB as the F1 ``audit_log`` chain (the
+    profile's ``audit.db``, which runs this migration chain via
+    :func:`apply_migrations`). Loop trips are operational telemetry, NOT
+    chained security events, so they get a plain append table with no
+    HMAC chain and no append-only trigger.
+
+    Created here — once, at schema-migration time — rather than via a
+    per-call ``CREATE TABLE IF NOT EXISTS`` in ``record_loop_trip``.
+
+    Idempotent: ``CREATE TABLE IF NOT EXISTS`` is a no-op when the table
+    already exists.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tool_loop_trips (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          REAL NOT NULL,
+            session_id  TEXT NOT NULL,
+            depth       INTEGER NOT NULL,
+            kind        TEXT NOT NULL,
+            detail      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_loop_trips_session
+            ON tool_loop_trips(session_id, ts);
+        """
+    )
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:

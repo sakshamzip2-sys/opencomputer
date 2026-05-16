@@ -73,7 +73,9 @@ def test_run_command_returns_stdout() -> None:
         strategy_name="docker",
     )
 
-    async def _fake_run_sandboxed(argv, *, config=None, stdin=None, cwd=None):  # noqa: ANN001
+    async def _fake_run_sandboxed(  # noqa: ANN001
+        argv, *, config=None, stdin=None, cwd=None, policy=None, scope_ctx=None
+    ):
         return fake
 
     with patch("opencomputer.cli_sandbox.run_sandboxed", _fake_run_sandboxed):
@@ -93,7 +95,9 @@ def test_run_propagates_nonzero_exit() -> None:
         strategy_name="docker",
     )
 
-    async def _fake_run_sandboxed(argv, *, config=None, stdin=None, cwd=None):  # noqa: ANN001
+    async def _fake_run_sandboxed(  # noqa: ANN001
+        argv, *, config=None, stdin=None, cwd=None, policy=None, scope_ctx=None
+    ):
         return fake
 
     with patch("opencomputer.cli_sandbox.run_sandboxed", _fake_run_sandboxed):

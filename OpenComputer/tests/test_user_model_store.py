@@ -212,3 +212,222 @@ def test_update_edge_recency_weight(tmp_path: Path) -> None:
     fetched3 = store.get_edge(edge.edge_id)
     assert fetched3 is not None
     assert fetched3.recency_weight == 0.0
+
+
+def test_update_node_metadata_replaces_in_place(tmp_path: Path) -> None:
+    """update_node_metadata swaps the metadata JSON, leaving other fields."""
+    store = _store(tmp_path)
+    n = store.upsert_node(kind="attribute", value="uses Python", confidence=0.6)
+    store.update_node_metadata(n.node_id, {"deleted": True, "note": "x"})
+    fetched = store.get_node(n.node_id)
+    assert fetched is not None
+    assert fetched.metadata == {"deleted": True, "note": "x"}
+    # Identity-bearing fields are untouched.
+    assert fetched.kind == "attribute"
+    assert fetched.value == "uses Python"
+    assert fetched.confidence == 0.6
+
+
+def test_update_node_metadata_preserves_incident_edges(tmp_path: Path) -> None:
+    """Regression: a metadata update must NOT cascade-drop the node's edges.
+
+    ``insert_node`` is INSERT OR REPLACE — it delete-then-reinserts the
+    row, and the edges FK is ON DELETE CASCADE, so re-inserting a node
+    would silently wipe its edges. ``update_node_metadata`` is a plain
+    UPDATE and must keep them.
+    """
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(kind="asserts", from_node=a.node_id, to_node=b.node_id))
+    store.insert_edge(
+        Edge(kind="contradicts", from_node=b.node_id, to_node=a.node_id)
+    )
+    assert store.count_edges() == 2
+    # Soft-delete A by updating its metadata.
+    store.update_node_metadata(a.node_id, {"deleted": True})
+    # Both edges incident to A survive.
+    assert store.count_edges() == 2
+    assert len(store.list_edges(from_node=a.node_id)) == 1
+    assert len(store.list_edges(to_node=a.node_id)) == 1
+
+
+def test_collapse_duplicate_edges_keeps_one_per_group(tmp_path: Path) -> None:
+    """Duplicate edges (same kind/from/to/source) collapse to a single row."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    for i in range(5):
+        store.insert_edge(Edge(
+            edge_id=f"dup-{i}", kind="asserts",
+            from_node=a.node_id, to_node=b.node_id,
+            source="motif_importer", created_at=100.0 + i,
+        ))
+    deleted = store.collapse_duplicate_edges()
+    assert deleted == 4
+    assert store.count_edges() == 1
+
+
+def test_collapse_duplicate_edges_dry_run_counts_only(tmp_path: Path) -> None:
+    """dry_run=True returns the count but mutates nothing."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    for i in range(3):
+        store.insert_edge(Edge(
+            edge_id=f"dup-{i}", kind="asserts",
+            from_node=a.node_id, to_node=b.node_id, source="motif_importer",
+        ))
+    assert store.collapse_duplicate_edges(dry_run=True) == 2
+    assert store.count_edges() == 3  # untouched
+
+
+def test_collapse_keeps_distinct_edges(tmp_path: Path) -> None:
+    """Edges differing in kind / endpoints / source are NOT collapsed."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer"))
+    store.insert_edge(Edge(edge_id="e2", kind="contradicts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer"))
+    store.insert_edge(Edge(edge_id="e3", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="user_explicit"))
+    assert store.collapse_duplicate_edges() == 0
+    assert store.count_edges() == 3
+
+
+def test_collapse_keeps_the_newest_edge(tmp_path: Path) -> None:
+    """Within a group the most recently created edge is the survivor."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(edge_id="old", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer", created_at=100.0))
+    store.insert_edge(Edge(edge_id="new", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer", created_at=200.0))
+    store.collapse_duplicate_edges()
+    survivors = store.list_edges()
+    assert len(survivors) == 1
+    assert survivors[0].edge_id == "new"
+
+
+def test_node_recency_score_averages_incident_edges(tmp_path: Path) -> None:
+    """node_recency_score is the mean recency_weight of incident edges."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    c = store.upsert_node(kind="preference", value="C")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           recency_weight=0.5))
+    store.insert_edge(Edge(edge_id="e2", kind="asserts",
+                           from_node=a.node_id, to_node=c.node_id,
+                           recency_weight=1.0))
+    assert store.node_recency_score(a.node_id) == 0.75
+
+
+def test_node_recency_score_is_none_for_edgeless_node(tmp_path: Path) -> None:
+    """An orphan node (no edges) has no edge-recency signal."""
+    store = _store(tmp_path)
+    n = store.upsert_node(kind="identity", value="name: X")
+    assert store.node_recency_score(n.node_id) is None
+
+
+def test_node_drift_score_zero_without_contradicts(tmp_path: Path) -> None:
+    """A node nothing contradicts has drift score 0."""
+    store = _store(tmp_path)
+    n = store.upsert_node(kind="preference", value="lives in Pune")
+    assert store.node_drift_score(n.node_id) == 0.0
+
+
+def test_node_drift_score_rises_with_contradiction(tmp_path: Path) -> None:
+    """An incoming contradicts edge from a reliable source drives drift up."""
+    store = _store(tmp_path)
+    target = store.upsert_node(kind="preference", value="lives in Pune")
+    rival = store.upsert_node(kind="preference", value="lives in Goa")
+    store.insert_edge(Edge(edge_id="c1", kind="contradicts",
+                           from_node=rival.node_id, to_node=target.node_id,
+                           source_reliability=1.0))
+    assert store.node_drift_score(target.node_id) == 1.0
+    # The rival itself is uncontradicted.
+    assert store.node_drift_score(rival.node_id) == 0.0
+
+
+def test_node_drift_score_combines_multiple_contradicts(
+    tmp_path: Path,
+) -> None:
+    """Two half-reliable contradictions compound, staying within [0, 1]."""
+    store = _store(tmp_path)
+    target = store.upsert_node(kind="preference", value="x")
+    r1 = store.upsert_node(kind="preference", value="r1")
+    r2 = store.upsert_node(kind="preference", value="r2")
+    for eid, rival in (("d1", r1), ("d2", r2)):
+        store.insert_edge(Edge(edge_id=eid, kind="contradicts",
+                               from_node=rival.node_id,
+                               to_node=target.node_id,
+                               source_reliability=0.5))
+    drift = store.node_drift_score(target.node_id)
+    assert drift == 0.75  # 1 - (1-0.5)*(1-0.5)
+    assert 0.0 <= drift <= 1.0
+
+
+def test_node_recency_scores_bulk_matches_per_node(tmp_path: Path) -> None:
+    """The bulk accessor returns the same means as per-node, in one query."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    edgeless = store.upsert_node(kind="identity", value="name: C")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           recency_weight=0.5))
+    store.insert_edge(Edge(edge_id="e2", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           recency_weight=1.0))
+    bulk = store.node_recency_scores()
+    assert bulk[a.node_id] == store.node_recency_score(a.node_id)
+    assert bulk[b.node_id] == store.node_recency_score(b.node_id)
+    assert bulk[a.node_id] == 0.75
+    # An edgeless node is absent from the bulk result.
+    assert edgeless.node_id not in bulk
+
+
+def test_node_recency_scores_bulk_empty_graph(tmp_path: Path) -> None:
+    """No edges → empty dict, no crash."""
+    store = _store(tmp_path)
+    assert store.node_recency_scores() == {}
+
+
+def test_vacuum_preserves_data(tmp_path: Path) -> None:
+    """VACUUM rebuilds the file without losing nodes or edges."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="keep me")
+    b = store.upsert_node(kind="preference", value="also keep")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id))
+    store.vacuum()  # must not raise
+    assert store.count_nodes() == 2
+    assert store.count_edges() == 1
+    assert store.get_node(a.node_id) is not None
+
+
+def test_node_recency_scores_cost_guard_skips_huge_edge_table(
+    tmp_path: Path,
+) -> None:
+    """Above max_edges the bulk aggregate is skipped — returns {}."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id))
+    store.insert_edge(Edge(edge_id="e2", kind="asserts",
+                           from_node=b.node_id, to_node=a.node_id))
+    # 2 edges > max_edges=1 → cost guard trips, empty result.
+    assert store.node_recency_scores(max_edges=1) == {}
+    # Under the budget it computes normally.
+    assert store.node_recency_scores(max_edges=100) != {}

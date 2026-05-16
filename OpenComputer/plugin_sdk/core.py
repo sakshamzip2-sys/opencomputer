@@ -639,6 +639,7 @@ class StopReason(str, Enum):
     PAUSE_TURN = "pause_turn"  # server-tool work paused; re-send to continue (cap 3)
     REFUSAL = "refusal"  # model refused/declined; surface as final, do not retry
     CONTEXT_FULL = "context_full"  # response stopped because context window was exceeded
+    TOOL_LOOP = "tool_loop"  # repetition detector tripped (enforce mode); agent halted
 
 
 # ─── Plugin exceptions ─────────────────────────────────────────────────

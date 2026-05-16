@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # Note: AuxiliaryConfig + AuxSlotConfig are defined in this module (see
 # below) — single source of truth. ``opencomputer.agent.auxiliary_client``
@@ -37,6 +37,14 @@ def _default_context_pruning_config() -> Any:
     from opencomputer.agent.context_pruning import ContextPruningConfig
 
     return ContextPruningConfig()
+
+
+def _default_sandbox_policy() -> Any:
+    """Lazy import — keeps the ``opencomputer.sandbox`` package out of the
+    ``config`` module's import graph (``config`` loads very early)."""
+    from opencomputer.sandbox.policy import SandboxPolicy
+
+    return SandboxPolicy()
 
 
 def _home() -> Path:
@@ -365,6 +373,45 @@ class DelegationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RepetitionDetectorConfig:
+    """Thresholds + mode for the agent-loop repetition detector.
+
+    Consumed by ``opencomputer.agent.loop_safety.LoopDetector`` (the
+    OpenClaw-1.C anti-loop / repetition detector). M1 of the Hermes +
+    OpenClaw parity plan tuned these to the spec's "Done when": the
+    agent halts on a *3rd identical tool-call within an 8-call window*.
+
+    ``mode`` decides what a tripped detector does. Per PART-2 §4.1, loop
+    detection ships in **observe-only mode by default** — a trip is
+    written to the audit log but the agent is NOT halted, so one week of
+    real use can be used to calibrate the threshold before anyone opts
+    into halting. Set ``mode: enforce`` to make a trip actually stop the
+    agent loop.
+    """
+
+    max_tool_repeats: int = 3
+    """Identical ``(tool, args)`` calls within the window that flag a loop.
+
+    At 3, the *3rd* identical call flags — matching the M1 spec."""
+    max_text_repeats: int = 2
+    """Identical assistant-message repeats within the window that flag a loop."""
+    window_size: int = 8
+    """Sliding-window size — how many recent calls / messages are tracked.
+
+    8 per the M1 spec ("within an 8-call window")."""
+    max_consecutive_flags: int = 1
+    """Consecutive flagged records before the detector ``must_stop``s.
+
+    At 1, the first flag trips ``must_stop`` — so with ``max_tool_repeats``
+    = 3 the 3rd identical tool call halts the loop (in ``enforce`` mode)."""
+    mode: Literal["observe", "enforce"] = "observe"
+    """``observe`` (default) — a trip is logged to ``audit.db`` but the
+    agent loop is NOT halted. ``enforce`` — a trip is logged AND halts
+    the loop with a clean "Agent loop stopped" message. Default observe
+    per PART-2 §4.1: soft-launch first, flip to enforce after calibration."""
+
+
+@dataclass(frozen=True, slots=True)
 class LoopConfig:
     """Behavior of the main agent loop.
 
@@ -433,6 +480,13 @@ class LoopConfig:
     the caller's role argument. Hermes parity with
     ``delegation.orchestrator_enabled``."""
     delegation: DelegationConfig = field(default_factory=lambda: DelegationConfig())
+    #: 2026-05-16 — tunable thresholds for the loop_safety.LoopDetector
+    #: repetition detector (Hermes + OpenClaw parity, M1). Until now the
+    #: detector was constructed with hardcoded defaults; this makes it
+    #: config-tunable. Defaults match the prior hardcoded values.
+    repetition: RepetitionDetectorConfig = field(
+        default_factory=RepetitionDetectorConfig
+    )
     """Subagent model/provider override. None values inherit parent.
 
     Hermes parity with ``delegation.{model,provider,base_url,api_key}``."""
@@ -1698,6 +1752,16 @@ class Config:
     #: dispatcher falls through to the active profile's default agent
     #: template (current behavior, fully backwards-compatible).
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    #: 2026-05-16 — sandbox scope policy (Hermes + OpenClaw parity, M1).
+    #: ``scope=none`` (default) means sandboxing is off — exact pre-M1
+    #: behavior — so upgrading users see zero change until they run
+    #: ``oc sandbox enable``. Persisted as the top-level ``sandbox:``
+    #: block; because it carries a ``SandboxScope`` enum it is parsed
+    #: separately in ``config_store.load_config`` rather than through the
+    #: generic override walker — same handling as the ``routing:`` block.
+    #: Annotated ``Any`` (not ``SandboxPolicy``) so ``get_type_hints(Config)``
+    #: stays resolvable — ``SandboxPolicy`` is a ``TYPE_CHECKING``-only import.
+    sandbox: Any = field(default_factory=_default_sandbox_policy)
     #: 2026-05-10 — Pinned files mechanism (Optimize Grade E mitigation).
     #: Files listed here get their content injected into the system prompt
     #: at session start, so the agent doesn't re-read them via the Read
@@ -1809,6 +1873,7 @@ __all__ = [
     "split_or_routing_suffix",
     "split_hf_routing_suffix",
     "DelegationConfig",
+    "RepetitionDetectorConfig",
     "GoalJudgeConfig",
     "ModelConfig",
     "LoopConfig",

@@ -46,15 +46,17 @@ def test_config_includes_user_model_section() -> None:
 
 
 def test_motif_import_tick_returns_count_dict() -> None:
-    """Returns shape: {nodes_added: int, edges_added: int}."""
+    """Returns shape: {nodes_added: int, edges_added: int, rejections: int}."""
     from opencomputer.cron.system_jobs import _run_motif_import_tick
 
     result = _run_motif_import_tick()
     assert isinstance(result, dict)
     assert "nodes_added" in result
     assert "edges_added" in result
+    assert "rejections" in result
     assert isinstance(result["nodes_added"], int)
     assert isinstance(result["edges_added"], int)
+    assert isinstance(result["rejections"], int)
 
 
 def test_motif_import_tick_empty_store_returns_zeros(
