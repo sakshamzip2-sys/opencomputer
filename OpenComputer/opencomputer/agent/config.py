@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
     from opencomputer.agent.context_pruning import ContextPruningConfig
     from opencomputer.agent.tokenjuice import TokenjuiceConfig
-    from opencomputer.sandbox.policy import SandboxPolicy
 
 
 def _default_tokenjuice_config() -> Any:
@@ -1760,7 +1759,9 @@ class Config:
     #: block; because it carries a ``SandboxScope`` enum it is parsed
     #: separately in ``config_store.load_config`` rather than through the
     #: generic override walker — same handling as the ``routing:`` block.
-    sandbox: SandboxPolicy = field(default_factory=_default_sandbox_policy)
+    #: Annotated ``Any`` (not ``SandboxPolicy``) so ``get_type_hints(Config)``
+    #: stays resolvable — ``SandboxPolicy`` is a ``TYPE_CHECKING``-only import.
+    sandbox: Any = field(default_factory=_default_sandbox_policy)
     #: 2026-05-10 — Pinned files mechanism (Optimize Grade E mitigation).
     #: Files listed here get their content injected into the system prompt
     #: at session start, so the agent doesn't re-read them via the Read
