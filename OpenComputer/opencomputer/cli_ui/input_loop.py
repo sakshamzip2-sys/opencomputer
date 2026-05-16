@@ -50,7 +50,31 @@ from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 #: text to the LLM.
 IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*([^\]]+?)\]")
 _SLASH_MENU_LIMIT = 20
+#: Fallback description cap used when terminal-size lookup fails (headless
+#: tests, redirected output). The runtime path widens / narrows this based
+#: on the live terminal width — see :func:`_terminal_size` and the
+#: rendering callbacks inside :func:`read_user_input`.
 _SLASH_DESC_LIMIT = 74
+
+
+def _terminal_size() -> tuple[int, int]:
+    """Return ``(columns, rows)`` for the active prompt_toolkit Application.
+
+    Reads the live size on every call so SIGWINCH / window-resize events
+    surface to the next layout render without restarting the prompt.
+    Falls back to ``(80, 24)`` outside of a running Application (tests,
+    headless callers) so callers never get a zero/None and can size
+    things deterministically.
+    """
+    try:
+        from prompt_toolkit.application.current import get_app
+
+        size = get_app().output.get_size()
+        cols = max(int(size.columns or 0), 20)
+        rows = max(int(size.rows or 0), 4)
+        return cols, rows
+    except Exception:  # noqa: BLE001 — never break a render
+        return 80, 24
 
 
 def _images_dir(profile_home: Path) -> Path:
@@ -129,15 +153,28 @@ def _slash_token_uses_dropdown(prefix: str, start: int) -> bool:
 
 
 def _compact_description(desc: str) -> str:
+    """Trim a dropdown-row description to fit the active terminal width.
+
+    The cap is computed live each call: roughly half the terminal width
+    minus the fixed columns the row already spends on ``❯ `` + the slash
+    label + tag. This keeps the description column from forcing rows to
+    wrap on narrow terminals OR truncating prematurely on wide ones.
+    The legacy ``_SLASH_DESC_LIMIT`` is only the floor for the fallback
+    when terminal sizing fails.
+    """
     from .slash_completer import _trim_description
 
     trimmed = _trim_description(desc)
-    if len(trimmed) <= _SLASH_DESC_LIMIT:
+    cols, _rows = _terminal_size()
+    # Leave ~half the width for the label + tag + cursor, then minus a
+    # 6-cell margin so the row never paints flush to the right edge.
+    limit = max(_SLASH_DESC_LIMIT, (cols // 2) - 6)
+    if len(trimmed) <= limit:
         return trimmed
-    head = trimmed[:_SLASH_DESC_LIMIT]
+    head = trimmed[:limit]
     cut = head.rfind(" ")
     if cut <= 0:
-        cut = _SLASH_DESC_LIMIT
+        cut = limit
     return head[:cut].rstrip() + "…"
 
 
@@ -1071,6 +1108,18 @@ async def read_user_input(
     # so it never eats the entire screen. The prompt_window stays
     # ``height=1`` and renders only on the first row — wrapped continuation
     # lines have no prefix, matching zsh/fish wrap UX.
+    def _input_height_dim() -> Dimension:
+        """Resize the input region to roughly half the terminal height.
+
+        Caps at 10 lines on tall terminals (the old hard ceiling — past
+        this the buffer's vertical-scroll handles the rest), but on
+        short terminals (12-15 rows in a side panel) shrinks to ~⅓
+        of the visible rows so the dropdown + status bar still fit.
+        """
+        _cols, rows = _terminal_size()
+        max_lines = max(3, min(10, rows // 2))
+        return Dimension(min=1, max=max_lines)
+
     input_window = Window(
         # AppendAutoSuggestion paints the SlashTokenAutoSuggest ghost text
         # (greyed-out completion after the cursor) — without this processor
@@ -1081,16 +1130,30 @@ async def read_user_input(
             buffer=input_buffer,
             input_processors=[AppendAutoSuggestion()],
         ),
-        height=Dimension(min=1, max=10),
+        height=_input_height_dim,
         wrap_lines=True,
     )
 
     from prompt_toolkit.layout import WindowAlign
 
+    def _title_cap() -> int:
+        """Width-aware cap on the rendered session title.
+
+        Roughly a third of the terminal so the title shares the row with
+        the mode badge on the left without crowding it. Floor at 20 chars
+        so short terminals still surface something; ceiling at 80 so
+        ultrawide terminals don't waste the row on one long label.
+        """
+        cols, _rows = _terminal_size()
+        return max(20, min(80, cols // 3))
+
     def _title_text():
         title = get_session_title() or ""
-        if not (1 <= len(title) <= 50):
+        cap = _title_cap()
+        if not title:
             return []
+        if len(title) > cap:
+            title = title[: cap - 1].rstrip() + "…"
         return [
             ("class:title.box", "┤ "),
             ("class:title.text", title),
@@ -1098,8 +1161,7 @@ async def read_user_input(
         ]
 
     def _title_visible() -> bool:
-        title = get_session_title() or ""
-        return 1 <= len(title) <= 50
+        return bool(get_session_title() or "")
 
     dropdown_window = ConditionalContainer(
         content=Window(
@@ -1109,11 +1171,18 @@ async def read_user_input(
         ),
         filter=Condition(_has_dropdown),
     )
+    def _divider_text():
+        # Read terminal width on every render so resize events flow
+        # through immediately. Width-1 keeps a 1-cell gutter on the
+        # right edge — terminals that count the final cell as a hard
+        # boundary (Windows Terminal in some modes) would otherwise
+        # spill the line onto the next row.
+        cols, _rows = _terminal_size()
+        return [("class:dd.divider", "─" * max(cols - 1, 1))]
+
     dropdown_divider = ConditionalContainer(
         content=Window(
-            content=FormattedTextControl(
-                lambda: [("class:dd.divider", "─" * 80)]
-            ),
+            content=FormattedTextControl(_divider_text),
             height=1,
         ),
         filter=Condition(_has_dropdown),
