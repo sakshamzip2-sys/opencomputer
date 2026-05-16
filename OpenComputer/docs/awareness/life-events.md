@@ -158,7 +158,7 @@ start of every session.
 
 ## Honest v1 limitations
 
-Two parts of the feature are intentionally not finished in v1. They are
+Three parts of the feature are intentionally not finished in v1. They are
 called out here so the feature is not assumed to be more complete than it
 is.
 
@@ -187,6 +187,21 @@ feature is effectively **CLI-only** for now: a life event detected during a
 gateway / Telegram / Discord / web-UI conversation grows no visible tooth.
 **v2** would extend injection-provider registration to the gateway and
 channel surfaces so teeth appear everywhere the agent runs.
+
+### 3. A re-fired hint is re-shown but not re-judged while a cron is active
+
+After a `confirmed` or `unclear` verdict, `clear_verdict_pending` leaves the
+pattern's state entry in place with `verdict_pending=False` and the
+follow-up `cron_id` still set. If that same pattern fires *again* later,
+`LifeEventInjectionProvider.collect` surfaces a fresh `<life-event-hint>`
+block — but `schedule_followup` sees the existing `cron_id`, takes its
+dedup branch, and returns early *without* calling `mark_surfaced`. So
+`verdict_pending` stays `False`: the re-fired hint **is shown to the user
+but the `STOP` classifier never re-judges the reply to it** until the
+existing check-in cron resolves and the entry is cleared. The first verdict
+for a pattern sticks for the lifetime of that pattern's active cron. **v2**
+would re-arm `verdict_pending` when a hint re-surfaces for a pattern whose
+follow-up is still pending, so each re-shown hint gets its own verdict.
 
 ## Where the code lives
 

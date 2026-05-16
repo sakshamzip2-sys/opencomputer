@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 
 from opencomputer.awareness.life_events import actions
+from opencomputer.awareness.life_events.pattern import PatternFiring
 from opencomputer.awareness.life_events.registry import get_global_registry
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 
@@ -109,6 +110,17 @@ class LifeEventInjectionProvider(DynamicInjectionProvider):
         firings = [f for f in reg.drain_pending() if not reg.is_muted(f.pattern_id)]
         if not firings:
             return None
+        # Dedup by pattern_id. ``LifeEventPattern.accumulate`` has no
+        # post-fire reset — once a pattern's confidence crosses threshold it
+        # returns a PatternFiring on EVERY subsequent matching event, so the
+        # queue can hold multiple firings of the SAME pattern within one turn.
+        # Without dedup the <life-event-hint> block would repeat that
+        # pattern's hint_text + tone directive N times. hint_text is stable
+        # per pattern, so keeping the LAST firing per pattern_id is fine.
+        deduped: dict[str, PatternFiring] = {}
+        for firing in firings:
+            deduped[firing.pattern_id] = firing
+        firings = list(deduped.values())
         lines: list[str] = []
         for firing in firings:
             lines.append(firing.hint_text)

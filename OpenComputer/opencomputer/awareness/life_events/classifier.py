@@ -315,19 +315,36 @@ _log = logging.getLogger(__name__)
 
 
 def _last_user_text(ctx: HookContext) -> str:
-    """Return the most recent user message text from a STOP HookContext.
+    """Return the most recent user-typed text from a STOP HookContext.
 
     The STOP :class:`HookContext` carries ``messages`` — the conversation
     history for the turn. The reply :func:`on_stop_hook` must judge is the
-    last ``role == "user"`` message in that list. Returns ``""`` when there
-    is no message history or no user message (the classifier treats an
-    empty string as ``"unclear"``).
+    user's free-text reply.
+
+    The catch: on any turn where the model called a tool, the conversation
+    appends ``tool_result`` messages — these also carry ``role == "user"``
+    but their ``content`` is a **list** (the tool-result blocks), and they
+    land *after* the user's text reply. Scanning in reverse and returning
+    the first ``role == "user"`` message unconditionally would hit that
+    tool_result first, see non-``str`` content, and return ``""`` — so the
+    classifier would score every tool-using turn ``"unclear"`` and never
+    self-correct. Instead this scans for the most recent ``role == "user"``
+    message whose ``content`` is a real text ``str``, skipping tool_result
+    messages — mirroring the auto-titler's user-text extraction in
+    ``agent/loop.py`` (``role == "user" and isinstance(content, str)``).
+
+    Returns ``""`` when there is no message history and no real text user
+    message (the classifier treats an empty string as ``"unclear"``).
     """
     messages = ctx.messages or []
     for msg in reversed(messages):
-        if getattr(msg, "role", None) == "user":
-            content = getattr(msg, "content", "")
-            return content if isinstance(content, str) else ""
+        if getattr(msg, "role", None) != "user":
+            continue
+        content = getattr(msg, "content", "")
+        # Skip tool_result (and any other non-text) user-role messages —
+        # their content is a list, not the user's typed reply.
+        if isinstance(content, str):
+            return content
     return ""
 
 

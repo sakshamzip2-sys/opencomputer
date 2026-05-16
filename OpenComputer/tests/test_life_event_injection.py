@@ -264,6 +264,34 @@ async def test_multiple_firings_batched_into_one_block() -> None:
         reset_global_registry_for_test()
 
 
+# ── dedup: a pattern that re-fires within one turn → ONE hint line ────
+
+
+async def test_repeated_firings_of_same_pattern_dedup_to_one_hint() -> None:
+    """``LifeEventPattern.accumulate`` has no post-fire reset — once a
+    pattern crosses threshold it returns a firing on EVERY matching event,
+    so the queue can hold multiple firings of the SAME pattern_id within one
+    turn. ``collect()`` must dedup by pattern_id so the hint_text + tone
+    directive appear exactly ONCE, not N times.
+    """
+    reset_global_registry_for_test()
+    try:
+        reg = get_global_registry()
+        # Two firings of the SAME pattern, as a re-firing pattern produces.
+        reg._queue.append(_firing("burnout", "your work rhythm shifted"))
+        reg._queue.append(_firing("burnout", "your work rhythm shifted"))
+
+        out = await LifeEventInjectionProvider().collect(_ctx())
+
+        assert out is not None
+        # The burnout hint_text appears exactly once despite two firings.
+        assert out.count("your work rhythm shifted") == 1
+        # The tone directive likewise appears exactly once.
+        assert out.count("Respond gently and concisely; do not pile on tasks.") == 1
+    finally:
+        reset_global_registry_for_test()
+
+
 # ── Task 5: surfacing a firing schedules its follow-up cron ──────────
 
 

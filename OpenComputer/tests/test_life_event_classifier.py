@@ -432,6 +432,76 @@ async def test_on_stop_hook_no_message_history_is_unclear_noop(tmp_path, monkeyp
     assert entry is not None and entry["verdict_pending"] is False
 
 
+# ── tool-using turn — tool_result trailing message must not blind the
+#    classifier to the user's real text reply ──────────────────────────
+
+
+class _ToolResultMessage:
+    """A tool_result message stand-in: ``role == "user"`` with LIST content.
+
+    On any turn where the model called a tool, the conversation appends a
+    ``tool_result`` message — Anthropic's wire shape gives it ``role ==
+    "user"`` and a *list* of result blocks as content, and it lands AFTER
+    the user's text reply. ``plugin_sdk.core.Message`` is frozen with
+    ``content: str`` and cannot model that, so this minimal stand-in does
+    (``on_stop_hook`` reads ``role`` / ``content`` duck-typed via
+    ``getattr``).
+    """
+
+    def __init__(self, content: list) -> None:
+        self.role = "user"
+        self.content = content
+
+
+@pytest.mark.asyncio
+async def test_on_stop_hook_classifies_real_reply_past_trailing_tool_result(
+    tmp_path, monkeypatch
+):
+    """A tool_result message (``role == "user"``, LIST content) trailing the
+    conversation must NOT blind the classifier.
+
+    On a tool-using turn the conversation ends with a tool_result message —
+    ``role == "user"`` but list content — placed AFTER the user's real text
+    reply. ``_last_user_text`` must skip the tool_result and classify the
+    user's actual typed reply, so a refuting reply still cancels the cron
+    even on a turn where the model used a tool.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    _seed_pending("burnout", cron_id="cron-tool", surfaced_turn=2)
+
+    removed: list[str] = []
+    monkeypatch.setattr(
+        actions, "remove_job", lambda job_id: removed.append(job_id) or True
+    )
+
+    # Conversation: user's REAL refuting reply, then the model's
+    # tool-call turn, then the trailing tool_result (role="user", list).
+    ctx = HookContext(
+        event=HookEvent.STOP,
+        session_id="sess-tool",
+        messages=[
+            Message(role="user", content="(the surfacing-turn message)"),
+            Message(role="assistant", content="(hint-influenced reply)"),
+            Message(role="user", content="I'm totally fine, not stressed"),
+            Message(role="assistant", content="(model calls a tool)"),
+            _ToolResultMessage(
+                content=[{"type": "tool_result", "content": "tool output"}]
+            ),
+        ],
+        turn_index=3,
+    )
+
+    await on_stop_hook(ctx)
+
+    # The real text reply ("I'm totally fine, not stressed") was classified,
+    # not the trailing tool_result — so the refutation cancelled the cron.
+    assert removed == ["cron-tool"], (
+        "the user's real refuting reply must be classified past the "
+        "trailing tool_result, cancelling the cron"
+    )
+    assert "burnout" not in state.load_state(), "the state entry must be cleared"
+
+
 # ── Registration + fire-site wiring ───────────────────────────────────
 
 
