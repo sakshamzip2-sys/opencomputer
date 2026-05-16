@@ -613,6 +613,21 @@ class UserModelStore:
             return None
         return sum(e.recency_weight for e in incident.values()) / len(incident)
 
+    def vacuum(self) -> None:
+        """Rebuild the database file, reclaiming free pages.
+
+        Run after a bulk delete (e.g. :meth:`collapse_duplicate_edges`
+        on a graph with a huge legacy edge backlog) — SQLite keeps freed
+        pages otherwise, so the 194 MB file from a 393 K-edge graph would
+        not shrink even after the rows are gone. ``VACUUM`` cannot run
+        inside a transaction, so this uses a plain autocommit connection.
+        """
+        conn = self._connect()
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+
     def node_recency_scores(
         self, *, max_edges: int = 20_000
     ) -> dict[str, float]:

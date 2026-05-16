@@ -403,6 +403,19 @@ def test_node_recency_scores_bulk_empty_graph(tmp_path: Path) -> None:
     assert store.node_recency_scores() == {}
 
 
+def test_vacuum_preserves_data(tmp_path: Path) -> None:
+    """VACUUM rebuilds the file without losing nodes or edges."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="keep me")
+    b = store.upsert_node(kind="preference", value="also keep")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id))
+    store.vacuum()  # must not raise
+    assert store.count_nodes() == 2
+    assert store.count_edges() == 1
+    assert store.get_node(a.node_id) is not None
+
+
 def test_node_recency_scores_cost_guard_skips_huge_edge_table(
     tmp_path: Path,
 ) -> None:

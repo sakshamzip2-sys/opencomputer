@@ -294,7 +294,12 @@ def review(
     if not deleted:
         nodes = [n for n in nodes if not _node_is_deleted(n)]
     if needs_review:
+        # --needs-review: show ONLY the facts `migrate` flagged.
         nodes = [n for n in nodes if n.metadata.get("needs_review")]
+    else:
+        # Default view mirrors the prompt — flagged facts are excluded
+        # from <user-facts>, so they are excluded from review too.
+        nodes = [n for n in nodes if not n.metadata.get("needs_review")]
     ranked = _rank_for_review(nodes)
     total = len(ranked)
     shown = ranked if show_all else ranked[: max(0, limit)]
@@ -782,9 +787,11 @@ def migrate(
         store.update_node_metadata(n.node_id, new_meta)
         flagged += 1
     collapsed = store.collapse_duplicate_edges()
+    store.vacuum()  # reclaim the pages freed by the edge collapse
     console.print("[green]✓[/green] awareness migrate applied")
     console.print(f"  facts flagged needs_review: [bold]{flagged}[/bold]")
     console.print(f"  duplicate edges collapsed: [bold]{collapsed}[/bold]")
+    console.print("  database compacted (VACUUM)")
     if flagged:
         console.print(
             "[dim]flagged facts are excluded from the prompt — inspect them "

@@ -100,6 +100,18 @@ def test_review_deleted_flag_reveals_soft_deleted(tmp_path, monkeypatch):
     assert "TOMBMARK" in result.stdout
 
 
+def test_review_default_excludes_needs_review(tmp_path, monkeypatch):
+    """Default review hides migrate-flagged facts — it mirrors the prompt."""
+    store = _store(tmp_path, monkeypatch)
+    store.upsert_node(kind="attribute", value="CLEANFACT")
+    store.upsert_node(kind="attribute", value="FLAGGEDFACT",
+                      metadata={"needs_review": True})
+    result = runner.invoke(app, ["awareness", "review"])
+    assert result.exit_code == 0, result.stdout
+    assert "CLEANFACT" in result.stdout
+    assert "FLAGGEDFACT" not in result.stdout
+
+
 def test_review_counts_incoming_contradicts(tmp_path, monkeypatch):
     """A node targeted by a contradicts edge shows a non-zero count."""
     store = _store(tmp_path, monkeypatch)
