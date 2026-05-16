@@ -153,6 +153,41 @@ class TestFork:
         forked = next(s for s in sessions if s["id"] != "src-id")
         assert "(fork)" in (forked["title"] or "")
 
+    def test_fork_records_parent_with_flag(self, isolated_home: Path) -> None:
+        """``--record-parent`` records lineage so the fork shows under
+        its source in ``oc sessions tree``."""
+        _seed(isolated_home, "src-id", msgs=2)
+        result = runner.invoke(
+            session_app, ["fork", "src-id", "--record-parent"]
+        )
+        assert result.exit_code == 0
+        db = SessionDB(isolated_home / "sessions.db")
+        forked = next(
+            s for s in db.list_sessions(limit=10) if s["id"] != "src-id"
+        )
+        row = db.get_session(forked["id"])
+        assert row is not None
+        assert row["parent_session_id"] == "src-id"
+
+    def test_fork_without_flag_does_not_record_parent(
+        self, isolated_home: Path
+    ) -> None:
+        """Default CLI fork stays pre-Phase-H — no lineage recorded.
+
+        Regression guard: the ``--record-parent`` opt-in must not change
+        the behaviour of the unflagged path.
+        """
+        _seed(isolated_home, "src-id", msgs=2)
+        result = runner.invoke(session_app, ["fork", "src-id"])
+        assert result.exit_code == 0
+        db = SessionDB(isolated_home / "sessions.db")
+        forked = next(
+            s for s in db.list_sessions(limit=10) if s["id"] != "src-id"
+        )
+        row = db.get_session(forked["id"])
+        assert row is not None
+        assert row["parent_session_id"] is None
+
 
 # ---------------------------------------------------------------------------
 # resume

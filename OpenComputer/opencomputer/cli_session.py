@@ -312,16 +312,27 @@ def session_fork(
         "-t",
         help="Title for the new session (defaults to '<source title> (fork)').",
     ),
+    record_parent: bool = typer.Option(
+        False,
+        "--record-parent",
+        help=(
+            "Record the source as this fork's parent so it groups under "
+            "the source in `oc sessions tree`. Off by default — the fork "
+            "is functionally independent either way."
+        ),
+    ),
 ) -> None:
     """Clone a session's history into a new session id.
 
     Useful for branching a conversation without polluting the source —
     e.g. "what would the agent have said if I'd asked Y instead?".
     The new session inherits the source's platform / model / message
-    history; only the id (and title) differ.
+    history; only the id (and title) differ. Pass ``--record-parent``
+    to also record fork lineage for ``oc sessions tree``.
 
     Shares :func:`opencomputer.agent.session_fork.fork_session` with the
-    ``/fork`` slash command — both paths produce identical results.
+    ``/branch`` slash command. ``/branch`` always records lineage; this
+    CLI records it only when ``--record-parent`` is given.
     """
     from opencomputer.agent.session_fork import (
         SourceSessionNotFoundError,
@@ -330,7 +341,9 @@ def session_fork(
 
     db = _db()
     try:
-        result = fork_session(db, session_id, title=title or None)
+        result = fork_session(
+            db, session_id, title=title or None, record_parent=record_parent
+        )
     except SourceSessionNotFoundError:
         console.print(f"[red]error:[/red] source session {session_id!r} not found.")
         raise typer.Exit(1) from None
