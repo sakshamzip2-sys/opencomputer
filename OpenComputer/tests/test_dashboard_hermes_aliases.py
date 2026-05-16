@@ -625,6 +625,24 @@ def test_fork_session_copies_messages_through_endpoint(
     assert db.get_messages(new_id) == db.get_messages("src")
 
 
+def test_fork_session_requires_auth() -> None:
+    """The fork endpoint is Bearer-gated — no token, no fork. Pins the
+    auth gate the migration kept on the rewritten route."""
+    client = TestClient(_build_app(with_token=True))
+    resp = client.post("/api/sessions/src/fork")
+    assert resp.status_code == 401
+
+
+def test_fork_session_400_on_blank_session_id(
+    auth_headers: dict[str, str],
+) -> None:
+    """A whitespace-only source id is rejected at the route boundary,
+    before any DB work — pins the rewritten route's input guard."""
+    client = TestClient(_build_app(with_token=True))
+    resp = client.post("/api/sessions/%20/fork", headers=auth_headers)
+    assert resp.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # Single skill / memory / config patch / session chat — added 2026-05-12
 # ---------------------------------------------------------------------------
