@@ -679,6 +679,19 @@ class TestCuaBackend0_1_9CallSites:
         b.click(element=3, button="right")
         assert b._session.calls[-1][0] == "right_click"
 
+    def test_middle_click_rejected_not_degraded_to_left_click(self):
+        """cua-driver 0.1.9 has no middle-click primitive — the backend must
+        fail cleanly rather than silently performing a left-click."""
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b._active_window_id = 88
+        res = b.click(element=3, button="middle")
+        assert res.ok is False
+        assert res.action == "middle_click"
+        assert "middle" in res.message.lower()
+        # No tool call at all — not a degraded left-click.
+        assert b._session.calls == []
+
     def test_scroll_uses_by_line_no_pixel_mode(self):
         b = _backend_with_session()
         b._active_pid = 4242
@@ -926,6 +939,43 @@ class TestPluginRegistration:
         assert "browser_" not in text
         # MEDIA: screenshot-delivery guidance is retained.
         assert "MEDIA:" in text
+
+
+# ---------------------------------------------------------------------------
+# `oc computer-use` CLI verbs
+# ---------------------------------------------------------------------------
+
+class TestComputerUseCli:
+    @pytest.fixture()
+    def cli_mod(self):
+        return _load("_cu_test_cli", PLUGIN_DIR / "cu_cli.py")
+
+    def test_status_resolves_via_find_cua_driver_not_just_path(self, cli_mod):
+        """``status`` must resolve the binary via ``find_cua_driver`` — so it
+        stays accurate when cua-driver is reachable only via the upstream
+        installer's ``~/.local/bin`` symlink, not yet on ``$PATH``. A bare
+        ``shutil.which`` would falsely report NOT installed there."""
+        from typer.testing import CliRunner
+
+        runner = CliRunner()
+        with patch.object(cli_mod.platform, "system", return_value="Darwin"), \
+             patch.object(cli_mod, "find_cua_driver",
+                          return_value="/Users/x/.local/bin/cua-driver"), \
+             patch.object(cli_mod, "cua_driver_version", return_value="0.1.9"):
+            result = runner.invoke(cli_mod.app, ["status"])
+        assert result.exit_code == 0
+        assert "/Users/x/.local/bin/cua-driver" in result.stdout
+        assert "0.1.9" in result.stdout
+
+    def test_status_reports_not_installed_when_unresolvable(self, cli_mod):
+        from typer.testing import CliRunner
+
+        runner = CliRunner()
+        with patch.object(cli_mod.platform, "system", return_value="Darwin"), \
+             patch.object(cli_mod, "find_cua_driver", return_value=None):
+            result = runner.invoke(cli_mod.app, ["status"])
+        assert result.exit_code == 1
+        assert "NOT installed" in result.stdout
 
 
 # ---------------------------------------------------------------------------

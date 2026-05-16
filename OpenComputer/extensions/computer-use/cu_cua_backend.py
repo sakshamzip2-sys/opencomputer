@@ -538,6 +538,17 @@ class CuaDriverBackend(ComputerUseBackend):
             return ActionResult(ok=False, action="click",
                                 message="No active window — call capture() first.")
 
+        # cua-driver 0.1.9 has no middle-click primitive — the ``click`` tool's
+        # pixel path takes no ``button`` and there is no ``middle_click`` tool.
+        # Reject explicitly rather than silently degrading to a left-click,
+        # which would be a surprising wrong action.
+        if button == "middle":
+            return ActionResult(
+                ok=False, action="middle_click",
+                message="cua-driver 0.1.9 has no middle-click primitive — "
+                        "middle_click is unsupported by this backend.",
+            )
+
         if button == "right":
             tool = "right_click"
         elif click_count == 2:
