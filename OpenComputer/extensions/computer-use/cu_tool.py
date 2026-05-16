@@ -543,7 +543,18 @@ def run_computer_use(args: dict[str, Any]) -> dict[str, Any]:
     This is the synchronous core; ``ComputerUseTool.execute`` wraps it in the
     async ``ToolCall``/``ToolResult`` contract.
     """
-    action = (args.get("action") or "").strip().lower()
+    # ``strict_mode`` is off (the action discriminator makes most params
+    # conditionally-unused), so the API does NOT enforce the schema's
+    # ``string`` type on ``action``. A model can hand us ``123``, a list,
+    # or a dict — ``(123 or "").strip()`` raises a raw ``AttributeError``.
+    # ``execute`` would catch that as defence-in-depth, but ``run_computer_use``
+    # is also a direct entry point (tests, and any future caller); it must
+    # never leak a raw exception. Coerce a non-string ``action`` to str so
+    # the validation below (and the unknown-action branch) handles it cleanly.
+    raw_action = args.get("action")
+    if raw_action is None:
+        return {"error": "missing `action`"}
+    action = (raw_action if isinstance(raw_action, str) else str(raw_action)).strip().lower()
     if not action:
         return {"error": "missing `action`"}
 

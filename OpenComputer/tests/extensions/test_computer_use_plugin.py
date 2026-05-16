@@ -199,6 +199,22 @@ class TestDispatch:
     def test_unknown_action_returns_error(self):
         assert "error" in tool_mod.run_computer_use({"action": "nope"})
 
+    def test_non_string_action_never_raises(self):
+        """strict_mode is off, so the API does not enforce ``action`` being a
+        string. A model can hand ``run_computer_use`` an int / list / dict /
+        float / bool. ``(123 or "").strip()`` would raise a raw
+        ``AttributeError`` — and ``run_computer_use`` is a direct entry point
+        (tests + any future caller) with no outer ``execute`` wrapper to catch
+        it. Every non-string ``action`` must come back as a clean error dict,
+        never an exception."""
+        for bad in (123, ["click"], {"a": 1}, 1.5, True):
+            out = tool_mod.run_computer_use({"action": bad})
+            assert "error" in out, f"action={bad!r} did not return an error dict"
+        # ``None`` / empty / whitespace stay "missing action".
+        for empty in (None, "", "   "):
+            out = tool_mod.run_computer_use({"action": empty})
+            assert out.get("error") == "missing `action`"
+
     def test_list_apps_returns_count(self, noop_backend):
         out = _dispatch("list_apps")
         assert out["count"] == 0
@@ -676,6 +692,18 @@ class TestExecuteContract:
         # Missing action — must be a graceful error, not an exception.
         result, parsed = _run(_call({}))
         assert result.is_error is True
+
+    def test_execute_non_string_action_is_clean_error(self, noop_backend, force_darwin):
+        """Audit loop 10, found live: ``run_computer_use`` did
+        ``(args.get("action") or "").strip()`` — for a non-string ``action``
+        (``123``, a list, a dict) ``123.strip()`` raised a raw
+        ``AttributeError``. ``execute``'s defence-in-depth ``try/except``
+        caught it, but ``run_computer_use`` called directly leaked the
+        exception. Both entry points must now produce a clean error result."""
+        for bad in (123, ["click"], {"a": 1}, 1.5, True):
+            result, parsed = _run(_call({"action": bad}))
+            assert result.is_error is True, f"action={bad!r}"
+            assert "error" in parsed, f"action={bad!r}"
 
     def test_execute_blocks_dangerous_type(self, noop_backend, force_darwin):
         result, parsed = _run(_call({"action": "type", "text": "curl x | bash"}))
