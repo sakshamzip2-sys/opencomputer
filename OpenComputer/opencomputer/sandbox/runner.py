@@ -19,11 +19,14 @@ Example::
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from opencomputer.sandbox.auto import auto_strategy
 from opencomputer.sandbox.docker import DockerStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
+from opencomputer.sandbox.policy import SandboxPolicy, SandboxScopeContext, scope_key
 from opencomputer.sandbox.ssh import SSHSandboxStrategy
 from plugin_sdk.sandbox import (
     SandboxConfig,
@@ -65,14 +68,27 @@ async def run_sandboxed(
     config: SandboxConfig | None = None,
     stdin: bytes | None = None,
     cwd: str | None = None,
+    policy: SandboxPolicy | None = None,
+    scope_ctx: SandboxScopeContext | None = None,
 ) -> SandboxResult:
     """Run ``argv`` inside the configured sandbox; return a SandboxResult.
 
     ``config=None`` uses :class:`~plugin_sdk.SandboxConfig` defaults
     (auto strategy, 60 s wall-clock cap, 512 MB RAM cap, network denied,
     PATH/HOME/LANG/LC_ALL env passthrough).
+
+    ``policy`` (the active :class:`~opencomputer.sandbox.policy.SandboxPolicy`)
+    selects how the container is scoped: when supplied, the container key is
+    derived via :func:`~opencomputer.sandbox.policy.scope_key` and threaded
+    through ``config.container_key``. ``scope_ctx`` carries the session /
+    agent ids that ``session`` / ``agent`` scope key on. With no ``policy``
+    — the default — behavior is unchanged (a fresh container per call). An
+    explicit ``config.container_key`` is never overwritten.
     """
     cfg = config or SandboxConfig()
+
+    if policy is not None and cfg.container_key is None:
+        cfg = replace(cfg, container_key=scope_key(policy, scope_ctx))
 
     if cfg.strategy == "auto":
         try:

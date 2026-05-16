@@ -80,6 +80,15 @@ class BaseTool(ABC):
     #: AFTER auditing their parameters dict for strict-compatibility.
     strict_mode: ClassVar[bool] = False
 
+    #: M1 tool-loop detection (2026-05-16): when True, this tool is exempt
+    #: from the in-loop duplicate-call detector. Set it on tools whose
+    #: correct use IS to repeat with identical args — a build-status
+    #: poller, a sleep-then-retry tool. Defaults False: a tool called
+    #: ``threshold`` times with byte-identical args inside the detector's
+    #: sliding window is treated as a stuck agent. See
+    #: ``opencomputer.agent.loop_safety.LoopDetector``.
+    loop_safe: ClassVar[bool] = False
+
     @property
     @abstractmethod
     def schema(self) -> ToolSchema:
