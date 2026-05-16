@@ -730,7 +730,11 @@ class TestCuaBackendParsing:
 
     def test_parse_elements_from_tree_real_0_1_9_format(self):
         """0.1.9 emits ``- [N] AXRole`` with quoted titles, paren
-        descriptions, and ``= "value"`` settable values — any combination."""
+        descriptions, and ``= "value"`` settable values — any combination.
+
+        (Simplified format without ``id=``/``help=`` tokens — the regex
+        must still parse it. The live-token format is covered separately
+        by ``test_parse_elements_from_tree_live_id_help_tokens``.)"""
         tree = (
             '- AXApplication "Chrome"\n'
             '  - [0] AXWindow "Home - Chrome" actions=[AXRaise]\n'
@@ -754,6 +758,49 @@ class TestCuaBackendParsing:
         assert by_index[8].label == "Address and search bar"
         assert by_index[8].attributes["value"] == "x.com/foo"
         assert "AXShowMenu" in by_index[8].attributes["actions"]
+
+    def test_parse_elements_from_tree_live_id_help_tokens(self):
+        """Audit loop 8 — found live: real 0.1.9 ``tree_markdown`` lines
+        interleave ``id=…`` and ``help="…"`` tokens BETWEEN the label and
+        ``actions=[…]``. ~35% of TextEdit's elements carry an ``id=`` token.
+
+        The mock below is verbatim live cua-driver 0.1.9 output (TextEdit).
+        The ``id=`` value may itself contain spaces (``id=First Text View``).
+        An earlier regex anchored ``actions=`` directly after the label
+        groups, so for every ``id=``-bearing element the ``actions`` list was
+        SILENTLY DROPPED. This pins the fix: ``actions`` parses regardless of
+        the ``id=``/``help=`` noise, and ``help`` is captured as a label."""
+        tree = (
+            '- AXApplication "TextEdit"\n'
+            '  - [0] AXWindow "Untitled 4" id=_NS:34 actions=[AXRaise]\n'
+            '    - [1] AXScrollArea id=_NS:8 actions=[AXScrollLeftByPage, '
+            'AXScrollRightByPage]\n'
+            '    - [2] AXTextArea id=First Text View actions=[AXShowMenu]\n'
+            '    - [19] AXPopUpButton = "Helvetica" (typeface) '
+            'help="Choose the typeface" id=_NS:87 actions=[AXShowMenu]\n'
+            '    - [21] AXComboBox = "14" (font size) help="Set the font size" '
+            'id=_NS:108 actions=[AXShowMenu, AXConfirm]\n'
+            '    - [27] AXCheckBox (bold) help="Bold text"\n'
+        )
+        by_index = {e.index: e
+                    for e in cua_backend_mod._parse_elements_from_tree(tree)}
+        assert set(by_index) == {0, 1, 2, 19, 21, 27}
+        # id= token present — actions MUST still parse (the loop-8 bug).
+        assert by_index[0].attributes["actions"] == ["AXRaise"]
+        assert by_index[1].attributes["actions"] == [
+            "AXScrollLeftByPage", "AXScrollRightByPage"]
+        # id= value with embedded spaces must not break the parse.
+        assert by_index[2].role == "AXTextArea"
+        assert by_index[2].attributes["actions"] == ["AXShowMenu"]
+        # help= + id= both present, both before actions=.
+        assert by_index[19].attributes["value"] == "Helvetica"
+        assert by_index[19].label == "typeface"  # desc beats help
+        assert by_index[19].attributes["help"] == "Choose the typeface"
+        assert by_index[19].attributes["actions"] == ["AXShowMenu"]
+        assert by_index[21].attributes["actions"] == ["AXShowMenu", "AXConfirm"]
+        # help with NO actions= — help captured, no actions key.
+        assert by_index[27].attributes["help"] == "Bold text"
+        assert "actions" not in by_index[27].attributes
 
     def test_install_hint_mentions_oc_command(self):
         assert "oc computer-use install" in cua_backend_mod.cua_driver_install_hint()
@@ -1412,6 +1459,172 @@ class TestAsyncBridgeLifecycle:
         b = cua_backend_mod.CuaDriverBackend()
         b.stop()  # never started
         b.stop()  # twice
+
+
+class TestDaemonCrashRecovery:
+    """cua-driver 0.1.9's keyboard/scroll tools can crash its relay daemon
+    (a SkyLight SPI defect). Verified live: after a ``press_key`` crash the
+    daemon dies and the bound ``cua-driver mcp`` relay returns
+    "daemon closed connection"/"daemon not reachable" for EVERY subsequent
+    call — the session is permanently wedged unless recycled. A fresh
+    session spawns a new relay which relaunches the daemon. These tests
+    pin the recover-once-and-retry behaviour and the clean-degradation of
+    the read paths. Mock payloads are the live 0.1.9 error strings."""
+
+    # Live-captured 0.1.9 transport-error message after a press_key crash.
+    _DEAD_MSG = ("Internal error: daemon transport: daemon closed "
+                 "connection before responding")
+    # Live-captured 0.1.9 message on the FOLLOWING call (daemon gone).
+    _UNREACHABLE_MSG = (
+        "Internal error: cua-driver daemon not reachable on "
+        "/Users/x/Library/Caches/cua-driver/cua-driver.sock. Start it "
+        "with `open -n -g -a CuaDriver --args serve` and retry."
+    )
+
+    def test_is_dead_daemon_error_matches_live_strings(self):
+        """The two live 0.1.9 crash strings must be recognised; an ordinary
+        tool error message must NOT be (tool errors come back as isError,
+        never as an exception, but the discriminator must still be tight)."""
+        f = cua_backend_mod._is_dead_daemon_error
+        assert f(RuntimeError(self._DEAD_MSG)) is True
+        assert f(RuntimeError(self._UNREACHABLE_MSG)) is True
+        assert f(RuntimeError("AX action AXPress failed with code -25206")) is False
+        assert f(RuntimeError("element_index 7 out of range")) is False
+
+    def test_session_call_tool_recovers_once_after_dead_daemon(self):
+        """``_CuaDriverSession.call_tool`` must recycle the session and
+        retry exactly once when the first attempt hits a dead daemon."""
+
+        class _FakeBridge:
+            def __init__(self):
+                self.attempts = 0
+
+            def start(self):
+                ...
+
+            def run(self, coro, timeout=30.0):
+                if hasattr(coro, "close"):
+                    coro.close()  # never actually awaited in the fake
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError(
+                        "Internal error: daemon transport: daemon closed "
+                        "connection before responding")
+                return {"data": {"message": "ok"}, "images": [],
+                        "structuredContent": None, "isError": False}
+
+        bridge = _FakeBridge()
+        session = cua_backend_mod._CuaDriverSession(bridge)
+        session._started = True
+        # Stub the actual session recycle — the recover path itself is
+        # exercised live in the audit; here we pin the retry-once contract.
+        recovered = []
+        session._recover = lambda: recovered.append(True)  # type: ignore
+
+        out = session.call_tool("press_key", {"pid": 1, "key": "return"})
+        assert out["isError"] is False
+        assert out["data"]["message"] == "ok"
+        assert recovered == [True]  # recovered exactly once
+        assert bridge.attempts == 2  # original + one retry
+
+    def test_session_call_tool_propagates_non_dead_error(self):
+        """A non-transport exception must NOT trigger recovery — it
+        propagates so the caller can surface it as a clean failure."""
+
+        class _FakeBridge:
+            def __init__(self):
+                self.attempts = 0
+
+            def start(self):
+                ...
+
+            def run(self, coro, timeout=30.0):
+                if hasattr(coro, "close"):
+                    coro.close()
+                self.attempts += 1
+                raise RuntimeError("element_index 99 out of range")
+
+        bridge = _FakeBridge()
+        session = cua_backend_mod._CuaDriverSession(bridge)
+        session._started = True
+        with pytest.raises(RuntimeError, match="out of range"):
+            session.call_tool("click", {"pid": 1, "element_index": 99})
+        assert bridge.attempts == 1  # no retry — not a dead-daemon error
+
+    def test_call_wraps_transport_error_in_typed_exception(self):
+        """``CuaDriverBackend._call`` wraps any escaping ``call_tool``
+        exception in a typed ``CuaDriverCallError``."""
+
+        class _RaisingSession:
+            def call_tool(self, name, args, timeout=30.0):
+                raise RuntimeError(
+                    "Internal error: daemon transport: daemon closed "
+                    "connection before responding")
+
+        b = cua_backend_mod.CuaDriverBackend()
+        b._session = _RaisingSession()
+        with pytest.raises(cua_backend_mod.CuaDriverCallError):
+            b._call("list_windows", {"on_screen_only": True})
+
+    def test_capture_degrades_cleanly_when_daemon_unrecoverable(self):
+        """A capture whose ``list_windows`` call raises an unrecoverable
+        transport error must return a ``CaptureResult`` with ``error`` set
+        — NOT let a raw ``McpError`` escape the method."""
+
+        class _RaisingSession:
+            def call_tool(self, name, args, timeout=30.0):
+                raise RuntimeError(
+                    "Internal error: cua-driver daemon not reachable")
+
+        b = cua_backend_mod.CuaDriverBackend()
+        b._session = _RaisingSession()
+        res = b.capture(mode="som", app="TextEdit")
+        assert res.error  # surfaced, not raised
+        assert "cua-driver" in res.error.lower()
+        assert res.elements == [] and res.png_b64 is None
+
+    def test_action_degrades_cleanly_when_daemon_unrecoverable(self):
+        """An action whose tool call raises must return a failed
+        ``ActionResult`` — never propagate the raw exception."""
+
+        class _RaisingSession:
+            def call_tool(self, name, args, timeout=30.0):
+                raise RuntimeError(
+                    "Internal error: daemon transport: daemon closed "
+                    "connection before responding")
+
+        b = cua_backend_mod.CuaDriverBackend()
+        b._session = _RaisingSession()
+        b._active_pid = 4242
+        res = b.type_text("x")
+        assert res.ok is False
+        assert "cua-driver error" in res.message
+
+    def test_list_apps_degrades_to_empty_when_daemon_unrecoverable(self):
+        """``list_apps`` must degrade to ``[]`` on an unrecoverable
+        transport error rather than raising out of the method."""
+
+        class _RaisingSession:
+            def call_tool(self, name, args, timeout=30.0):
+                raise RuntimeError("Internal error: connection closed")
+
+        b = cua_backend_mod.CuaDriverBackend()
+        b._session = _RaisingSession()
+        assert b.list_apps() == []
+
+    def test_focus_app_degrades_cleanly_when_daemon_unrecoverable(self):
+        """``focus_app`` must return a failed ``ActionResult`` on an
+        unrecoverable transport error, not propagate the raw exception."""
+
+        class _RaisingSession:
+            def call_tool(self, name, args, timeout=30.0):
+                raise RuntimeError("Internal error: broken pipe")
+
+        b = cua_backend_mod.CuaDriverBackend()
+        b._session = _RaisingSession()
+        res = b.focus_app("TextEdit")
+        assert res.ok is False
+        assert "cua-driver" in res.message.lower()
 
 
 class TestDeadCodeRemoved:

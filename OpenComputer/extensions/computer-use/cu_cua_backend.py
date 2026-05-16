@@ -67,24 +67,37 @@ _CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP transport
 _CUA_DRIVER_OWN_APP_NAMES = frozenset({"cua driver", "cuadriver"})
 
 # Regex to parse element lines from a cua-driver 0.1.9 ``get_window_state``
-# ``tree_markdown`` rendering. The real 0.1.9 format, confirmed against the
-# installed binary, is one indented line per node, e.g.:
+# ``tree_markdown`` rendering. The real 0.1.9 format, confirmed live against
+# the installed binary, is one indented line per node, e.g.:
 #
-#   - AXApplication "Chrome"
-#     - [0] AXWindow "Title…" actions=[AXRaise]
-#       - [3] AXButton (Back) actions=[AXShowMenu]
-#       - [8] AXTextField = "x.com/…" (Address and search bar) actions=[…]
+#   - AXApplication "TextEdit"
+#     - [0] AXWindow "Untitled 4" id=_NS:34 actions=[AXRaise]
+#       - [2] AXTextArea id=First Text View actions=[AXShowMenu]
+#       - [19] AXPopUpButton = "Helvetica" (typeface) help="Choose the
+#              typeface" id=_NS:87 actions=[AXShowMenu]
 #
 # Only nodes the driver deemed *actionable* carry a ``[N]`` element_index
 # token; container nodes have none and are skipped. A node's human label can
-# arrive three ways — a quoted ``"title"``, a parenthesised ``(description)``,
-# or an ``= "value"`` settable value — and any combination may co-occur.
+# arrive several ways — a quoted ``"title"``, a parenthesised
+# ``(description)``, an ``= "value"`` settable value, or a ``help="…"``
+# tooltip — and any combination may co-occur.
+#
+# CRITICAL (audit loop 8, found live): real 0.1.9 lines interleave ``id=…``
+# and ``help="…"`` tokens BETWEEN the label and ``actions=[…]``. The ``id=``
+# value is unquoted and may itself contain spaces (``id=First Text View``).
+# An earlier regex anchored ``actions=`` directly after the optional
+# label groups, so for the ~35% of elements that carry an ``id=`` token the
+# ``actions`` list was silently dropped. The fix: an optional ``help="…"``
+# capture, then a lazy ``[^\n]*?`` gap that swallows ``id=…`` (and any
+# future inter-token noise) before the ``actions=`` group. The gap is
+# newline-bounded so it never crosses into the next element's line.
 _ELEMENT_LINE_RE = re.compile(
     r'^\s*-\s+\[(?P<index>\d+)\]\s+(?P<role>AX\w+)'
     r'(?:\s+=\s+"(?P<value>[^"]*)")?'
     r'(?:\s+"(?P<title>[^"]*)")?'
     r'(?:\s+\((?P<desc>[^)]*)\))?'
-    r'(?:\s+actions=\[(?P<actions>[^\]]*)\])?',
+    r'(?:\s+help="(?P<help>[^"]*)")?'
+    r'(?:[^\n]*?\sactions=\[(?P<actions>[^\]]*)\])?',
     re.MULTILINE,
 )
 
@@ -182,11 +195,16 @@ def _parse_elements_from_tree(markdown: str) -> list[UIElement]:
     """
     elements: list[UIElement] = []
     for m in _ELEMENT_LINE_RE.finditer(markdown):
-        # Prefer the most descriptive label available.
-        label = m.group("title") or m.group("desc") or m.group("value") or ""
+        # Prefer the most descriptive label available. ``help`` is the
+        # 0.1.9 tooltip text — a useful last-resort label for an element
+        # with no title/desc/value (e.g. a bare AXButton).
+        label = (m.group("title") or m.group("desc")
+                 or m.group("value") or m.group("help") or "")
         attrs: dict[str, Any] = {}
         if m.group("value") is not None:
             attrs["value"] = m.group("value")
+        if m.group("help"):
+            attrs["help"] = m.group("help")
         if m.group("actions"):
             attrs["actions"] = [
                 a.strip() for a in m.group("actions").split(",") if a.strip()
@@ -352,13 +370,63 @@ class _CuaDriverSession:
             finally:
                 self._started = False
 
+    def _recover(self) -> None:
+        """Tear down a wedged session and start a fresh one.
+
+        cua-driver 0.1.9's keyboard/scroll tools can crash the relay daemon
+        (a SkyLight SPI defect). When that happens the daemon process dies
+        and the ``cua-driver mcp`` relay this session is bound to keeps
+        returning "daemon closed connection"/"daemon not reachable" for
+        EVERY subsequent call — the session is permanently wedged. A fresh
+        session spawns a new ``cua-driver mcp`` relay, which transparently
+        relaunches the daemon (verified live against 0.1.9). So recovery is
+        a full stop + start of the MCP session, not a per-call retry.
+
+        Caller already holds ``_lock``. ``_aexit`` swallows its own errors;
+        ``_aenter`` may still raise (binary gone, bridge dead) and that
+        propagates — an unrecoverable session is a real failure.
+        """
+        try:
+            self._bridge.run(self._aexit(), timeout=5.0)
+        except Exception as e:
+            logger.warning("cua-driver session teardown during recovery failed: %s", e)
+        self._exit_stack = None
+        self._session = None
+        self._bridge.start()
+        self._bridge.run(self._aenter(), timeout=15.0)
+        self._started = True
+        logger.warning("cua-driver session recovered after a dead-daemon error")
+
     async def _call_tool_async(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         result = await self._session.call_tool(name, args)
         return _extract_tool_result(result)
 
     def call_tool(self, name: str, args: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
-        self._require_started()
-        return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+        """Invoke a cua-driver MCP tool, recovering once from a dead daemon.
+
+        If the cua-driver daemon crashed mid-session (keyboard/scroll SPI
+        defect, OS sleep, manual ``cua-driver stop``), the relay surfaces a
+        transport error — never a tool ``isError`` result. ``_is_dead_daemon_error``
+        recognises that class; on a match the session is recycled (which
+        relaunches the daemon) and the call is retried EXACTLY once. A
+        second failure, or any non-transport error, propagates so the
+        caller (``_action`` / ``capture``) can surface it cleanly.
+        """
+        with self._lock:
+            self._require_started()
+            try:
+                return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+            except Exception as e:
+                if not _is_dead_daemon_error(e):
+                    raise
+                logger.warning(
+                    "cua-driver %s hit a dead-daemon error (%s) — recycling session",
+                    name, e,
+                )
+                self._recover()
+            # Retry once on the fresh session — outside the except so a
+            # failure here is a clean, first-class exception, not chained.
+            return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
 
 
 def _extract_tool_result(mcp_result: Any) -> dict[str, Any]:
@@ -393,6 +461,42 @@ def _extract_tool_result(mcp_result: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             data = joined
     return {"data": data, "images": images, "structuredContent": structured, "isError": is_error}
+
+
+# Substrings cua-driver 0.1.9 puts in a transport-level error when its relay
+# daemon has died — keyboard/scroll SPI crash, OS sleep, manual ``stop``.
+# These are recoverable by recycling the MCP session (which relaunches the
+# daemon); a normal tool failure never raises — it comes back as ``isError``.
+_DEAD_DAEMON_MARKERS = (
+    "daemon closed connection",
+    "daemon not reachable",
+    "daemon transport",
+    "connection closed",
+    "broken pipe",
+)
+
+
+class CuaDriverCallError(RuntimeError):
+    """A cua-driver MCP call failed at the transport level (not a tool error).
+
+    Raised by ``CuaDriverBackend._call`` when ``_session.call_tool`` throws
+    even after a session-recovery retry. Read paths (``capture`` /
+    ``list_apps`` / ``focus_app``) catch this and turn it into a clean
+    error result instead of letting the raw ``McpError`` escape.
+    """
+
+
+def _is_dead_daemon_error(exc: BaseException) -> bool:
+    """True if ``exc`` looks like a cua-driver relay-daemon death.
+
+    Matches on the message text — cua-driver surfaces daemon death as a
+    generic ``McpError``/connection error, not a typed exception, so the
+    marker strings (verified live against 0.1.9 after a press_key crash)
+    are the only discriminator. A genuine tool error never reaches here:
+    cua-driver returns those as an ``isError`` result, not an exception.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _DEAD_DAEMON_MARKERS)
 
 
 def _error_message(out: dict[str, Any]) -> str:
@@ -483,7 +587,7 @@ class CuaDriverBackend(ComputerUseBackend):
 
     def _select_windows(self, app: str | None) -> list[dict[str, Any]]:
         """Resolve on-screen, layer-0 windows, frontmost-first, optional app filter."""
-        lw_out = self._session.call_tool("list_windows", {"on_screen_only": True})
+        lw_out = self._call("list_windows", {"on_screen_only": True})
         windows = _parse_windows(lw_out)
         # Layer-0 only — most dock shields are layer != 0 noise. The macOS
         # menu bar, however, is reported as a layer-0 on-screen window by
@@ -518,7 +622,20 @@ class CuaDriverBackend(ComputerUseBackend):
         so reporting the screenshot dims is required for correct
         coordinate-space addressing.
         """
-        windows = self._select_windows(app)
+        # ``_select_windows`` calls ``list_windows`` over MCP. A dead-daemon
+        # crash there (or any unrecoverable transport failure) must NOT
+        # escape ``capture`` as a raw ``McpError`` — the contract is to
+        # return a ``CaptureResult``. The session already self-recovers
+        # once; an error that still escapes is genuinely unrecoverable, so
+        # surface it cleanly with the same shape as a no-window result.
+        try:
+            windows = self._select_windows(app)
+        except CuaDriverCallError as e:
+            return CaptureResult(
+                mode=mode, width=0, height=0, png_b64=None, elements=[],
+                app="", window_title="", png_bytes_len=0,
+                error=f"cua-driver capture failed: {e}",
+            )
         if not windows:
             return CaptureResult(
                 mode=mode, width=0, height=0, png_b64=None, elements=[],
@@ -557,10 +674,18 @@ class CuaDriverBackend(ComputerUseBackend):
                          f"frontmost window ({app_name!r}) instead")
 
         if mode == "vision":
-            sc_out = self._session.call_tool(
-                "screenshot",
-                {"window_id": self._active_window_id, "format": "jpeg", "quality": 85},
-            )
+            try:
+                sc_out = self._call(
+                    "screenshot",
+                    {"window_id": self._active_window_id,
+                     "format": "jpeg", "quality": 85},
+                )
+            except CuaDriverCallError as e:
+                return CaptureResult(
+                    mode=mode, width=width, height=height, png_b64=None,
+                    elements=[], app=app_name, window_title=window_title,
+                    png_bytes_len=0, error=f"cua-driver screenshot failed: {e}",
+                )
             if sc_out["images"]:
                 png_b64 = sc_out["images"][0]
             elif sc_out.get("isError"):
@@ -569,10 +694,18 @@ class CuaDriverBackend(ComputerUseBackend):
                 error = (_error_message(sc_out)
                          or "screenshot capture failed (try capture mode 'ax')")
         else:
-            gws_out = self._session.call_tool(
-                "get_window_state",
-                {"pid": self._active_pid, "window_id": self._active_window_id},
-            )
+            try:
+                gws_out = self._call(
+                    "get_window_state",
+                    {"pid": self._active_pid, "window_id": self._active_window_id},
+                )
+            except CuaDriverCallError as e:
+                return CaptureResult(
+                    mode=mode, width=width, height=height, png_b64=None,
+                    elements=[], app=app_name, window_title=window_title,
+                    png_bytes_len=0,
+                    error=f"cua-driver get_window_state failed: {e}",
+                )
             if gws_out.get("isError"):
                 # window_id not on the current Space, pid mismatch, AX
                 # walk refused — surface it rather than reporting "0
@@ -891,7 +1024,15 @@ class CuaDriverBackend(ComputerUseBackend):
         The text path is a last-resort fallback for a degraded transport;
         each line is ``- Name (pid N) [bundle.id]``.
         """
-        out = self._session.call_tool("list_apps", {})
+        # A dead-daemon crash must not escape as a raw ``McpError`` — the
+        # contract is to return a list. The session self-recovers once;
+        # an unrecoverable failure degrades to an empty list (the agent
+        # then sees "no apps" and can retry, rather than an uncaught crash).
+        try:
+            out = self._call("list_apps", {})
+        except CuaDriverCallError as e:
+            logger.warning("cua-driver list_apps unrecoverable: %s", e)
+            return []
         sc = out.get("structuredContent") or {}
         if isinstance(sc, dict) and isinstance(sc.get("apps"), list):
             return sc["apps"]
@@ -935,7 +1076,13 @@ class CuaDriverBackend(ComputerUseBackend):
         raise primitive, and stealing the user's focus is exactly what this
         backend is designed to avoid. The returned message says so.
         """
-        windows = self._select_windows(app)
+        # A dead-daemon crash in ``list_windows`` must surface as a clean
+        # failed ActionResult, not a raw ``McpError`` escaping the method.
+        try:
+            windows = self._select_windows(app)
+        except CuaDriverCallError as e:
+            return ActionResult(ok=False, action="focus_app",
+                                message=f"cua-driver focus_app failed: {e}")
         target = next((w for w in windows if not w["off_screen"]), None) \
             or (windows[0] if windows else None)
         if target:
@@ -957,9 +1104,29 @@ class CuaDriverBackend(ComputerUseBackend):
                             message=f"No on-screen window found for app '{app}'.")
 
     # ── Internal ───────────────────────────────────────────────────
+    def _call(self, name: str, args: dict[str, Any],
+              timeout: float = 30.0) -> dict[str, Any]:
+        """Invoke a cua-driver tool, raising ``CuaDriverCallError`` on transport failure.
+
+        ``_session.call_tool`` already recovers ONCE from a dead daemon
+        (see ``_CuaDriverSession.call_tool``). Anything that still escapes
+        — an unrecoverable session, a second crash, a timeout — is wrapped
+        in a typed ``CuaDriverCallError`` so the read paths (``capture`` /
+        ``list_apps`` / ``focus_app`` / ``_select_windows``) can surface it
+        as a clean error result rather than letting a raw ``McpError``
+        propagate out of a method whose contract is to return a result.
+        """
+        try:
+            return self._session.call_tool(name, args, timeout=timeout)
+        except CuaDriverCallError:
+            raise
+        except Exception as e:
+            logger.warning("cua-driver %s call failed: %s", name, e)
+            raise CuaDriverCallError(f"cua-driver {name} failed: {e}") from e
+
     def _action(self, name: str, args: dict[str, Any]) -> ActionResult:
         try:
-            out = self._session.call_tool(name, args)
+            out = self._call(name, args)
         except Exception as e:
             logger.exception("cua-driver %s call failed", name)
             return ActionResult(ok=False, action=name, message=f"cua-driver error: {e}")
@@ -976,6 +1143,7 @@ class CuaDriverBackend(ComputerUseBackend):
 
 __all__ = [
     "CuaDriverBackend",
+    "CuaDriverCallError",
     "cua_driver_binary_available",
     "cua_driver_install_hint",
     "PINNED_CUA_DRIVER_VERSION",
