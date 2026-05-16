@@ -44,24 +44,37 @@ logger = logging.getLogger("opencomputer.computer_use.cua_backend")
 # Version pinning
 # ---------------------------------------------------------------------------
 
-PINNED_CUA_DRIVER_VERSION = os.environ.get("OPENCOMPUTER_CUA_DRIVER_VERSION", "0.5.0")
+# Informational only — the backend speaks the cua-driver 0.1.9 MCP tool
+# surface. ``find_cua_driver()`` does not enforce the version; this constant
+# documents the surface the call sites below were reconciled against and is
+# surfaced by ``oc doctor`` / the installer for reproducibility across an OS
+# bump. The ``OPENCOMPUTER_CUA_DRIVER_VERSION`` env var overrides it.
+PINNED_CUA_DRIVER_VERSION = os.environ.get("OPENCOMPUTER_CUA_DRIVER_VERSION", "0.1.9")
 
 # The binary is resolved via ``find_cua_driver()`` (cu_installer.py), which
-# honors the ``OPENCOMPUTER_CUA_DRIVER_CMD`` env override and falls back to
+# honors the ``OPENCOMPUTER_CUA_DRIVER_CMD`` override and falls back to
 # the upstream installer's well-known locations when not on ``$PATH``.
 _CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP transport
 
-# Regex to parse list_windows text output lines:
-#   "- AppName (pid 12345) "Title" [window_id: 67890]"
-_WINDOW_LINE_RE = re.compile(
-    r'^-\s+(.+?)\s+\(pid\s+(\d+)\)\s+.*\[window_id:\s+(\d+)\]',
-    re.MULTILINE,
-)
-
-# Regex to parse element lines from get_window_state AX tree markdown:
-#   "  - [N] AXRole "label""
+# Regex to parse element lines from a cua-driver 0.1.9 ``get_window_state``
+# ``tree_markdown`` rendering. The real 0.1.9 format, confirmed against the
+# installed binary, is one indented line per node, e.g.:
+#
+#   - AXApplication "Chrome"
+#     - [0] AXWindow "Title…" actions=[AXRaise]
+#       - [3] AXButton (Back) actions=[AXShowMenu]
+#       - [8] AXTextField = "x.com/…" (Address and search bar) actions=[…]
+#
+# Only nodes the driver deemed *actionable* carry a ``[N]`` element_index
+# token; container nodes have none and are skipped. A node's human label can
+# arrive three ways — a quoted ``"title"``, a parenthesised ``(description)``,
+# or an ``= "value"`` settable value — and any combination may co-occur.
 _ELEMENT_LINE_RE = re.compile(
-    r'^\s*-\s+\[(\d+)\]\s+(\w+)(?:\s+"([^"]*)")?',
+    r'^\s*-\s+\[(?P<index>\d+)\]\s+(?P<role>AX\w+)'
+    r'(?:\s+=\s+"(?P<value>[^"]*)")?'
+    r'(?:\s+"(?P<title>[^"]*)")?'
+    r'(?:\s+\((?P<desc>[^)]*)\))?'
+    r'(?:\s+actions=\[(?P<actions>[^\]]*)\])?',
     re.MULTILINE,
 )
 
@@ -100,38 +113,86 @@ def cua_driver_install_hint() -> str:
     )
 
 
-def _parse_windows_from_text(text: str) -> list[dict[str, Any]]:
-    """Parse window records from list_windows text output."""
-    windows = []
-    for m in _WINDOW_LINE_RE.finditer(text):
-        windows.append({
-            "app_name": m.group(1).strip(),
-            "pid": int(m.group(2)),
-            "window_id": int(m.group(3)),
-            "off_screen": "[off-screen]" in m.group(0),
-        })
+def _coerce_window_record(w: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalise one cua-driver 0.1.9 ``list_windows`` JSON record.
+
+    Returns ``None`` for records missing the required addressing fields.
+    """
+    try:
+        pid = int(w["pid"])
+        window_id = int(w["window_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    bounds = w.get("bounds") or {}
+    return {
+        "app_name": str(w.get("app_name", "") or ""),
+        "pid": pid,
+        "window_id": window_id,
+        "title": str(w.get("title", "") or ""),
+        "off_screen": not bool(w.get("is_on_screen", True)),
+        "z_index": int(w.get("z_index", 0) or 0),
+        "layer": int(w.get("layer", 0) or 0),
+        "bounds": {
+            "x": int(bounds.get("x", 0) or 0),
+            "y": int(bounds.get("y", 0) or 0),
+            "width": int(bounds.get("width", 0) or 0),
+            "height": int(bounds.get("height", 0) or 0),
+        },
+    }
+
+
+def _parse_windows(out: dict[str, Any]) -> list[dict[str, Any]]:
+    """Parse window records from a cua-driver 0.1.9 ``list_windows`` result.
+
+    0.1.9 returns JSON — either as MCP ``structuredContent`` or as a JSON
+    text block (which ``_extract_tool_result`` already json-decodes into
+    ``data``). The top-level shape is
+    ``{"windows": [...], "current_space_id": <id|null>}``.
+    """
+    raw: list[Any] = []
+    sc = out.get("structuredContent") or {}
+    if isinstance(sc, dict) and isinstance(sc.get("windows"), list):
+        raw = sc["windows"]
+    elif isinstance(out.get("data"), dict) and isinstance(out["data"].get("windows"), list):
+        raw = out["data"]["windows"]
+    elif isinstance(out.get("data"), list):
+        raw = out["data"]
+    windows: list[dict[str, Any]] = []
+    for w in raw:
+        if isinstance(w, dict):
+            rec = _coerce_window_record(w)
+            if rec is not None:
+                windows.append(rec)
     return windows
 
 
 def _parse_elements_from_tree(markdown: str) -> list[UIElement]:
-    """Parse UIElement list from get_window_state AX tree markdown."""
-    elements = []
+    """Parse the actionable ``UIElement`` list from a 0.1.9 ``tree_markdown``.
+
+    cua-driver 0.1.9 tags actionable nodes ``- [N] AXRole …``. The AX tree
+    carries no per-element pixel bounds in the Markdown rendering, so
+    ``bounds`` stays ``(0, 0, 0, 0)`` — element-indexed actions address by
+    ``element_index``, never by bounds, so this is correct, not lossy.
+    """
+    elements: list[UIElement] = []
     for m in _ELEMENT_LINE_RE.finditer(markdown):
+        # Prefer the most descriptive label available.
+        label = m.group("title") or m.group("desc") or m.group("value") or ""
+        attrs: dict[str, Any] = {}
+        if m.group("value") is not None:
+            attrs["value"] = m.group("value")
+        if m.group("actions"):
+            attrs["actions"] = [
+                a.strip() for a in m.group("actions").split(",") if a.strip()
+            ]
         elements.append(UIElement(
-            index=int(m.group(1)),
-            role=m.group(2),
-            label=m.group(3) or "",
+            index=int(m.group("index")),
+            role=m.group("role"),
+            label=label,
             bounds=(0, 0, 0, 0),
+            attributes=attrs,
         ))
     return elements
-
-
-def _split_tree_text(full_text: str) -> tuple[str, str]:
-    """Split get_window_state text into (summary_line, tree_markdown)."""
-    lines = full_text.split("\n", 1)
-    summary = lines[0]
-    tree = lines[1] if len(lines) > 1 else ""
-    return summary, tree
 
 
 def _parse_key_combo(keys: str) -> tuple[str | None, list[str]]:
@@ -347,53 +408,47 @@ class CuaDriverBackend(ComputerUseBackend):
         return cua_driver_binary_available()
 
     # ── Capture ────────────────────────────────────────────────────
-    def capture(self, mode: str = "som", app: str | None = None) -> CaptureResult:
-        """Capture the frontmost on-screen window (optionally filtered by app name).
-
-        Maps ``capture(mode, app)`` → cua-driver ``list_windows`` +
-        ``get_window_state`` (ax/som) or ``screenshot`` (vision).
-        """
+    def _select_windows(self, app: str | None) -> list[dict[str, Any]]:
+        """Resolve on-screen, layer-0 windows, frontmost-first, optional app filter."""
         lw_out = self._session.call_tool("list_windows", {"on_screen_only": True})
-
-        sc = lw_out.get("structuredContent") or {}
-        raw_windows = sc.get("windows") if sc else None
-        if raw_windows:
-            windows = [
-                {
-                    "app_name": w.get("app_name", ""),
-                    "pid": int(w["pid"]),
-                    "window_id": int(w["window_id"]),
-                    "off_screen": not w.get("is_on_screen", True),
-                    "title": w.get("title", ""),
-                    "z_index": w.get("z_index", 0),
-                }
-                for w in raw_windows
-            ]
-            # Sort by z_index ascending (lowest z_index = frontmost on macOS).
-            windows.sort(key=lambda w: w["z_index"])
-        else:
-            raw_text = lw_out["data"] if isinstance(lw_out["data"], str) else ""
-            windows = _parse_windows_from_text(raw_text)
-
-        if not windows:
-            return CaptureResult(mode=mode, width=0, height=0, png_b64=None,
-                                 elements=[], app="", window_title="", png_bytes_len=0)
-
+        windows = _parse_windows(lw_out)
+        # Layer-0 only — menubar strips / dock shields are layer != 0 noise.
+        windows = [w for w in windows if w["layer"] == 0]
+        # Highest z_index = closest to front on the current Space (0.1.9 spec).
+        windows.sort(key=lambda w: w["z_index"], reverse=True)
         if app:
             app_lower = app.lower()
             filtered = [w for w in windows if app_lower in w["app_name"].lower()]
             if filtered:
                 windows = filtered
+        return windows
+
+    def capture(self, mode: str = "som", app: str | None = None) -> CaptureResult:
+        """Capture the frontmost on-screen window (optionally filtered by app name).
+
+        Maps ``capture(mode, app)`` → cua-driver 0.1.9 ``list_windows`` +
+        ``get_window_state`` (som/ax) or ``screenshot`` (vision). Window
+        geometry is derived from the ``list_windows`` ``bounds`` (logical
+        screen points) and refined from ``get_window_state``'s
+        ``screenshot_original_width/height`` when available — the
+        screenshot-pixel space that ``click(x, y)`` / ``drag`` address.
+        """
+        windows = self._select_windows(app)
+        if not windows:
+            return CaptureResult(mode=mode, width=0, height=0, png_b64=None,
+                                 elements=[], app="", window_title="", png_bytes_len=0)
 
         target = next((w for w in windows if not w["off_screen"]), windows[0])
         self._active_pid = target["pid"]
         self._active_window_id = target["window_id"]
         app_name = target["app_name"]
+        # Baseline geometry: list_windows bounds in logical screen points.
+        width = target["bounds"]["width"]
+        height = target["bounds"]["height"]
+        window_title = target["title"]
 
         png_b64: str | None = None
         elements: list[UIElement] = []
-        width = height = 0
-        window_title = ""
 
         if mode == "vision":
             sc_out = self._session.call_tool(
@@ -407,18 +462,47 @@ class CuaDriverBackend(ComputerUseBackend):
                 "get_window_state",
                 {"pid": self._active_pid, "window_id": self._active_window_id},
             )
-            text = gws_out["data"] if isinstance(gws_out["data"], str) else ""
-            summary, tree = _split_tree_text(text)
+            # 0.1.9 ships the structured payload (tree_markdown +
+            # screenshot_* dims) as MCP ``structuredContent``; the text
+            # block is a human summary with the tree embedded. Prefer the
+            # structured dict, fall back to a json-decoded ``data`` dict,
+            # then to the raw text block.
+            data = gws_out["data"]
+            sc = gws_out.get("structuredContent")
+            payload: dict[str, Any] = {}
+            if isinstance(sc, dict) and sc.get("tree_markdown") is not None:
+                payload = sc
+            elif isinstance(data, dict):
+                payload = data
 
-            if tree and not gws_out["images"]:
-                elements = _parse_elements_from_tree(tree)
-            elif gws_out["images"]:
+            tree = ""
+            if payload:
+                tree = str(payload.get("tree_markdown", "") or "")
+                # The screenshot-pixel space click(x,y)/drag address: the
+                # ORIGINAL (pre-resize) window pixels. Fall back to the
+                # resized screenshot dims, then to list_windows bounds.
+                ow = payload.get("screenshot_original_width")
+                oh = payload.get("screenshot_original_height")
+                if isinstance(ow, int) and ow > 0:
+                    width = ow
+                if isinstance(oh, int) and oh > 0:
+                    height = oh
+                if width == 0 and isinstance(payload.get("screenshot_width"), int):
+                    width = payload["screenshot_width"]
+                if height == 0 and isinstance(payload.get("screenshot_height"), int):
+                    height = payload["screenshot_height"]
+            elif isinstance(data, str):
+                # Degraded transport — the tree is embedded in the text block.
+                tree = data
+            elements = _parse_elements_from_tree(tree)
+            # The window line carries the AXWindow title; prefer it when
+            # list_windows reported an empty title (chromeless surfaces).
+            if not window_title:
+                wt = re.search(r'\[\d+\]\s+AXWindow\s+"([^"]+)"', tree)
+                if wt:
+                    window_title = wt.group(1)
+            if gws_out["images"]:
                 png_b64 = gws_out["images"][0]
-                elements = _parse_elements_from_tree(tree)
-
-            wt = re.search(r'AXWindow\s+"([^"]+)"', tree)
-            if wt:
-                window_title = wt.group(1)
 
         png_bytes_len = 0
         if png_b64:
@@ -468,14 +552,20 @@ class CuaDriverBackend(ComputerUseBackend):
                                     message="No active window_id for element_index click.")
             args["element_index"] = element
             args["window_id"] = self._active_window_id
+            # ``modifier``/``count`` are pixel-path-only in 0.1.9 — the AX
+            # action path ignores them, so they're omitted here.
         elif x is not None and y is not None:
             args["x"] = x
             args["y"] = y
+            # Multi-click on the pixel path is routed to the dedicated
+            # ``double_click`` tool above (it has no ``count`` arg); 0.1.9's
+            # ``click.count`` is only reached for an explicit triple-click,
+            # which the public schema does not expose — so it is not sent.
+            if modifiers:
+                args["modifier"] = list(modifiers)
         else:
             return ActionResult(ok=False, action=tool,
                                 message="click requires element= or x/y.")
-        if modifiers:
-            args["modifier"] = modifiers
 
         return self._action(tool, args)
 
@@ -489,9 +579,43 @@ class CuaDriverBackend(ComputerUseBackend):
         button: str = "left",
         modifiers: list[str] | None = None,
     ) -> ActionResult:
-        # cua-driver does not expose a drag tool.
-        return ActionResult(ok=False, action="drag",
-                            message="drag is not supported by the cua-driver backend.")
+        """Press-drag-release gesture via cua-driver 0.1.9's ``drag`` tool.
+
+        0.1.9's ``drag`` is pixel-only — macOS AX has no semantic drag
+        action — so both endpoints must be window-local screenshot pixels.
+        Element-indexed drag is rejected cleanly: the AX tree carries no
+        per-element bounds for this backend to derive an endpoint from.
+        """
+        pid = self._active_pid
+        if pid is None:
+            return ActionResult(ok=False, action="drag",
+                                message="No active window — call capture() first.")
+        if from_element is not None or to_element is not None:
+            return ActionResult(
+                ok=False, action="drag",
+                message="cua-driver 0.1.9 drag is pixel-only — pass "
+                        "from_coordinate / to_coordinate, not element indices.",
+            )
+        if from_xy is None or to_xy is None:
+            return ActionResult(
+                ok=False, action="drag",
+                message="drag requires from_coordinate and to_coordinate "
+                        "(window-local screenshot pixels).",
+            )
+        args: dict[str, Any] = {
+            "pid": pid,
+            "from_x": int(from_xy[0]),
+            "from_y": int(from_xy[1]),
+            "to_x": int(to_xy[0]),
+            "to_y": int(to_xy[1]),
+        }
+        if button in {"left", "right", "middle"} and button != "left":
+            args["button"] = button
+        if self._active_window_id is not None:
+            args["window_id"] = self._active_window_id
+        if modifiers:
+            args["modifier"] = list(modifiers)
+        return self._action("drag", args)
 
     def scroll(
         self,
@@ -503,35 +627,60 @@ class CuaDriverBackend(ComputerUseBackend):
         y: int | None = None,
         modifiers: list[str] | None = None,
     ) -> ActionResult:
+        """Scroll via cua-driver 0.1.9's keystroke-synthesised ``scroll`` tool.
+
+        0.1.9's ``scroll`` schema is ``{pid, direction, by?, amount?,
+        element_index?, window_id?}`` — there is NO pixel (x/y) addressing
+        mode. ``amount`` is the keystroke repeat count (clamped 1–50);
+        ``by`` defaults to ``line``. The ``element_index`` path focuses the
+        scrollable element first; ``x``/``y`` are ignored (no pixel mode).
+        """
         pid = self._active_pid
         if pid is None:
             return ActionResult(ok=False, action="scroll",
                                 message="No active window — call capture() first.")
+        if direction not in {"up", "down", "left", "right"}:
+            return ActionResult(ok=False, action="scroll",
+                                message=f"bad scroll direction {direction!r}; "
+                                        "use up|down|left|right.")
         args: dict[str, Any] = {
             "pid": pid,
             "direction": direction,
-            "amount": max(1, min(50, amount)),
+            "by": "line",
+            "amount": max(1, min(50, int(amount))),
         }
         if element is not None and self._active_window_id is not None:
             args["element_index"] = element
             args["window_id"] = self._active_window_id
-        elif x is not None and y is not None:
-            args["x"] = x
-            args["y"] = y
         return self._action("scroll", args)
 
     # ── Keyboard ───────────────────────────────────────────────────
     def type_text(self, text: str) -> ActionResult:
+        """Insert text via cua-driver 0.1.9's ``type_text`` tool.
+
+        0.1.9 exposes a single ``type_text`` tool — there is NO
+        ``type_text_chars``. ``type_text`` already tries an AX bulk write
+        first and falls back to character-by-character ``CGEvent``
+        synthesis internally when the target rejects the AX write (WebKit /
+        Chromium inputs), so it is universal across macOS apps in
+        background mode — exactly what the old comment wanted.
+        """
         pid = self._active_pid
         if pid is None:
             return ActionResult(ok=False, action="type_text",
                                 message="No active window — call capture() first.")
-        # Safari WebKit AXTextField does not accept AX attribute writes (type_text),
-        # so use type_text_chars which synthesises individual key events instead.
-        # This works universally across all macOS apps in background mode.
-        return self._action("type_text_chars", {"pid": pid, "text": text})
+        return self._action("type_text", {"pid": pid, "text": text})
 
     def key(self, keys: str) -> ActionResult:
+        """Send a key / key-combo via cua-driver 0.1.9.
+
+        Single keys (``return``, ``tab``, ``a``) route through
+        ``press_key``; multi-key combos (``cmd+s``) MUST route through
+        ``hotkey`` — ``press_key`` only accepts one key. For combos the
+        ``window_id`` is passed so the driver's FocusWithoutRaise fires,
+        which is required for NSMenu key equivalents (Cmd+S/N/W) to reach
+        a backgrounded app.
+        """
         pid = self._active_pid
         if pid is None:
             return ActionResult(ok=False, action="key",
@@ -543,7 +692,11 @@ class CuaDriverBackend(ComputerUseBackend):
                                 message=f"Could not parse key from '{keys}'.")
 
         if modifiers:
-            return self._action("hotkey", {"pid": pid, "keys": modifiers + [key_name]})
+            args: dict[str, Any] = {"pid": pid, "keys": [*modifiers, key_name]}
+            # FocusWithoutRaise — required for menu key equivalents to land.
+            if self._active_window_id is not None:
+                args["window_id"] = self._active_window_id
+            return self._action("hotkey", args)
         return self._action("press_key", {"pid": pid, "key": key_name})
 
     # ── Value setter ────────────────────────────────────────────────
@@ -567,59 +720,76 @@ class CuaDriverBackend(ComputerUseBackend):
 
     # ── Introspection ──────────────────────────────────────────────
     def list_apps(self) -> list[dict[str, Any]]:
+        """Return the running/installed app list from cua-driver 0.1.9.
+
+        0.1.9's ``list_apps`` ships the structured app array as MCP
+        ``structuredContent`` AND a human-readable text summary as the text
+        block. Prefer ``structuredContent`` (and a json-decoded ``data``
+        dict) — it carries ``bundle_id``/``running``/``active`` per record.
+        The text path is a last-resort fallback for a degraded transport;
+        each line is ``- Name (pid N) [bundle.id]``.
+        """
         out = self._session.call_tool("list_apps", {})
+        sc = out.get("structuredContent") or {}
+        if isinstance(sc, dict) and isinstance(sc.get("apps"), list):
+            return sc["apps"]
         data = out["data"]
+        if isinstance(data, dict) and isinstance(data.get("apps"), list):
+            return data["apps"]
         if isinstance(data, list):
             return data
-        if isinstance(data, dict):
-            return data.get("apps", [])
         if isinstance(data, str):
-            apps = []
+            apps: list[dict[str, Any]] = []
             for line in data.splitlines():
-                m = re.search(r'(.+?)\s+\(pid\s+(\d+)\)', line)
+                m = re.match(
+                    r'^-\s+(?P<name>.+?)\s+\(pid\s+(?P<pid>-?\d+)\)'
+                    r'(?:\s+\[(?P<bundle>[^\]]+)\])?\s*$',
+                    line,
+                )
                 if m:
-                    apps.append({"name": m.group(1).strip(), "pid": int(m.group(2))})
+                    pid = int(m.group("pid"))
+                    apps.append({
+                        "name": m.group("name").strip(),
+                        "pid": pid,
+                        "bundle_id": m.group("bundle") or "",
+                        "running": pid > 0,
+                    })
             return apps
         return []
 
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
         """Target an app for subsequent actions without stealing system focus.
 
-        Implemented as a pure window-selector — enumerate on-screen windows,
-        find the best match for *app*, and store its pid/window_id so that
-        subsequent click/type calls hit the right process.
+        cua-driver 0.1.9 has NO ``focus_app`` tool — and deliberately so:
+        every action tool is pid/window-addressed and "focus without raise"
+        is a side-effect of passing ``window_id`` to ``hotkey`` / ``press_key``.
+        So ``focus_app`` here is a pure window-selector: it enumerates
+        on-screen windows via ``list_windows``, picks the best match for
+        *app*, and stores its pid/window_id as the sticky target so the
+        next click/type/key call addresses the right process — no focus
+        steal, no window raise.
 
-        ``raise_window=True`` is intentionally ignored: stealing the user's
-        focus is exactly what this backend is designed to avoid.
+        ``raise_window=True`` is intentionally ignored: 0.1.9 exposes no
+        raise primitive, and stealing the user's focus is exactly what this
+        backend is designed to avoid. The returned message says so.
         """
-        lw_out = self._session.call_tool("list_windows", {"on_screen_only": True})
-        sc = lw_out.get("structuredContent") or {}
-        raw_windows = sc.get("windows") if sc else None
-        if raw_windows:
-            windows = [
-                {
-                    "app_name": w.get("app_name", ""),
-                    "pid": int(w["pid"]),
-                    "window_id": int(w["window_id"]),
-                    "z_index": w.get("z_index", 0),
-                }
-                for w in raw_windows
-            ]
-            windows.sort(key=lambda w: w["z_index"])
-        else:
-            raw_text = lw_out["data"] if isinstance(lw_out["data"], str) else ""
-            windows = _parse_windows_from_text(raw_text)
-
-        app_lower = app.lower()
-        matched = [w for w in windows if app_lower in w["app_name"].lower()]
-        target = matched[0] if matched else (windows[0] if windows else None)
+        windows = self._select_windows(app)
+        target = next((w for w in windows if not w["off_screen"]), None) \
+            or (windows[0] if windows else None)
         if target:
             self._active_pid = target["pid"]
             self._active_window_id = target["window_id"]
+            note = ""
+            if raise_window:
+                note = (" (raise_window ignored — cua-driver 0.1.9 has no "
+                        "window-raise primitive; targeting without raising)")
             return ActionResult(
                 ok=True, action="focus_app",
                 message=f"Targeted {target['app_name']} (pid {self._active_pid}, "
-                        f"window {self._active_window_id}) without raising window.",
+                        f"window {self._active_window_id}) without raising window."
+                        + note,
+                meta={"pid": self._active_pid, "window_id": self._active_window_id,
+                      "app_name": target["app_name"]},
             )
         return ActionResult(ok=False, action="focus_app",
                             message=f"No on-screen window found for app '{app}'.")

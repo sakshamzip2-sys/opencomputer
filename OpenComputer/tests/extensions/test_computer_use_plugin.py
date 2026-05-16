@@ -421,19 +421,77 @@ class TestCuaBackendParsing:
         assert key == "t"
         assert set(mods) == {"ctrl", "option"}
 
-    def test_parse_windows_from_text(self):
-        text = '- Safari (pid 123) "Home" [window_id: 456]'
-        windows = cua_backend_mod._parse_windows_from_text(text)
+    def test_parse_windows_from_listwindows_json(self):
+        """cua-driver 0.1.9 list_windows returns JSON, not text."""
+        out = {
+            "data": None,
+            "images": [],
+            "structuredContent": {
+                "current_space_id": 228,
+                "windows": [
+                    {
+                        "app_name": "Safari", "pid": 123, "window_id": 456,
+                        "title": "Home", "is_on_screen": True, "layer": 0,
+                        "z_index": 7,
+                        "bounds": {"x": 0, "y": 25, "width": 1440, "height": 900},
+                    },
+                    {
+                        "app_name": "Safari", "pid": 123, "window_id": 999,
+                        "title": "Hidden", "is_on_screen": False, "layer": 0,
+                        "z_index": 1,
+                        "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+                    },
+                ],
+            },
+            "isError": False,
+        }
+        windows = cua_backend_mod._parse_windows(out)
         assert windows[0]["app_name"] == "Safari"
         assert windows[0]["pid"] == 123
         assert windows[0]["window_id"] == 456
+        assert windows[0]["off_screen"] is False
+        assert windows[0]["bounds"]["width"] == 1440
+        assert windows[1]["off_screen"] is True
 
-    def test_parse_elements_from_tree(self):
-        tree = '  - [1] AXButton "OK"\n  - [2] AXTextField "Name"'
+    def test_parse_windows_from_json_text_block(self):
+        """list_windows JSON can also arrive as a json-decoded text block."""
+        out = {
+            "data": {"windows": [
+                {"app_name": "Finder", "pid": 7, "window_id": 8, "title": "x",
+                 "is_on_screen": True, "layer": 0, "z_index": 0,
+                 "bounds": {"x": 1, "y": 2, "width": 3, "height": 4}},
+            ]},
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        windows = cua_backend_mod._parse_windows(out)
+        assert windows[0]["window_id"] == 8
+
+    def test_parse_elements_from_tree_real_0_1_9_format(self):
+        """0.1.9 emits ``- [N] AXRole`` with quoted titles, paren
+        descriptions, and ``= "value"`` settable values — any combination."""
+        tree = (
+            '- AXApplication "Chrome"\n'
+            '  - [0] AXWindow "Home - Chrome" actions=[AXRaise]\n'
+            '    - AXGroup\n'
+            '      - [3] AXButton (Back) actions=[AXShowMenu]\n'
+            '      - [8] AXTextField = "x.com/foo" (Address and search bar)'
+            ' actions=[AXShowMenu]\n'
+            '      - [56] AXButton (New Tab) actions=[AXShowMenu]\n'
+        )
         elements = cua_backend_mod._parse_elements_from_tree(tree)
-        assert elements[0].index == 1
-        assert elements[0].role == "AXButton"
-        assert elements[1].label == "Name"
+        by_index = {e.index: e for e in elements}
+        # Container AXGroup / AXApplication lines carry no [N] — skipped.
+        assert set(by_index) == {0, 3, 8, 56}
+        assert by_index[0].role == "AXWindow"
+        assert by_index[0].label == "Home - Chrome"
+        # Paren description used as label when no quoted title.
+        assert by_index[3].role == "AXButton"
+        assert by_index[3].label == "Back"
+        # Quoted title would win, but here the value+desc form: desc is label.
+        assert by_index[8].role == "AXTextField"
+        assert by_index[8].label == "Address and search bar"
+        assert by_index[8].attributes["value"] == "x.com/foo"
+        assert "AXShowMenu" in by_index[8].attributes["actions"]
 
     def test_install_hint_mentions_oc_command(self):
         assert "oc computer-use install" in cua_backend_mod.cua_driver_install_hint()
@@ -460,6 +518,298 @@ class TestCuaBackendParsing:
         with patch.object(cua_backend_mod, "find_cua_driver", return_value=None):
             with pytest.raises(RuntimeError, match="cua-driver is not installed"):
                 asyncio.run(b._session._aenter())
+
+    def test_pinned_version_tracks_0_1_9_surface(self):
+        """The pin tracks the real installed/upstream cua-driver surface
+        (overridable via OPENCOMPUTER_CUA_DRIVER_VERSION)."""
+        # The module was imported without the override set in this suite.
+        assert cua_backend_mod.PINNED_CUA_DRIVER_VERSION == "0.1.9"
+
+
+# ---------------------------------------------------------------------------
+# cua-driver 0.1.9 MCP call-site reconciliation — fake MCP session, no
+# subprocess. Asserts each backend method calls the real 0.1.9 tool name
+# with the real 0.1.9 input schema.
+# ---------------------------------------------------------------------------
+
+class _FakeSession:
+    """Records every ``call_tool`` and returns scripted results."""
+
+    def __init__(self, results=None):
+        self.calls: list[tuple[str, dict]] = []
+        self._results = results or {}
+
+    def start(self): ...
+    def stop(self): ...
+
+    def call_tool(self, name, args, timeout=30.0):
+        self.calls.append((name, dict(args)))
+        if name in self._results:
+            return self._results[name]
+        return {"data": "", "images": [], "structuredContent": None,
+                "isError": False}
+
+    def last(self, name):
+        for n, a in reversed(self.calls):
+            if n == name:
+                return a
+        raise AssertionError(f"no {name!r} call recorded; got "
+                             f"{[c[0] for c in self.calls]!r}")
+
+
+def _backend_with_session(results=None):
+    """A CuaDriverBackend wired to a fake MCP session."""
+    b = cua_backend_mod.CuaDriverBackend()
+    b._session = _FakeSession(results)
+    return b
+
+
+_LW_ONE_WINDOW = {
+    "data": None, "images": [], "isError": False,
+    "structuredContent": {
+        "current_space_id": 1,
+        "windows": [{
+            "app_name": "Safari", "pid": 4242, "window_id": 88,
+            "title": "example.com", "is_on_screen": True, "layer": 0,
+            "z_index": 5,
+            "bounds": {"x": 0, "y": 25, "width": 1440, "height": 900},
+        }],
+    },
+}
+
+
+class TestCuaBackend0_1_9CallSites:
+    def test_type_text_calls_type_text_not_type_text_chars(self):
+        """The 0.1.9 fix: ``type`` → MCP tool ``type_text`` (NOT
+        ``type_text_chars``, which does not exist in 0.1.9)."""
+        b = _backend_with_session()
+        b._active_pid = 4242
+        res = b.type_text("hello world")
+        assert res.ok is True
+        name, args = b._session.calls[-1]
+        assert name == "type_text", f"called {name!r}, expected type_text"
+        assert name != "type_text_chars"
+        assert args == {"pid": 4242, "text": "hello world"}
+
+    def test_type_text_without_capture_fails_cleanly(self):
+        b = _backend_with_session()
+        res = b.type_text("x")
+        assert res.ok is False
+        assert "capture()" in res.message
+        assert b._session.calls == []
+
+    def test_key_single_routes_to_press_key(self):
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b.key("return")
+        name, args = b._session.calls[-1]
+        assert name == "press_key"
+        assert args == {"pid": 4242, "key": "return"}
+
+    def test_key_combo_routes_to_hotkey_with_window_id(self):
+        """Multi-key combos MUST use ``hotkey``; ``window_id`` is threaded
+        so FocusWithoutRaise fires for NSMenu equivalents (Cmd+S)."""
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b._active_window_id = 88
+        b.key("cmd+s")
+        name, args = b._session.calls[-1]
+        assert name == "hotkey"
+        assert args["pid"] == 4242
+        assert args["keys"] == ["cmd", "s"]
+        assert args["window_id"] == 88
+
+    def test_drag_calls_drag_tool_with_pixel_schema(self):
+        """0.1.9 HAS a ``drag`` tool — pixel-only from/to coordinates."""
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b._active_window_id = 88
+        res = b.drag(from_xy=(10, 20), to_xy=(300, 400))
+        assert res.ok is True
+        name, args = b._session.calls[-1]
+        assert name == "drag"
+        assert args["pid"] == 4242
+        assert args["from_x"] == 10 and args["from_y"] == 20
+        assert args["to_x"] == 300 and args["to_y"] == 400
+        assert args["window_id"] == 88
+
+    def test_drag_with_element_indices_fails_cleanly(self):
+        """Element-indexed drag is unsupported — clean ActionResult, no call."""
+        b = _backend_with_session()
+        b._active_pid = 4242
+        res = b.drag(from_element=1, to_element=2)
+        assert res.ok is False
+        assert "pixel-only" in res.message
+        assert b._session.calls == []
+
+    def test_click_element_path_omits_pixel_only_args(self):
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b._active_window_id = 88
+        b.click(element=7, modifiers=["cmd"])
+        name, args = b._session.calls[-1]
+        assert name == "click"
+        assert args == {"pid": 4242, "element_index": 7, "window_id": 88}
+        assert "modifier" not in args  # pixel-path-only in 0.1.9
+
+    def test_click_pixel_path_carries_modifier(self):
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b.click(x=100, y=200, modifiers=["cmd"])
+        name, args = b._session.calls[-1]
+        assert name == "click"
+        assert args["x"] == 100 and args["y"] == 200
+        assert args["modifier"] == ["cmd"]
+
+    def test_double_click_routes_to_double_click_tool(self):
+        """A double-click uses the dedicated ``double_click`` tool — not
+        ``click`` with a count arg."""
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b._active_window_id = 88
+        b.click(element=3, click_count=2)
+        name, args = b._session.calls[-1]
+        assert name == "double_click"
+        assert "count" not in args  # double_click has no count in 0.1.9
+
+    def test_right_click_routes_to_right_click_tool(self):
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b._active_window_id = 88
+        b.click(element=3, button="right")
+        assert b._session.calls[-1][0] == "right_click"
+
+    def test_scroll_uses_by_line_no_pixel_mode(self):
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b.scroll(direction="down", amount=5)
+        name, args = b._session.calls[-1]
+        assert name == "scroll"
+        assert args == {"pid": 4242, "direction": "down", "by": "line",
+                        "amount": 5}
+
+    def test_set_value_threads_window_id_and_element(self):
+        """0.1.9 set_value requires pid + window_id + element_index + value."""
+        b = _backend_with_session()
+        b._active_pid = 4242
+        b._active_window_id = 88
+        res = b.set_value("Blue", element=2)
+        assert res.ok is True
+        name, args = b._session.calls[-1]
+        assert name == "set_value"
+        assert args == {"pid": 4242, "window_id": 88,
+                        "element_index": 2, "value": "Blue"}
+
+    def test_capture_geometry_from_get_window_state(self):
+        """capture() reports real window dimensions — not 0x0."""
+        gws = {
+            "data": {
+                "tree_markdown": '- AXApplication "Safari"\n'
+                                 '  - [0] AXWindow "example.com"\n'
+                                 '    - [1] AXButton (Back) actions=[AXPress]\n',
+                "element_count": 2,
+                "screenshot_width": 1568, "screenshot_height": 980,
+                "screenshot_original_width": 1440,
+                "screenshot_original_height": 900,
+                "screenshot_scale_factor": 1,
+            },
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws})
+        cap = b.capture(mode="som")
+        assert cap.width == 1440  # original (pre-resize) screenshot pixels
+        assert cap.height == 900
+        assert cap.app == "Safari"
+        assert cap.window_title == "example.com"
+        assert {e.index for e in cap.elements} == {0, 1}
+        # sticky context set for follow-up action tools
+        assert b._active_pid == 4242
+        assert b._active_window_id == 88
+
+    def test_capture_geometry_falls_back_to_listwindows_bounds(self):
+        """When get_window_state omits screenshot dims, list_windows bounds win."""
+        gws = {
+            "data": {"tree_markdown": '- [0] AXWindow "x"\n', "element_count": 1},
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws})
+        cap = b.capture(mode="som")
+        assert cap.width == 1440 and cap.height == 900  # list_windows bounds
+
+    def test_capture_vision_uses_screenshot_tool_with_window_id(self):
+        shot = {"data": "", "images": ["Zm9v"], "structuredContent": None,
+                "isError": False}
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "screenshot": shot})
+        cap = b.capture(mode="vision")
+        sc_args = b._session.last("screenshot")
+        assert sc_args["window_id"] == 88  # screenshot keys on window_id, not pid
+        assert "pid" not in sc_args
+        assert cap.png_b64 == "Zm9v"
+
+    def test_focus_app_is_pure_window_selector(self):
+        """0.1.9 has no focus_app tool — focus_app only enumerates + targets."""
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW})
+        res = b.focus_app("Safari")
+        assert res.ok is True
+        assert b._active_pid == 4242
+        assert b._active_window_id == 88
+        # only list_windows was called — no (nonexistent) focus_app tool
+        assert {c[0] for c in b._session.calls} == {"list_windows"}
+
+    def test_list_apps_prefers_structured_content(self):
+        """0.1.9 ships the app array as structuredContent alongside a text
+        summary — the structured payload must win."""
+        apps_out = {
+            "data": "✅ Found 2 app(s)\n- Code (pid 7) [com.x]",
+            "images": [], "isError": False,
+            "structuredContent": {"apps": [
+                {"name": "Safari", "pid": 1, "bundle_id": "com.apple.Safari",
+                 "running": True, "active": True},
+            ]},
+        }
+        b = _backend_with_session({"list_apps": apps_out})
+        apps = b.list_apps()
+        assert apps[0]["name"] == "Safari"
+        assert apps[0]["bundle_id"] == "com.apple.Safari"
+
+    def test_list_apps_text_fallback_parses_pid_and_bundle(self):
+        """Degraded transport — the ``- Name (pid N) [bundle]`` text path."""
+        apps_out = {
+            "data": "✅ Found 2 app(s)\n"
+                    "- Google Chrome (pid 65197) [com.google.Chrome]\n"
+                    "- Contacts (pid -1) [com.apple.AddressBook]",
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        b = _backend_with_session({"list_apps": apps_out})
+        apps = b.list_apps()
+        assert apps[0] == {"name": "Google Chrome", "pid": 65197,
+                           "bundle_id": "com.google.Chrome", "running": True}
+        assert apps[1]["running"] is False  # pid -1 = installed, not running
+
+    def test_capture_geometry_from_structured_content(self):
+        """get_window_state ships its payload as structuredContent over the
+        real MCP transport — capture must read it, not just ``data``."""
+        gws = {
+            "data": "✅ Safari — 2 elements, turn 1 + screenshot",
+            "images": [], "isError": False,
+            "structuredContent": {
+                "tree_markdown": '- AXApplication "Safari"\n'
+                                 '  - [0] AXWindow "example.com"\n'
+                                 '    - [1] AXButton (Back) actions=[AXPress]\n',
+                "element_count": 2,
+                "screenshot_width": 1568, "screenshot_height": 980,
+                "screenshot_original_width": 1440,
+                "screenshot_original_height": 900,
+            },
+        }
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws})
+        cap = b.capture(mode="som")
+        assert cap.width == 1440 and cap.height == 900
+        assert {e.index for e in cap.elements} == {0, 1}
 
 
 # ---------------------------------------------------------------------------
