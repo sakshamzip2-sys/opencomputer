@@ -514,8 +514,18 @@ def _maybe_follow_capture(
     payload = _action_payload(res)
     if not do_capture:
         return payload
+    # The follow-up MUST verify the window the action just touched — not
+    # whatever is frontmost. ``backend.capture(mode='som')`` re-runs
+    # frontmost-first window selection, so a ``type``+``capture_after``
+    # against a backgrounded app would silently come back showing the
+    # frontmost window instead — the model would "verify" the wrong UI.
+    # ``recapture_active`` pins to the sticky pid/window_id the action
+    # addressed. It is a CuaDriverBackend extension; backends without it
+    # (NoopBackend) fall back to the plain frontmost capture.
+    recapture = getattr(backend, "recapture_active", None)
     try:
-        cap = backend.capture(mode="som")
+        cap = recapture(mode="som") if recapture is not None \
+            else backend.capture(mode="som")
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return payload
@@ -574,8 +584,15 @@ def run_computer_use(args: dict[str, Any]) -> dict[str, Any]:
     try:
         backend = _get_backend()
     except Exception as e:
+        # Some backend-start failures (a closed stdio pipe, a bare
+        # ``McpError``, a cancelled async context) stringify to "" —
+        # ``f"...: {e}"`` would then leave the model an unactionable
+        # "backend unavailable: " with nothing after the colon. Fall
+        # back to ``repr`` (always carries the exception type) so the
+        # error is never empty.
+        detail = str(e) or repr(e)
         return {
-            "error": f"computer_use backend unavailable: {e}",
+            "error": f"computer_use backend unavailable: {detail}",
             "hint": "Run `oc doctor --fix` and accept the cua-driver repair, "
                     "or `oc computer-use install`.",
         }
@@ -666,7 +683,16 @@ class ComputerUseTool(BaseTool):
             logger.exception("computer_use execute failed")
             result = {"error": f"computer_use failed: {e}"}
 
-        is_error = "error" in result
+        # A result is an error if it carries an ``error`` key (bad args,
+        # blocked pattern, failed capture) OR if it is an action payload
+        # whose backend ``ActionResult.ok`` came back ``False`` — a click
+        # that AXPress-failed, a type with no active window, a focus_app
+        # that matched nothing. Without the ``ok is False`` arm a failed
+        # mutating action would reach the model as a clean (non-error)
+        # tool result, and the model's error-handling path (re-capture,
+        # retry, switch strategy) would never fire — the exact silent
+        # failure that makes a multi-step desktop workflow flail.
+        is_error = ("error" in result) or (result.get("ok") is False)
         return ToolResult(
             tool_call_id=call.id,
             content=json.dumps(result, ensure_ascii=False),

@@ -547,6 +547,58 @@ class TestCaptureResponse:
         assert out["ok"] is True
         assert "screenshot_path" in out
 
+    def test_capture_after_uses_recapture_active_when_available(self, tmp_path):
+        """Audit loop 9, found live: the ``capture_after`` follow-up MUST
+        re-capture the EXACT window the action just touched (the sticky
+        pid/window_id), not whatever is frontmost. A plain
+        ``backend.capture(mode='som')`` re-runs frontmost-first window
+        selection — so a ``type``+``capture_after`` against a backgrounded
+        app silently came back showing the frontmost window. The tool layer
+        must prefer the backend's ``recapture_active`` extension."""
+        class _RecaptureBackend(_FakeBackend):
+            def __init__(self):
+                super().__init__()
+                self.frontmost_captures = 0
+                self.sticky_captures = 0
+
+            def capture(self, mode="som", app=None):
+                self.frontmost_captures += 1
+                return super().capture(mode=mode, app=app)
+
+            def recapture_active(self, mode="som"):
+                self.sticky_captures += 1
+                return CaptureResult(
+                    mode=mode, width=10, height=10, png_b64=None,
+                    elements=[], app="TextEdit",
+                    window_title="Untitled (sticky)", png_bytes_len=0)
+
+        backend = _RecaptureBackend()
+        tool_mod.reset_backend_for_tests()
+        with patch.dict(os.environ, {"OPENCOMPUTER_PROFILE_HOME": str(tmp_path)}), \
+             patch.object(tool_mod, "_get_backend", return_value=backend):
+            out = tool_mod.run_computer_use(
+                {"action": "type", "text": "x", "capture_after": True})
+        # The follow-up went through recapture_active — the sticky window —
+        # NOT the frontmost-first capture().
+        assert backend.sticky_captures == 1
+        assert backend.frontmost_captures == 0
+        assert out["window_title"] == "Untitled (sticky)"
+        assert out["action"] == "type"
+
+    def test_capture_after_falls_back_when_no_recapture_active(self, tmp_path):
+        """A backend without ``recapture_active`` (the NoopBackend, a future
+        backend) must still get a follow-up capture — the tool falls back to
+        the plain frontmost ``capture``."""
+        tool_mod.reset_backend_for_tests()
+        backend = _FakeBackend()  # no recapture_active attribute
+        assert not hasattr(backend, "recapture_active")
+        with patch.dict(os.environ, {"OPENCOMPUTER_PROFILE_HOME": str(tmp_path)}), \
+             patch.object(tool_mod, "_get_backend", return_value=backend):
+            out = tool_mod.run_computer_use(
+                {"action": "click", "element": 1, "capture_after": True})
+        assert out["action"] == "click"
+        assert "window_title" in out  # the fallback capture still ran
+
 
 class TestScreenshotPersistence:
     """Disk-write behaviour for capture PNG/JPEG persistence."""
@@ -635,6 +687,56 @@ class TestExecuteContract:
         result, parsed = _run(_call({"action": "list_apps"}))
         assert result.is_error is True
         assert "macOS-only" in parsed["error"]
+
+    def test_execute_marks_failed_action_as_error(self, force_darwin):
+        """Audit loop 9, found live: a mutating action whose backend
+        ``ActionResult.ok`` is ``False`` (a click that AXPress-failed, a type
+        with no active window, a focus_app that matched nothing) carries no
+        ``error`` key — so the old ``is_error = "error" in result`` rule
+        reported the failure to the model as a CLEAN tool result. The
+        model's error-handling path then never fired and a multi-step
+        workflow silently flailed. A ``ok is False`` payload MUST set
+        ``is_error=True``."""
+        class _FailingBackend(_FakeBackend):
+            def click(self, **kw):
+                return backend_mod.ActionResult(
+                    ok=False, action="click",
+                    message="AX action AXPress failed with code -25206.")
+
+        tool_mod.reset_backend_for_tests()
+        with patch.object(tool_mod, "_get_backend",
+                          return_value=_FailingBackend()):
+            result, parsed = _run(_call({"action": "click", "element": 3}))
+        assert parsed["ok"] is False
+        assert result.is_error is True  # the fix — was False before loop 9
+        # A non-error key is not present; the model reads ``ok`` + ``message``.
+        assert "error" not in parsed
+        assert "AXPress" in parsed["message"]
+
+    def test_execute_marks_successful_action_not_error(self, force_darwin):
+        """The mirror of the above — a clean ``ok=True`` action must NOT be
+        flagged as an error, or every successful click would look failed."""
+        tool_mod.reset_backend_for_tests()
+        with patch.object(tool_mod, "_get_backend", return_value=_FakeBackend()):
+            result, parsed = _run(_call({"action": "click", "element": 1}))
+        assert parsed["ok"] is True
+        assert result.is_error is False
+
+    def test_backend_unavailable_error_never_empty(self, force_darwin):
+        """Audit loop 9, found live: when the backend fails to start with an
+        empty-string exception (a closed stdio pipe, a bare anyio error),
+        ``f"backend unavailable: {e}"`` left the model an unactionable
+        "backend unavailable: " with nothing after the colon. The handler
+        must fall back to ``repr``."""
+        from anyio import ClosedResourceError
+
+        tool_mod.reset_backend_for_tests()
+        with patch.object(tool_mod, "_get_backend",
+                          side_effect=ClosedResourceError()):
+            result, parsed = _run(_call({"action": "capture"}))
+        assert result.is_error is True
+        assert parsed["error"].strip() != "computer_use backend unavailable:"
+        assert "ClosedResourceError" in parsed["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -1021,6 +1123,42 @@ class TestCuaBackend0_1_9CallSites:
         assert name == "set_value"
         assert args == {"pid": 4242, "window_id": 88,
                         "element_index": 2, "value": "Blue"}
+
+    def test_recapture_active_pins_to_sticky_window_no_list_windows(self):
+        """``recapture_active`` re-captures the sticky pid/window_id directly
+        via ``get_window_state`` — it must NOT call ``list_windows`` (which
+        would re-run frontmost-first selection and could pick a different
+        window than the one the action just touched)."""
+        gws = {
+            "data": {"tree_markdown": '- AXApplication "TextEdit"\n'
+                                      '  - [0] AXWindow "Untitled"\n'
+                                      '    - [2] AXTextArea actions=[AXShowMenu]\n'},
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        b = _backend_with_session({"get_window_state": gws})
+        b._active_pid = 4242
+        b._active_window_id = 88
+        # ``ax`` mode never expects an image — exercises the sticky-window
+        # capture path without the som no-screenshot diagnostic.
+        cap = b.recapture_active(mode="ax")
+        assert cap.error == ""
+        # Both the [0] AXWindow and the [2] AXTextArea carry an index token.
+        assert {e.index for e in cap.elements} == {0, 2}
+        assert cap.window_title == "Untitled"
+        called = [c[0] for c in b._session.calls]
+        assert "get_window_state" in called
+        assert "list_windows" not in called  # the whole point
+        gws_args = b._session.last("get_window_state")
+        assert gws_args == {"pid": 4242, "window_id": 88}
+
+    def test_recapture_active_errors_cleanly_with_no_sticky_window(self):
+        """With no sticky window set, ``recapture_active`` returns a clean
+        error CaptureResult — never raises, never calls the backend."""
+        b = _backend_with_session()
+        cap = b.recapture_active(mode="som")
+        assert cap.error != ""
+        assert "no active window" in cap.error.lower()
+        assert b._session.calls == []  # no MCP round-trip
 
     def test_capture_geometry_from_get_window_state(self):
         """capture() reports the cua-driver 0.1.9 ``screenshot_width`` /
@@ -1491,6 +1629,40 @@ class TestDaemonCrashRecovery:
         assert f(RuntimeError("AX action AXPress failed with code -25206")) is False
         assert f(RuntimeError("element_index 7 out of range")) is False
 
+    def test_is_dead_daemon_error_matches_anyio_stream_errors(self):
+        """Audit loop 9, found live: killing the cua-driver relay daemon
+        mid-workflow makes the mcp SDK's anyio stdio stream raise
+        ``ClosedResourceError`` / ``BrokenResourceError`` / ``EndOfStream``.
+        These stringify to "" — a message-substring match alone NEVER fires,
+        so the session-recovery path was silently skipped and the session
+        wedged permanently. ``_is_dead_daemon_error`` must recognise them by
+        exception *type name*, including when wrapped by the mcp SDK."""
+        from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
+        f = cua_backend_mod._is_dead_daemon_error
+        # The anyio errors stringify to "" — the type-name arm must catch them.
+        assert str(ClosedResourceError()) == ""
+        assert f(ClosedResourceError()) is True
+        assert f(BrokenResourceError()) is True
+        assert f(EndOfStream()) is True
+        assert f(BrokenPipeError()) is True
+        assert f(ConnectionResetError()) is True
+        # Wrapped several links deep (the mcp SDK chains the raw anyio error)
+        # — the __cause__ / __context__ walk must still find it.
+        wrapped = RuntimeError("send failed")
+        wrapped.__cause__ = ClosedResourceError()
+        assert f(wrapped) is True
+        deep = RuntimeError("outer")
+        mid = RuntimeError("mid")
+        mid.__context__ = BrokenResourceError()
+        deep.__cause__ = mid
+        assert f(deep) is True
+        # An ordinary tool error still must NOT match — discriminator stays tight.
+        assert f(RuntimeError("element_index 7 out of range")) is False
+        # A self-referential cause chain must terminate, not loop forever.
+        loop_exc = RuntimeError("loop")
+        loop_exc.__cause__ = loop_exc
+        assert f(loop_exc) is False
+
     def test_session_call_tool_recovers_once_after_dead_daemon(self):
         """``_CuaDriverSession.call_tool`` must recycle the session and
         retry exactly once when the first attempt hits a dead daemon."""
@@ -1565,6 +1737,76 @@ class TestDaemonCrashRecovery:
         b._session = _RaisingSession()
         with pytest.raises(cua_backend_mod.CuaDriverCallError):
             b._call("list_windows", {"on_screen_only": True})
+
+    def test_call_error_never_stringifies_to_empty(self):
+        """Audit loop 9, found live: an anyio ``ClosedResourceError`` (raised
+        when the relay daemon is killed) stringifies to "" — so a naive
+        ``f"...: {e}"`` left the wrapped error message as "cua-driver X
+        failed: " with nothing after the colon, unactionable for the model.
+        ``_call`` must fall back to ``repr`` so the message always names the
+        failure."""
+        from anyio import ClosedResourceError
+
+        class _EmptyRaisingSession:
+            def call_tool(self, name, args, timeout=30.0):
+                raise ClosedResourceError()  # str() == ""
+
+        b = cua_backend_mod.CuaDriverBackend()
+        b._session = _EmptyRaisingSession()
+        with pytest.raises(cua_backend_mod.CuaDriverCallError) as ei:
+            b._call("list_windows", {"on_screen_only": True})
+        msg = str(ei.value)
+        assert msg.strip() != "cua-driver list_windows failed:"
+        assert "ClosedResourceError" in msg  # repr fallback carries the type
+
+    def test_action_message_never_empty_on_empty_exception(self):
+        """The ``_action`` error path mirrors ``_call`` — an empty-string
+        exception must still produce a non-empty ActionResult.message."""
+        from anyio import BrokenResourceError
+
+        class _EmptyRaisingSession:
+            def call_tool(self, name, args, timeout=30.0):
+                raise BrokenResourceError()
+
+        b = cua_backend_mod.CuaDriverBackend()
+        b._session = _EmptyRaisingSession()
+        b._active_pid = 4242
+        res = b.type_text("hello")
+        assert res.ok is False
+        assert res.message.strip() not in ("", "cua-driver error:")
+        assert "BrokenResourceError" in res.message
+
+    def test_session_recovers_from_empty_string_anyio_crash(self):
+        """The live loop-9 scenario end to end: a ``ClosedResourceError``
+        (the daemon was killed) must be recognised as a dead daemon and
+        trigger the recover-and-retry, even though it stringifies to ""."""
+        from anyio import ClosedResourceError
+
+        class _FakeBridge:
+            def __init__(self):
+                self.attempts = 0
+
+            def start(self):
+                ...
+
+            def run(self, coro, timeout=30.0):
+                if hasattr(coro, "close"):
+                    coro.close()
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise ClosedResourceError()  # daemon killed; str() == ""
+                return {"data": {"message": "ok"}, "images": [],
+                        "structuredContent": None, "isError": False}
+
+        bridge = _FakeBridge()
+        session = cua_backend_mod._CuaDriverSession(bridge)
+        session._started = True
+        recovered = []
+        session._recover = lambda: recovered.append(True)  # type: ignore
+        out = session.call_tool("get_window_state", {"pid": 1, "window_id": 2})
+        assert out["isError"] is False
+        assert recovered == [True]   # the anyio error WAS recognised
+        assert bridge.attempts == 2  # original + one retry
 
     def test_capture_degrades_cleanly_when_daemon_unrecoverable(self):
         """A capture whose ``list_windows`` call raises an unrecoverable

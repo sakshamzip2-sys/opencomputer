@@ -473,7 +473,27 @@ _DEAD_DAEMON_MARKERS = (
     "daemon transport",
     "connection closed",
     "broken pipe",
+    "closedresourceerror",      # anyio — stdio write stream closed
+    "brokenresourceerror",      # anyio — stdio stream broke mid-write
+    "endofstream",              # anyio — stdio read stream hit EOF
 )
+
+# Exception *type* names that mean the MCP stdio transport died — verified
+# live: when the cua-driver relay daemon is killed mid-workflow, the mcp
+# SDK's anyio memory stream raises ``ClosedResourceError`` /
+# ``BrokenResourceError`` / ``EndOfStream``. CRITICAL (audit loop 9, found
+# live): these anyio errors stringify to "" — a message-substring match
+# alone (``_DEAD_DAEMON_MARKERS`` against ``str(exc)``) NEVER fires for
+# them, so the session-recovery path was silently skipped and the session
+# wedged permanently after a daemon crash. Match the exception's class
+# name (and its causes') so a daemon death is always recognised.
+_DEAD_DAEMON_EXC_NAMES = frozenset({
+    "closedresourceerror",
+    "brokenresourceerror",
+    "endofstream",
+    "brokenpipeerror",
+    "connectionreseterror",
+})
 
 
 class CuaDriverCallError(RuntimeError):
@@ -489,14 +509,31 @@ class CuaDriverCallError(RuntimeError):
 def _is_dead_daemon_error(exc: BaseException) -> bool:
     """True if ``exc`` looks like a cua-driver relay-daemon death.
 
-    Matches on the message text — cua-driver surfaces daemon death as a
-    generic ``McpError``/connection error, not a typed exception, so the
-    marker strings (verified live against 0.1.9 after a press_key crash)
-    are the only discriminator. A genuine tool error never reaches here:
+    Two discriminators, because daemon death surfaces two ways:
+
+    * a generic ``McpError``/connection error whose *message* carries one
+      of ``_DEAD_DAEMON_MARKERS`` (e.g. a press_key SPI crash);
+    * an anyio stdio-stream error (``ClosedResourceError`` /
+      ``BrokenResourceError`` / ``EndOfStream``) raised when the relay
+      daemon process is killed — these stringify to "", so a message
+      match never fires and the exception *type name* is the only signal.
+
+    The exception's ``__cause__`` / ``__context__`` chain is walked: the
+    mcp SDK wraps the underlying anyio error, so the transport failure can
+    sit several links deep. A genuine tool error never reaches here —
     cua-driver returns those as an ``isError`` result, not an exception.
     """
-    text = str(exc).lower()
-    return any(marker in text for marker in _DEAD_DAEMON_MARKERS)
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__.lower() in _DEAD_DAEMON_EXC_NAMES:
+            return True
+        text = str(cur).lower()
+        if text and any(marker in text for marker in _DEAD_DAEMON_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def _error_message(out: dict[str, Any]) -> str:
@@ -645,6 +682,40 @@ class CuaDriverBackend(ComputerUseBackend):
             )
 
         target = next((w for w in windows if not w["off_screen"]), windows[0])
+        return self._capture_target(target, mode, app)
+
+    def recapture_active(self, mode: str = "som") -> CaptureResult:
+        """Re-capture the CURRENT sticky window (the one actions address).
+
+        The tool layer's ``capture_after`` follow-up uses this so it
+        verifies the EXACT window the just-run action touched — not
+        whatever happens to be frontmost. A plain ``capture(mode='som')``
+        re-runs frontmost-first window selection, which after a ``type``
+        into a backgrounded app would silently verify the wrong window.
+
+        ``get_window_state`` works on any window regardless of on-screen
+        state, so this needs no ``list_windows`` round-trip; it builds a
+        minimal ``target`` record from the sticky pid/window_id. Returns a
+        clean error ``CaptureResult`` when no sticky window is set.
+        """
+        if self._active_pid is None or self._active_window_id is None:
+            return CaptureResult(
+                mode=mode, width=0, height=0, png_b64=None, elements=[],
+                app="", window_title="", png_bytes_len=0,
+                error="no active window — capture() first",
+            )
+        target = {
+            "pid": self._active_pid,
+            "window_id": self._active_window_id,
+            "app_name": "",
+            "title": "",
+            "bounds": {"x": 0, "y": 0, "width": 0, "height": 0},
+        }
+        return self._capture_target(target, mode, app=None)
+
+    def _capture_target(self, target: dict[str, Any], mode: str,
+                        app: str | None) -> CaptureResult:
+        """Run the get_window_state / screenshot capture for one resolved window."""
         self._active_pid = target["pid"]
         self._active_window_id = target["window_id"]
         app_name = target["app_name"]
@@ -1121,15 +1192,20 @@ class CuaDriverBackend(ComputerUseBackend):
         except CuaDriverCallError:
             raise
         except Exception as e:
-            logger.warning("cua-driver %s call failed: %s", name, e)
-            raise CuaDriverCallError(f"cua-driver {name} failed: {e}") from e
+            # A bare ``McpError`` / closed-pipe error can stringify to "" —
+            # ``repr`` is the fallback so the wrapped message always names
+            # the failure, never an empty "cua-driver X failed: ".
+            detail = str(e) or repr(e)
+            logger.warning("cua-driver %s call failed: %s", name, detail)
+            raise CuaDriverCallError(f"cua-driver {name} failed: {detail}") from e
 
     def _action(self, name: str, args: dict[str, Any]) -> ActionResult:
         try:
             out = self._call(name, args)
         except Exception as e:
             logger.exception("cua-driver %s call failed", name)
-            return ActionResult(ok=False, action=name, message=f"cua-driver error: {e}")
+            return ActionResult(ok=False, action=name,
+                                message=f"cua-driver error: {str(e) or repr(e)}")
         ok = not out["isError"]
         message = ""
         data = out["data"]
