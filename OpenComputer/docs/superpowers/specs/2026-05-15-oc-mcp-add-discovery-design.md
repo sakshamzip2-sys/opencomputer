@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-15
 **Owner:** Saksham / Claude (Opus 4.7)
-**Status:** Design — ready for review
+**Status:** Implemented — merged in PR #617 (`d2c7e514`, 2026-05-16)
 **Branch (proposed):** `feat/oc-mcp-add-discovery`
 **Files in scope:** `opencomputer/cli_mcp.py`, `tests/test_phase11c.py`, `tests/test_mcp_presets.py` (new tests file allowed)
 
