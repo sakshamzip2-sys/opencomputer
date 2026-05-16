@@ -681,6 +681,26 @@ def _register_builtin_tools() -> None:
     # without going through a channel-specific path.
     registry.register(VoiceSynthesizeTool())
     registry.register(VoiceTranscribeTool())
+    # M4 — VoiceSynthesizeLocal (NeuTTS on-device TTS). Registered ONLY when
+    # the optional `neutts` package is importable: without the [neutts]
+    # extra the tool is absent, so the agent never reaches for a tool it
+    # cannot run. A failure deciding registration must never break the rest
+    # of the tool bundle — the broad except keeps the other ~50 tools loading.
+    try:
+        from opencomputer.voice.tts_neutts import neutts_available
+
+        if neutts_available():
+            from opencomputer.tools.voice_synthesize_local import (
+                VoiceSynthesizeLocalTool,
+            )
+
+            registry.register(VoiceSynthesizeLocalTool())
+    except Exception:  # noqa: BLE001
+        logging.getLogger("opencomputer.cli").warning(
+            "Could not evaluate NeuTTS local-voice tool registration; "
+            "VoiceSynthesizeLocal will be absent this run",
+            exc_info=True,
+        )
     # Tier 1.B Tools 1+2 — first-class cross-platform send + vision
     # analyze (per docs/refs/hermes-agent/2026-04-28-major-gaps.md).
     # Promotes the MCP messages_send capability + image-paste vision

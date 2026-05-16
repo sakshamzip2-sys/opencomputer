@@ -84,6 +84,69 @@ def voice_synthesize(
     typer.echo(f"  cost:   ${cost:.4f}")
 
 
+@voice_app.command("install-neutts")
+def voice_install_neutts(
+    backbone: Annotated[
+        str,
+        typer.Option(
+            "--backbone",
+            help="NeuTTS backbone HuggingFace repo id (default: the GGUF Air model).",
+        ),
+    ] = "",
+    device: Annotated[
+        str,
+        typer.Option(
+            "--device", help="Inference device: cpu (default) or a CUDA device."
+        ),
+    ] = "cpu",
+) -> None:
+    """Pre-download the NeuTTS local-voice model weights.
+
+    NeuTTS powers the local ``VoiceSynthesizeLocal`` tool — on-device speech
+    synthesis with no API call. Install the package first with
+    ``pip install opencomputer[neutts]``; this command then front-loads the
+    one-time HuggingFace weight download so the first synthesis isn't a
+    surprise wait. HuggingFace shows its own download progress as it runs.
+    """
+    try:
+        from opencomputer.voice.tts_neutts import (
+            DEFAULT_BACKBONE_REPO,
+            download_neutts_model,
+            neutts_available,
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"Error loading the NeuTTS provider: {exc}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+    if not neutts_available():
+        typer.secho(
+            "The 'neutts' package is not installed.\n"
+            "  Install it first:  pip install opencomputer[neutts]",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    repo = backbone.strip() or DEFAULT_BACKBONE_REPO
+    typer.secho(
+        f"Downloading the NeuTTS model ({repo}, device={device})…", fg="cyan"
+    )
+    typer.echo(
+        "  Weights are fetched from HuggingFace — this can take a few minutes."
+    )
+    try:
+        download_neutts_model(backbone_repo=repo, device=device)
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"NeuTTS model download failed: {exc}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.secho(
+        "✓ NeuTTS model ready — VoiceSynthesizeLocal can now synthesize "
+        "speech offline.",
+        fg="green",
+    )
+
+
 @voice_app.command("transcribe")
 def voice_transcribe(
     audio: Annotated[Path, typer.Argument(help="Audio file path.")],
