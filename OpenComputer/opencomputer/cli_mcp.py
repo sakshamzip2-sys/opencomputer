@@ -617,10 +617,19 @@ def mcp_presets() -> None:
         console.print("[dim]No presets bundled.[/dim]")
         return
 
-    table = Table(title=f"MCP Presets ({len(PRESETS)})")
+    # show_lines draws a rule between every preset so the multi-line
+    # descriptions don't run together; expand + a ratio on Description
+    # hands it the terminal's spare width so each entry wraps to fewer
+    # lines and reads with more breathing room.
+    table = Table(
+        title=f"MCP Presets ({len(PRESETS)})",
+        show_lines=True,
+        expand=True,
+        padding=(0, 1),
+    )
     table.add_column("Slug", style="cyan", no_wrap=True)
-    table.add_column("Description")
-    table.add_column("Required env", style="yellow")
+    table.add_column("Description", ratio=1)
+    table.add_column("Required env", style="yellow", no_wrap=True)
     for slug, p in PRESETS.items():
         env_str = ", ".join(p.required_env) or "—"
         table.add_row(slug, p.description, env_str)
