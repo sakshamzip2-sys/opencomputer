@@ -115,21 +115,41 @@ _backend: ComputerUseBackend | None = None
 
 
 def _get_backend() -> ComputerUseBackend:
-    """Return the per-process cached backend, instantiating + starting it once."""
+    """Return the per-process cached backend, instantiating + starting it once.
+
+    The backend is cached ONLY after ``start()`` succeeds. A transient
+    ``start()`` failure (slow ``cua-driver mcp`` init that overruns the 15s
+    session-start timeout, a daemon hiccup) must NOT leave a half-started
+    backend wedged in the module global — every later call would then return
+    that dead instance and surface "session not started" forever, with no
+    recovery short of a process restart. On a start failure the partially
+    constructed backend is stopped (best-effort) and the global stays
+    ``None``, so the very next call retries cleanly.
+    """
     global _backend
     with _backend_lock:
         if _backend is None:
             backend_name = os.environ.get("OPENCOMPUTER_COMPUTER_USE_BACKEND", "cua").lower()
             if backend_name in {"cua", "cua-driver", ""}:
                 from cu_cua_backend import CuaDriverBackend  # type: ignore[import-not-found]
-                _backend = CuaDriverBackend()
+                candidate: ComputerUseBackend = CuaDriverBackend()
             elif backend_name == "noop":
-                _backend = NoopBackend()
+                candidate = NoopBackend()
             else:
                 raise RuntimeError(
                     f"Unknown OPENCOMPUTER_COMPUTER_USE_BACKEND={backend_name!r}"
                 )
-            _backend.start()
+            try:
+                candidate.start()
+            except Exception:
+                # Roll back — never cache a backend whose session failed to
+                # come up. A later call (or the daemon settling) can succeed.
+                try:
+                    candidate.stop()
+                except Exception:
+                    pass
+                raise
+            _backend = candidate
         return _backend
 
 

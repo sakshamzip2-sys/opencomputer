@@ -800,20 +800,23 @@ class CuaDriverBackend(ComputerUseBackend):
             if payload:
                 tree = str(payload.get("tree_markdown", "") or "")
                 # click(x,y)/drag address the screenshot-pixel space of the
-                # image get_window_state returns. Verified live against
-                # cua-driver 0.1.9: the structuredContent carries BOTH
-                # ``screenshot_width``/``screenshot_height`` AND
-                # ``screenshot_original_width``/``screenshot_original_height``.
-                # The delivered image's actual pixel dimensions equal
-                # ``screenshot_width``/``screenshot_height`` (the downscaled
-                # form, capped by ``max_image_dimension``); the ``_original_*``
-                # pair is the pre-downscale window size and is NOT the
-                # coordinate space click(x,y) uses. So this reads
-                # ``screenshot_width``/``screenshot_height`` and deliberately
-                # ignores ``screenshot_original_*``. Prefer them over the
-                # list_windows ``bounds``, which are logical screen points
-                # and diverge from screenshot pixels by
-                # ``screenshot_scale_factor`` on a Retina display. The
+                # image get_window_state returns. The 0.1.9 structuredContent
+                # carries ``screenshot_width``/``screenshot_height`` — the
+                # delivered image's ACTUAL pixel dimensions (the downscaled
+                # form, capped by ``max_image_dimension``) — and that is the
+                # coordinate space click(x,y) uses. Verified live against the
+                # installed 0.1.9 build (keys: bundle_id, element_count, name,
+                # pid, screenshot_width, screenshot_height,
+                # screenshot_scale_factor, tree_markdown, turn_id). Some 0.1.9
+                # builds additionally emit ``screenshot_original_width``/
+                # ``screenshot_original_height`` (the pre-downscale window
+                # size) — when present those must NOT be used: they are not
+                # the coordinate space of the delivered image. This reads
+                # ``screenshot_width``/``screenshot_height`` only and never
+                # touches ``screenshot_original_*`` whether or not it is
+                # shipped. Prefer them over the list_windows ``bounds``, which
+                # are logical screen points and diverge from screenshot pixels
+                # by ``screenshot_scale_factor`` on a Retina display. The
                 # bounds remain the fallback for the degraded transport
                 # where structuredContent is absent (``ax`` capture_mode
                 # also omits ``screenshot_*`` — bounds are the only signal).

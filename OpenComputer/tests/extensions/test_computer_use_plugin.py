@@ -766,6 +766,49 @@ class TestExecuteContract:
         assert parsed["error"].strip() != "computer_use backend unavailable:"
         assert "ClosedResourceError" in parsed["error"]
 
+    def test_failed_backend_start_is_not_cached(self):
+        """Audit loop 11, found live: ``_get_backend`` assigned the backend to
+        the module global BEFORE calling ``start()``. A transient ``start()``
+        failure (slow ``cua-driver mcp`` init overrunning the 15s timeout, a
+        daemon hiccup) then left a half-started backend wedged in the cache —
+        every later call returned that dead instance ("session not started")
+        with no recovery short of a process restart. The fix caches only
+        after ``start()`` succeeds; a failed start must leave the global
+        ``None`` so the next call retries cleanly."""
+        tool_mod.reset_backend_for_tests()
+
+        started: list[object] = []
+
+        class _FlakyBackend:
+            """First instance's start() raises; a fresh instance succeeds."""
+            _attempt = 0
+
+            def __init__(self) -> None:
+                _FlakyBackend._attempt += 1
+                self._attempt_no = _FlakyBackend._attempt
+
+            def start(self) -> None:
+                if self._attempt_no == 1:
+                    raise TimeoutError("mcp session start timed out")
+                started.append(self)
+
+            def stop(self) -> None:
+                pass
+
+        _FlakyBackend._attempt = 0
+        with patch.object(tool_mod, "NoopBackend", _FlakyBackend):
+            # First call: start() raises — must propagate AND not cache.
+            with pytest.raises(TimeoutError):
+                tool_mod._get_backend()
+            assert tool_mod._backend is None, \
+                "a backend whose start() failed must NOT be cached"
+            # Second call: a fresh backend starts cleanly and IS cached.
+            b = tool_mod._get_backend()
+            assert b is not None
+            assert tool_mod._backend is b
+            assert b in started
+        tool_mod.reset_backend_for_tests()
+
 
 # ---------------------------------------------------------------------------
 # Backend availability gating
@@ -1230,18 +1273,22 @@ class TestCuaBackend0_1_9CallSites:
         assert cap.width == 1440 and cap.height == 900  # list_windows bounds
 
     def test_capture_geometry_uses_screenshot_width_not_original(self):
-        """cua-driver 0.1.9 ships BOTH ``screenshot_width``/``screenshot_height``
-        AND ``screenshot_original_width``/``screenshot_original_height`` in the
-        get_window_state structuredContent (verified live: 1568x882 vs
-        1920x1080 on this host). The delivered image's actual pixel size — the
-        space click(x,y) addresses — equals ``screenshot_width`` /
-        ``screenshot_height`` (the downscaled form). The ``_original_*`` pair
-        is the pre-downscale window size and must NOT be reported."""
+        """When a cua-driver get_window_state payload carries BOTH
+        ``screenshot_width``/``screenshot_height`` AND
+        ``screenshot_original_width``/``screenshot_original_height``, the
+        delivered image's actual pixel size — the space click(x,y) addresses —
+        equals ``screenshot_width``/``screenshot_height`` (the downscaled
+        form). The ``_original_*`` pair is the pre-downscale window size and
+        must NOT be reported. Note: the installed 0.1.9 build omits the
+        ``_original_*`` keys entirely; this test injects them defensively to
+        guard against a future build that ships them — the code must still
+        pick ``screenshot_width``."""
         gws = {
             "data": {
                 "tree_markdown": '- [0] AXWindow "x"\n',
                 "element_count": 1,
-                # Real 0.1.9 payload carries both pairs.
+                # Defensive payload — both pairs present so the assertion
+                # proves the code picks the downscaled (delivered) dims.
                 "screenshot_width": 1568, "screenshot_height": 882,
                 "screenshot_original_width": 1920,
                 "screenshot_original_height": 1080,
