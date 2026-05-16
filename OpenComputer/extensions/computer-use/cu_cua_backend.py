@@ -55,6 +55,17 @@ PINNED_CUA_DRIVER_VERSION = os.environ.get("OPENCOMPUTER_CUA_DRIVER_VERSION", "0
 # the upstream installer's well-known locations when not on ``$PATH``.
 _CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP transport
 
+# cua-driver 0.1.9, launched without CuaDriver.app's TCC grants, auto-relaunches
+# its own daemon (``open -n -g -a CuaDriver --args serve``) and proxies MCP
+# requests through it. That daemon brings up a full-screen, untitled,
+# layer-0, on-screen helper window — verified live: app_name "Cua Driver",
+# bundle_id ``com.trycua.driver``, ``{x:0, y:0, w:full, h:full}``, the HIGHEST
+# z_index of any on-screen window. ``_is_system_chrome_strip`` does NOT catch
+# it (full-height, not a thin strip), so the frontmost-first selector would
+# pick the driver's OWN window and capture()/click() would operate on the
+# driver instead of the user's app. Exclude it by owning-app identity.
+_CUA_DRIVER_OWN_APP_NAMES = frozenset({"cua driver", "cuadriver"})
+
 # Regex to parse element lines from a cua-driver 0.1.9 ``get_window_state``
 # ``tree_markdown`` rendering. The real 0.1.9 format, confirmed against the
 # installed binary, is one indented line per node, e.g.:
@@ -457,6 +468,19 @@ class CuaDriverBackend(ComputerUseBackend):
             return False
         return (not w.get("title")) and y <= 0 and 0 < height <= 50
 
+    @staticmethod
+    def _is_own_driver_window(w: dict[str, Any]) -> bool:
+        """True for cua-driver's own relay-daemon window — never a target.
+
+        The 0.1.9 daemon (``CuaDriver.app``) puts up a full-screen layer-0
+        helper window with the highest z_index; left in, the frontmost-first
+        sort picks it instead of the user's app. ``_is_system_chrome_strip``
+        cannot catch it (it is full-height, not a thin strip), so it is
+        filtered here by owning-app identity. See ``_CUA_DRIVER_OWN_APP_NAMES``.
+        """
+        name = str(w.get("app_name", "") or "").strip().lower()
+        return name in _CUA_DRIVER_OWN_APP_NAMES
+
     def _select_windows(self, app: str | None) -> list[dict[str, Any]]:
         """Resolve on-screen, layer-0 windows, frontmost-first, optional app filter."""
         lw_out = self._session.call_tool("list_windows", {"on_screen_only": True})
@@ -465,8 +489,12 @@ class CuaDriverBackend(ComputerUseBackend):
         # menu bar, however, is reported as a layer-0 on-screen window by
         # 0.1.9 (see ``_is_system_chrome_strip``), so a second geometry
         # filter is required — the layer filter alone does NOT catch it.
+        # cua-driver's own relay-daemon window is also layer-0/on-screen and
+        # is excluded by owning-app identity (see ``_is_own_driver_window``).
         windows = [w for w in windows
-                   if w["layer"] == 0 and not self._is_system_chrome_strip(w)]
+                   if w["layer"] == 0
+                   and not self._is_system_chrome_strip(w)
+                   and not self._is_own_driver_window(w)]
         # Highest z_index = closest to front on the current Space (0.1.9 spec).
         windows.sort(key=lambda w: w["z_index"], reverse=True)
         if app:
@@ -603,6 +631,28 @@ class CuaDriverBackend(ComputerUseBackend):
                     window_title = wt.group(1)
             if gws_out["images"]:
                 png_b64 = gws_out["images"][0]
+            # ``som`` is the only ``get_window_state`` mode that promises a
+            # screenshot. But 0.1.9's ``get_window_state`` takes NO per-call
+            # mode arg — its response shape is dictated by the PERSISTENT
+            # ``capture_mode`` config. If that config was left at ``ax`` by an
+            # earlier ``set_config`` (the daemon persists it across restarts
+            # and shares it with every client), a ``capture(mode='som')`` call
+            # comes back with the AX tree but NO ``screenshot_*``/image — the
+            # caller asked for a screenshot and silently got none. Surface the
+            # miss with an actionable hint rather than returning a clean-looking
+            # screenshot-less ``som`` result. ``ax`` mode never expects an
+            # image, so it is exempt. (A successful screenshot-less ``som`` from
+            # an SCK failure is already covered: 0.1.9 still ships the tree and
+            # the summary line carries its own hint.)
+            if mode == "som" and png_b64 is None and not error:
+                error = (
+                    "capture mode 'som' returned no screenshot — the "
+                    "cua-driver daemon's persistent capture_mode is not 'som' "
+                    "(run `cua-driver config set capture_mode som`), or the "
+                    "macOS ScreenCaptureKit grant is missing. Element-indexed "
+                    "actions still work; for pixels retry after fixing the "
+                    "config or use mode='vision'."
+                )
 
         png_bytes_len = 0
         if png_b64:

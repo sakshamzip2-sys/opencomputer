@@ -1142,9 +1142,14 @@ class TestCuaBackend0_1_9CallSites:
         assert "Safari" in cap.error  # tells the agent what it got instead
 
     def test_capture_app_filter_match_has_no_error(self):
-        """An app filter that DOES match (incl. bundle-id form) is clean."""
+        """An app filter that DOES match (incl. bundle-id form) is clean.
+
+        A real 0.1.9 ``som`` ``get_window_state`` ships the screenshot as an
+        MCP image content block — the mock includes it so the capture is a
+        faithful ``som`` response (no screenshot ⇒ the screenshot-mode-mismatch
+        guard fires; see test_capture_som_without_screenshot_surfaces_mode)."""
         gws = {"data": {"tree_markdown": '- [0] AXWindow "x"\n'},
-               "images": [], "structuredContent": None, "isError": False}
+               "images": ["Zm9v"], "structuredContent": None, "isError": False}
         b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
                                    "get_window_state": gws})
         assert b.capture(mode="som", app="Safari").error == ""
@@ -1176,6 +1181,39 @@ class TestCuaBackend0_1_9CallSites:
         assert cap.error
         assert "-3801" in cap.error
         assert cap.png_b64 is None
+
+    def test_capture_som_without_screenshot_surfaces_mode_mismatch(self):
+        """Regression — verified live against cua-driver 0.1.9: ``get_window_state``
+        takes NO per-call mode arg; its response shape is dictated by the
+        daemon's PERSISTENT ``capture_mode`` config (the daemon persists it
+        across restarts and shares it with every client). With the config left
+        at ``ax``, a ``capture(mode='som')`` comes back with the AX tree but NO
+        screenshot — the caller asked for ``som`` (screenshot + elements) and
+        silently got an ``ax``-shaped result. capture() must surface the miss
+        with an actionable hint, not return a clean screenshot-less ``som``."""
+        # An ``ax``-config get_window_state response: tree present, no image,
+        # no screenshot_* dims, isError False — exactly what 0.1.9 returns.
+        gws_ax = {"data": {"tree_markdown": '- [0] AXWindow "x"\n',
+                           "element_count": 1},
+                  "images": [], "structuredContent": None, "isError": False}
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                   "get_window_state": gws_ax})
+        cap = b.capture(mode="som")
+        assert cap.png_b64 is None
+        assert cap.error
+        assert "capture_mode" in cap.error
+        # element-indexed actions still work — the tree shipped
+        assert {e.index for e in cap.elements} == {0}
+        # ``ax`` mode never expects a screenshot — no spurious error there.
+        cap_ax = b.capture(mode="ax")
+        assert cap_ax.error == ""
+        # A som capture WITH an image is clean.
+        gws_som = {"data": {"tree_markdown": '- [0] AXWindow "x"\n'},
+                   "images": ["Zm9v"], "structuredContent": None,
+                   "isError": False}
+        b2 = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
+                                    "get_window_state": gws_som})
+        assert b2.capture(mode="som").error == ""
 
     def test_capture_error_propagates_through_dispatch(self):
         """A failed capture must mark the tool result is_error=True via the
@@ -1274,6 +1312,54 @@ class TestCuaBackend0_1_9CallSites:
         b = _backend_with_session({"list_windows": lw})
         windows = b._select_windows(None)
         assert [w["window_id"] for w in windows] == [10]
+
+    def test_capture_skips_cua_drivers_own_relay_window(self):
+        """Regression — verified live against cua-driver 0.1.9: when the MCP
+        process is launched without CuaDriver.app's TCC grants it auto-relaunches
+        its own daemon, which puts up a FULL-SCREEN, untitled, layer-0,
+        on-screen helper window (app_name 'Cua Driver', bundle_id
+        com.trycua.driver) with the HIGHEST z_index of any on-screen window.
+        ``_is_system_chrome_strip`` cannot catch it — it is full-height, not a
+        thin strip — so without an owning-app filter the frontmost-first sort
+        picks the driver's OWN window and capture()/click() operate on the
+        driver instead of the user's app. The selector must drop it."""
+        lw = {
+            "data": None, "images": [], "isError": False,
+            "structuredContent": {
+                "current_space_id": 487,
+                "windows": [
+                    {  # cua-driver's own relay-daemon window — must be dropped
+                        "app_name": "Cua Driver", "pid": 98042,
+                        "window_id": 8028, "title": "",
+                        "is_on_screen": True, "on_current_space": True,
+                        "layer": 0, "z_index": 5, "space_ids": [487],
+                        "bounds": {"x": 0, "y": 0, "width": 1920,
+                                   "height": 1080},
+                    },
+                    {  # the real app window — must be selected
+                        "app_name": "Terminal", "pid": 47327,
+                        "window_id": 3683, "title": "claude — 168×20",
+                        "is_on_screen": True, "on_current_space": True,
+                        "layer": 0, "z_index": 4, "space_ids": [487],
+                        "bounds": {"x": 192, "y": 51, "width": 1537,
+                                   "height": 840},
+                    },
+                ],
+            },
+        }
+        gws = {
+            "data": {"tree_markdown": '- [0] AXWindow "claude"\n',
+                     "element_count": 1},
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        b = _backend_with_session({"list_windows": lw, "get_window_state": gws})
+        windows = b._select_windows(None)
+        # Only the real window survives — the driver's own window is dropped.
+        assert [w["window_id"] for w in windows] == [3683]
+        cap = b.capture(mode="som")
+        assert cap.app == "Terminal"
+        assert b._active_window_id == 3683
+        assert b._session.last("get_window_state")["window_id"] == 3683
 
 
 class TestAsyncBridgeLifecycle:
