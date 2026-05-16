@@ -35,7 +35,6 @@ Round 2B P-12 adds three slim filters to ``session list``:
 from __future__ import annotations
 
 import time
-import uuid
 from pathlib import Path
 
 import typer
@@ -320,28 +319,31 @@ def session_fork(
     e.g. "what would the agent have said if I'd asked Y instead?".
     The new session inherits the source's platform / model / message
     history; only the id (and title) differ.
+
+    Shares :func:`opencomputer.agent.session_fork.fork_session` with the
+    ``/fork`` slash command — both paths produce identical results.
     """
+    from opencomputer.agent.session_fork import (
+        SourceSessionNotFoundError,
+        fork_session,
+    )
+
     db = _db()
-    src = db.get_session(session_id)
-    if src is None:
+    try:
+        result = fork_session(db, session_id, title=title or None)
+    except SourceSessionNotFoundError:
         console.print(f"[red]error:[/red] source session {session_id!r} not found.")
-        raise typer.Exit(1)
-    msgs = db.get_messages(session_id)
-    new_id = uuid.uuid4().hex
-    new_title = title or f"{(src.get('title') or '').strip()} (fork)".strip()
-    db.create_session(
-        new_id,
-        platform=src.get("platform", "") or "cli",
-        model=src.get("model", "") or "",
-        title=new_title,
-    )
-    if msgs:
-        db.append_messages_batch(new_id, msgs)
+        raise typer.Exit(1) from None
+
     console.print(
-        f"[green]forked[/green] {session_id} → [cyan]{new_id}[/cyan] "
-        f"({len(msgs)} message(s) copied)"
+        f"[green]forked[/green] {session_id} → "
+        f"[cyan]{result.new_session_id}[/cyan] "
+        f"({result.messages_copied} message(s) copied)"
     )
-    console.print(f"[dim]continue with: opencomputer chat --resume {new_id}[/dim]")
+    console.print(
+        f"[dim]continue with: opencomputer chat --resume "
+        f"{result.new_session_id}[/dim]"
+    )
 
 
 @session_app.command("resume")
