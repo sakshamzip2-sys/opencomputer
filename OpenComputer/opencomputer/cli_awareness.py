@@ -842,3 +842,84 @@ def eval_ranker(
         f"[dim]{changed} of {min(len(old), len(new))} positions changed "
         "between the two rankings.[/dim]"
     )
+
+
+@awareness_app.command("debug")
+def debug(
+    query: Annotated[
+        str | None,
+        typer.Option("--query", help="Simulate a session opening message."),
+    ] = None,
+) -> None:
+    """Dump awareness state as JSON — paste this into a bug report.
+
+    The machine-readable counterpart of ``explain --session``: graph
+    counts, reranker weights, and the top-ranked facts with their score
+    breakdowns.
+    """
+    from opencomputer.user_model.reranker import (
+        RerankWeights,
+        SessionContext,
+        UserFactsReranker,
+    )
+    from opencomputer.user_model.store import UserModelStore
+
+    store = UserModelStore()
+    all_nodes = store.list_nodes(limit=100_000)
+    by_kind: dict[str, int] = {}
+    soft_deleted = 0
+    needs_review = 0
+    for n in all_nodes:
+        by_kind[n.kind] = by_kind.get(n.kind, 0) + 1
+        if _node_is_deleted(n):
+            soft_deleted += 1
+        if n.metadata.get("needs_review"):
+            needs_review += 1
+    live = [
+        n
+        for n in all_nodes
+        if not _node_is_deleted(n) and not n.metadata.get("needs_review")
+    ]
+
+    recency_scores: dict[str, float] = {}
+    for n in live:
+        rs = store.node_recency_score(n.node_id)
+        if rs is not None:
+            recency_scores[n.node_id] = rs
+    drift_scores = {n.node_id: store.node_drift_score(n.node_id) for n in live}
+    ctx = SessionContext(recent_messages=(query,) if query else ())
+    scored = UserFactsReranker().score(
+        live, ctx, recency_scores=recency_scores, drift_scores=drift_scores
+    )[:20]
+
+    w = RerankWeights()
+    payload = {
+        "query": query,
+        "graph": {
+            "nodes_total": len(all_nodes),
+            "nodes_by_kind": by_kind,
+            "edges_total": store.count_edges(),
+            "soft_deleted": soft_deleted,
+            "needs_review": needs_review,
+        },
+        "reranker_weights": {
+            "kind": w.kind,
+            "confidence": w.confidence,
+            "recency": w.recency,
+            "bm25": w.bm25,
+            "drift": w.drift,
+        },
+        "top_facts": [
+            {
+                "id": sf.node.node_id,
+                "kind": sf.node.kind,
+                "value": sf.node.value,
+                "score": round(sf.score, 4),
+                "breakdown": {
+                    k: round(v, 4) for k, v in sf.breakdown.items()
+                },
+            }
+            for sf in scored
+        ],
+    }
+    Console().print_json(json.dumps(payload))
