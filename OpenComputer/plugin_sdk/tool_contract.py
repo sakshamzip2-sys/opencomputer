@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from plugin_sdk.consent import CapabilityClaim
 from plugin_sdk.core import ToolCall, ToolResult
@@ -88,6 +88,32 @@ class BaseTool(ABC):
     #: sliding window is treated as a stuck agent. See
     #: ``opencomputer.agent.loop_safety.LoopDetector``.
     loop_safe: ClassVar[bool] = False
+
+    #: M2 sandbox resolver (2026-05-16): how this tool wants its
+    #: sandboxed work routed by ``opencomputer.sandbox.resolver``.
+    #:
+    #: * ``"default"`` — follow the user's sandbox config: sandboxed when
+    #:   a backend is configured, un-sandboxed otherwise. This is the
+    #:   default, so every existing tool is unaffected — with no backend
+    #:   configured the resolver returns ``None`` (no sandbox) exactly as
+    #:   before M2.
+    #: * ``"required"`` — this tool MUST run inside a sandbox. If none can
+    #:   be resolved the call fails (``sandbox.fallback=error``, the
+    #:   default) or runs on the host with a WARNING
+    #:   (``sandbox.fallback=local``). Set it on tools that execute
+    #:   untrusted code / commands.
+    #: * ``"skip"`` — never sandbox this tool, regardless of config. For
+    #:   tools that cannot work inside containment (host-only side
+    #:   effects) and are trusted by construction.
+    sandbox_preference: ClassVar[Literal["required", "skip", "default"]] = "default"
+
+    #: M2 sandbox resolver (2026-05-16): a preferred backend name for
+    #: this tool's sandboxed work (``"e2b"``, ``"docker"``, …). When set
+    #: AND that backend is available, the resolver routes the call
+    #: through it instead of the user's configured default. ``None``
+    #: (default) means "no preference — use the configured default"; an
+    #: unavailable hint falls back to the default rather than failing.
+    sandbox_backend_hint: ClassVar[str | None] = None
 
     @property
     @abstractmethod

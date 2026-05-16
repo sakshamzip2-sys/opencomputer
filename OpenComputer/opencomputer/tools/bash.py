@@ -1,8 +1,21 @@
-"""Bash tool — run a shell command with a timeout."""
+"""Bash tool — run a shell command with a timeout.
+
+M2 (T2.6, 2026-05-16): the Bash tool can route its command through a
+resolved sandbox backend instead of the host. The agent loop's
+``_resolve_sandbox_backend`` publishes the resolved
+:class:`~plugin_sdk.SandboxStrategy` on
+``runtime.custom["sandbox_backend_strategy"]`` just before each dispatch;
+:meth:`BashTool.execute` reads it and — when present — runs the command
+inside that backend. With no ``sandbox.backend`` configured the key is
+never set and the existing host path runs byte-identically. The runtime
+is propagated by the loop via :meth:`BashTool.set_runtime`, mirroring the
+``DelegateTool`` / ``CronTool`` runtime-propagation pattern.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 from opencomputer.security.tirith import (
@@ -13,7 +26,17 @@ from opencomputer.security.tirith import (
     check_command as tirith_check_command,
 )
 from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
+from plugin_sdk.sandbox import SandboxConfig, SandboxResult, SandboxUnavailable
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+_log = logging.getLogger("opencomputer.tools.bash")
+
+#: M2 (T2.6) — ``runtime.custom`` key under which the agent loop
+#: publishes the resolved :class:`~plugin_sdk.SandboxStrategy` for the
+#: current tool call. Kept in sync with
+#: ``opencomputer.agent.loop.AgentLoop._SANDBOX_STRATEGY_KEY``.
+_SANDBOX_STRATEGY_KEY = "sandbox_backend_strategy"
 
 #: Hermes-parity infrastructure-var blocklist. These keys are stripped
 #: from the BashTool subprocess env regardless of user passthrough.
@@ -79,10 +102,84 @@ def _strip_infra_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
     return out
 
 
+def _format_bash_output(cmd: str, exit_code: int, out: str, err: str) -> str:
+    """Build the Bash tool's result body — the one canonical shape.
+
+    Both the host path and the sandbox path render through this so a
+    sandboxed command produces byte-identical output framing to a
+    host-run one. Stderr is appended only when non-empty (the host path
+    has always behaved this way).
+    """
+    combined = (
+        f"$ {cmd}\n"
+        f"exit={exit_code}\n"
+        f"--- stdout ---\n{out}"
+    )
+    if err:
+        combined += f"\n--- stderr ---\n{err}"
+    return combined
+
+
 class BashTool(BaseTool):
     parallel_safe = False  # side effects
     # Item 3 (2026-05-02): Bash schema enumerates command/timeout_s; closed.
     strict_mode = True
+
+    #: M2 (T2.6) — class-level "current runtime", set by ``AgentLoop``
+    #: before each tool-dispatch batch (same pattern as
+    #: ``DelegateTool._current_runtime`` / ``CronTool._current_runtime``).
+    #: ``execute`` reads ``custom['sandbox_backend_strategy']`` off it to
+    #: decide whether to route the command through a sandbox backend.
+    #: Defaults to the shared no-flags context — with that default the
+    #: key is absent and the host path runs, so a Bash tool used outside
+    #: an ``AgentLoop`` (direct ``BashTool().execute(...)``, tests) keeps
+    #: the exact pre-M2 host behavior.
+    _current_runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
+
+    @classmethod
+    def set_runtime(cls, runtime: RuntimeContext) -> None:
+        """Set the runtime context. Called by ``AgentLoop`` alongside
+        ``DelegateTool.set_runtime`` / ``CronTool.set_runtime``.
+
+        The loop passes its live ``RuntimeContext`` by reference so the
+        per-call ``custom['sandbox_backend_strategy']`` write performed
+        by ``_resolve_sandbox_backend`` immediately before dispatch is
+        visible here.
+        """
+        cls._current_runtime = runtime
+
+    def _resolved_sandbox_strategy(self) -> object | None:
+        """Return the sandbox strategy resolved for this call, or ``None``.
+
+        Reads ``runtime.custom['sandbox_backend_strategy']`` — published
+        by ``AgentLoop._resolve_sandbox_backend``. ``None`` (the default,
+        and the value whenever no ``sandbox.backend`` is configured)
+        means "run on the host", which is the byte-identical no-op path.
+        Read defensively so a missing / malformed runtime can never break
+        command execution.
+        """
+        runtime = self._current_runtime
+        custom = getattr(runtime, "custom", None)
+        if not isinstance(custom, dict):
+            return None
+        return custom.get(_SANDBOX_STRATEGY_KEY)
+
+    def _current_session_id(self) -> str:
+        """Return the active session id, or ``""`` when none is published.
+
+        The agent loop publishes the session id on
+        ``runtime.custom['session_id']`` (see ``AgentLoop`` —
+        ``_new_custom`` carries ``session_id``). The sandbox cost guard
+        keys per-session spend on it. Read defensively — a missing /
+        malformed runtime yields ``""``, which the cost guard treats as
+        "no session to bill" (it records nothing).
+        """
+        runtime = self._current_runtime
+        custom = getattr(runtime, "custom", None)
+        if not isinstance(custom, dict):
+            return ""
+        sid = custom.get("session_id")
+        return sid if isinstance(sid, str) else ""
 
     @property
     def schema(self) -> ToolSchema:
@@ -211,6 +308,31 @@ class BashTool(BaseTool):
                     f"{findings_text}\n---\n"
                 )
 
+        # M2 (T2.6): if the agent loop's resolver picked a sandbox
+        # backend for this call, run the command inside it instead of on
+        # the host. ``_resolved_sandbox_strategy`` returns ``None``
+        # whenever no ``sandbox.backend`` is configured (the default), in
+        # which case control falls through to the unchanged host path
+        # below — byte-identical to pre-M2 behavior.
+        #
+        # ``_execute_in_sandbox`` returns a ``ToolResult`` on success (or
+        # on a loud ``sandbox.fallback=error`` failure), or ``None`` when
+        # the backend was unreachable AND ``sandbox.fallback=local`` — in
+        # which case execution falls through to the host path below,
+        # exactly as the resolver's fallback policy prescribes.
+        strategy = self._resolved_sandbox_strategy()
+        if strategy is not None:
+            sandboxed = await self._execute_in_sandbox(
+                call=call,
+                cmd=cmd,
+                timeout=timeout,
+                strategy=strategy,
+                warn_prefix=warn_prefix,
+            )
+            if sandboxed is not None:
+                return sandboxed
+            # local-fallback on an unreachable backend — fall through.
+
         # Scope HOME / XDG_* to the active profile's home/ subdir so
         # spawned subprocesses (git, ssh, npm, etc.) get per-profile
         # tool-config isolation for credentials and caches. The parent
@@ -313,14 +435,298 @@ class BashTool(BaseTool):
 
         out = stdout.decode("utf-8", errors="replace") if stdout else ""
         err = stderr.decode("utf-8", errors="replace") if stderr else ""
-        combined = (
-            f"$ {cmd}\n"
-            f"exit={exit_code}\n"
-            f"--- stdout ---\n{out}"
-            + (f"\n--- stderr ---\n{err}" if err else "")
-        )
+        combined = _format_bash_output(cmd, exit_code, out, err)
         return ToolResult(
             tool_call_id=call.id,
             content=warn_prefix + combined,
             is_error=exit_code != 0,
         )
+
+    async def _execute_in_sandbox(
+        self,
+        *,
+        call: ToolCall,
+        cmd: str,
+        timeout: int,
+        strategy: object,
+        warn_prefix: str,
+    ) -> ToolResult | None:
+        """Run ``cmd`` inside the resolved sandbox backend ``strategy``.
+
+        ``strategy`` is the :class:`~plugin_sdk.SandboxStrategy` the agent
+        loop's resolver chose for this call. The shell command is wrapped
+        as ``["/bin/sh", "-c", cmd]`` — the same ``sh -c`` shape
+        ``asyncio.create_subprocess_shell`` uses on the host path — so the
+        sandboxed command sees equivalent shell semantics.
+
+        Returns a :class:`~plugin_sdk.core.ToolResult` mapped from the
+        backend's :class:`~plugin_sdk.SandboxResult` in the exact framing
+        :func:`_format_bash_output` produces for the host path.
+
+        Returns ``None`` in exactly one case — the backend turned out to
+        be unreachable at run time (``SandboxUnavailable`` / a transport
+        error from, e.g., E2B ``create()``) AND ``sandbox.fallback`` is
+        ``local``: the caller then falls through to the host path. Under
+        the default ``sandbox.fallback=error`` an unreachable backend
+        yields an error ``ToolResult`` (fail loud — OC never silently
+        downgrades containment).
+
+        T2.8 — sandbox cost guard. A paid backend (``e2b``) bills per
+        running second. Before the run, if the active session is already
+        over its sandbox spend cap, this returns a loud error
+        ``ToolResult`` *without* running the command (a sandbox would
+        only run up more cost). After a run completes,
+        ``duration × rate(backend)`` is recorded against the session's
+        sandbox spend. Local backends cost ``$0`` and the cap is never
+        hit by them. Cost-guard failures never break execution — they are
+        swallowed to a WARNING (counter-telemetry pattern).
+        """
+        from opencomputer.sandbox.resolver import (
+            SANDBOX_FALLBACK_LOCAL,
+            fallback_policy,
+        )
+
+        backend_name = getattr(strategy, "name", None) or type(strategy).__name__
+
+        # T2.8 — refuse before the run if this session is already over its
+        # sandbox spend cap. A sandboxed run that overran the cap would
+        # only add more cost; fail loud instead. ``_check_sandbox_cap``
+        # returns an error ``ToolResult`` when over cap, else ``None``.
+        over_cap = self._check_sandbox_cap(call=call, backend_name=backend_name)
+        if over_cap is not None:
+            return over_cap
+        # ``sh -c`` mirrors the host path's ``create_subprocess_shell``,
+        # which spawns ``/bin/sh -c <cmd>`` on POSIX. ``sh`` (not ``bash``)
+        # is what is universally present inside minimal sandbox images.
+        argv = ["/bin/sh", "-c", cmd]
+        # Default-deny network posture (SandboxConfig's own default). The
+        # wall-clock cap is the tool's resolved ``timeout``. ``run`` is a
+        # required ABC method; strategies decode/limit env themselves.
+        sandbox_cfg = SandboxConfig(
+            cpu_seconds_limit=timeout,
+            network_allowed=False,
+        )
+
+        run = getattr(strategy, "run", None)
+        if not callable(run):
+            # Defensive: a malformed object on the runtime key is not a
+            # usable backend. Treat exactly like an unreachable backend.
+            _log.warning(
+                "sandbox: resolved backend %r has no callable run(); "
+                "treating as unreachable",
+                backend_name,
+            )
+            return self._handle_sandbox_unreachable(
+                call=call,
+                backend_name=backend_name,
+                reason="resolved backend object is not a usable strategy",
+                fallback=fallback_policy(self._active_config()),
+                fallback_local=SANDBOX_FALLBACK_LOCAL,
+            )
+
+        try:
+            result: SandboxResult = await run(
+                argv, config=sandbox_cfg, stdin=None, cwd=None
+            )
+        except SandboxUnavailable as exc:
+            # The backend could not even start (missing dependency / key /
+            # an unreachable host). This is the run-time half of the
+            # fallback policy the resolver's docstring describes.
+            return self._handle_sandbox_unreachable(
+                call=call,
+                backend_name=backend_name,
+                reason=str(exc),
+                fallback=fallback_policy(self._active_config()),
+                fallback_local=SANDBOX_FALLBACK_LOCAL,
+            )
+        except asyncio.CancelledError:
+            # Cooperative cancellation (the loop's steer/replan path) —
+            # propagate untouched, same as the host path does.
+            raise
+        except Exception as exc:  # noqa: BLE001 — a backend transport error
+            # e.g. E2B's ``AsyncSandbox.create()`` raising a network /
+            # auth error. Treat as "backend unreachable" and apply the
+            # fallback policy rather than crashing dispatch.
+            _log.warning(
+                "sandbox: backend %r failed to run the command: %s",
+                backend_name,
+                exc,
+            )
+            return self._handle_sandbox_unreachable(
+                call=call,
+                backend_name=backend_name,
+                reason=f"{type(exc).__name__}: {exc}",
+                fallback=fallback_policy(self._active_config()),
+                fallback_local=SANDBOX_FALLBACK_LOCAL,
+            )
+
+        # Map the SandboxResult onto the Bash tool's ToolResult, using the
+        # SAME framing the host path produces.
+        exit_code = int(getattr(result, "exit_code", 0) or 0)
+        out = str(getattr(result, "stdout", "") or "")
+        err = str(getattr(result, "stderr", "") or "")
+        duration = float(getattr(result, "duration_seconds", 0.0) or 0.0)
+        _log.debug(
+            "sandbox: ran Bash command via backend %r (exit=%d, %.2fs)",
+            backend_name,
+            exit_code,
+            duration,
+        )
+        # T2.8 — record this run's spend against the session's sandbox
+        # cost guard (``duration × rate(backend)``). ``$0`` for a free
+        # local backend. A recording failure must never break the tool
+        # result — swallow to a WARNING (counter-telemetry pattern).
+        self._record_sandbox_spend(
+            backend_name=backend_name, duration_seconds=duration
+        )
+        combined = _format_bash_output(cmd, exit_code, out, err)
+        return ToolResult(
+            tool_call_id=call.id,
+            content=warn_prefix + combined,
+            is_error=exit_code != 0,
+        )
+
+    def _handle_sandbox_unreachable(
+        self,
+        *,
+        call: ToolCall,
+        backend_name: str,
+        reason: str,
+        fallback: str,
+        fallback_local: str,
+    ) -> ToolResult | None:
+        """Apply ``sandbox.fallback`` when the backend is unreachable.
+
+        * ``local`` → log a WARNING and return ``None`` so the caller
+          falls through to the host path (the operator explicitly opted
+          into host fallback).
+        * ``error`` (default) → return a loud error ``ToolResult``; OC
+          never silently downgrades containment.
+        """
+        if fallback == fallback_local:
+            _log.warning(
+                "sandbox: backend %r is unreachable (%s); "
+                "sandbox.fallback=local — running the command on the "
+                "HOST without containment",
+                backend_name,
+                reason,
+            )
+            return None
+        return ToolResult(
+            tool_call_id=call.id,
+            content=(
+                f"Error: sandbox backend {backend_name!r} is unavailable "
+                f"({reason}), and sandbox.fallback='error' (the default). "
+                "Configure a reachable sandbox.backend, or set "
+                "sandbox.fallback=local to permit running on the host."
+            ),
+            is_error=True,
+        )
+
+    def _check_sandbox_cap(
+        self, *, call: ToolCall, backend_name: str
+    ) -> ToolResult | None:
+        """T2.8 — refuse a sandboxed run when the session is over its cap.
+
+        Returns an error :class:`~plugin_sdk.core.ToolResult` when the
+        active session has already spent its sandbox budget, so the caller
+        does not run the command. Returns ``None`` to permit the run
+        (under cap, no session id to bill, or — defensively — any
+        cost-guard read failure: a guard hiccup must never *block* a
+        legitimate command).
+
+        A sandbox's cost is unknown until it has run, so the pre-run gate
+        checks only what is *already* spent (``projected_cost_usd=0``):
+        it stops a session that has already crossed the line from running
+        up still more cost, which is the cap's intent.
+        """
+        session_id = self._current_session_id()
+        if not session_id:
+            # No session to bill — the cap is a per-session ceiling.
+            return None
+        try:
+            from opencomputer.cost_guard import get_default_sandbox_cost_guard
+
+            guard = get_default_sandbox_cost_guard()
+            # A free local backend has rate $0 — it can never push a
+            # session over cap, so skip the check entirely for it.
+            if guard.rate_for(backend_name) <= 0:
+                return None
+            decision = guard.check_session_budget(session_id)
+        except Exception as exc:  # noqa: BLE001 — a guard hiccup must not block exec
+            _log.warning(
+                "sandbox cost guard: pre-run cap check failed (%s); "
+                "permitting the run",
+                exc,
+            )
+            return None
+        if decision.allowed:
+            return None
+        return ToolResult(
+            tool_call_id=call.id,
+            content=(
+                f"Refused: {decision.reason}. The {backend_name!r} sandbox "
+                f"backend bills per running second and this session has "
+                f"spent ${decision.session_spend_usd:.4f} of its "
+                f"${decision.session_cap_usd:.2f} sandbox cap. Raise the "
+                "cap (the `sandbox.session_cap_usd` value in the profile's "
+                "cost_guard.json) or start a new session."
+            ),
+            is_error=True,
+        )
+
+    def _record_sandbox_spend(
+        self, *, backend_name: str, duration_seconds: float
+    ) -> None:
+        """T2.8 — record one sandboxed run's spend against the session.
+
+        Costs ``duration × rate(backend)``; ``$0`` for a free local
+        backend. A recording failure (corrupt cost file, disk error)
+        must never break tool execution — it is swallowed to a WARNING,
+        the same counter-telemetry pattern the rest of the codebase uses
+        for per-session counters.
+        """
+        session_id = self._current_session_id()
+        if not session_id:
+            return
+        try:
+            from opencomputer.cost_guard import get_default_sandbox_cost_guard
+
+            cost = get_default_sandbox_cost_guard().record_run(
+                session_id,
+                backend=backend_name,
+                duration_seconds=duration_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 — cost telemetry must never break exec
+            _log.warning(
+                "sandbox cost guard: failed to record run spend for "
+                "backend %r (%s)",
+                backend_name,
+                exc,
+            )
+            return
+        if cost > 0:
+            _log.debug(
+                "sandbox cost guard: recorded $%.6f for a %.2fs %r run "
+                "(session %s)",
+                cost,
+                duration_seconds,
+                backend_name,
+                session_id,
+            )
+
+    @staticmethod
+    def _active_config() -> object | None:
+        """Load the active :class:`~opencomputer.agent.config.Config`.
+
+        Used only on the sandbox failure path to read ``sandbox.fallback``.
+        Returns ``None`` on any failure — :func:`fallback_policy` treats a
+        ``None`` config as the safe ``error`` default, so a config-load
+        hiccup can never silently downgrade containment.
+        """
+        try:
+            from opencomputer.agent.config_store import load_config
+
+            return load_config()
+        except Exception:  # noqa: BLE001 — config absence must fail safe
+            return None

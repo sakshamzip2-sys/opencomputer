@@ -28,6 +28,15 @@ Container *reuse* itself (keep-alive containers, ``oc sandbox list`` /
 ``recreate`` / prune) is intentionally out of Milestone 1 — this module
 ships the policy object and the key; the Milestone 2 backend resolver
 consumes them.
+
+Milestone 2 (2026-05-16) widens :class:`SandboxPolicy` with two more
+keys of the same ``sandbox:`` block — ``backend`` (the default sandbox
+backend name a tool call routes to) and ``fallback`` (what happens when
+that backend is unreachable). The per-tool-call resolver
+(:func:`opencomputer.sandbox.resolver.resolve_backend`) reads both. They
+live on the M1 policy object rather than a separate config block so the
+spec's ``sandbox.backend`` / ``sandbox.fallback`` key names are literally
+true.
 """
 
 from __future__ import annotations
@@ -52,6 +61,22 @@ class SandboxScope(str, Enum):
     SHARED = "shared"
 
 
+#: ``sandbox.fallback`` value — fail loud when the chosen backend is
+#: unreachable. The default; OC never silently downgrades containment.
+SANDBOX_FALLBACK_ERROR = "error"
+
+#: ``sandbox.fallback`` value — run on the host (no sandbox) with a
+#: logged WARNING when the chosen backend is unreachable.
+SANDBOX_FALLBACK_LOCAL = "local"
+
+#: The two accepted ``sandbox.fallback`` values. A config typo outside
+#: this set fails loud in :meth:`SandboxPolicy.__post_init__` — the same
+#: "a typo fails, not silently disables" principle ``scope`` follows.
+_VALID_FALLBACKS: frozenset[str] = frozenset(
+    {SANDBOX_FALLBACK_ERROR, SANDBOX_FALLBACK_LOCAL}
+)
+
+
 def _coerce_str_tuple(value: object) -> tuple[str, ...]:
     """Coerce a config value into a tuple of stripped, non-empty strings.
 
@@ -71,12 +96,14 @@ def _coerce_str_tuple(value: object) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class SandboxPolicy:
-    """Per-profile sandbox policy: scope + sandboxed-tool allow/deny.
+    """Per-profile sandbox policy: scope + tool allow/deny + backend.
 
     Persisted under the ``sandbox:`` key of the profile config. The
-    default — ``scope=NONE`` with empty allow/deny — is exact current
-    behavior (sandbox off, no tool restrictions), so an upgrading user
-    sees zero change until they run ``oc sandbox enable``.
+    default — ``scope=NONE``, empty allow/deny, ``backend`` unset,
+    ``fallback="error"`` — is exact current behavior (sandbox off, no
+    tool restrictions, sandboxing not opted into), so an upgrading user
+    sees zero change until they run ``oc sandbox enable`` / set a
+    backend.
     """
 
     scope: SandboxScope = SandboxScope.NONE
@@ -85,6 +112,19 @@ class SandboxPolicy:
     allow-list implicitly denies everything not listed."""
     tools_deny: tuple[str, ...] = ()
     """Tools forbidden when sandboxed. ``deny`` always beats ``allow``."""
+    backend: str | None = None
+    """M2 — default sandbox backend for tool calls: a strategy name such
+    as ``"e2b"`` or ``"docker"``. ``None`` (default) = no backend
+    configured: sandboxing is not opted into and the per-tool-call
+    resolver runs every ordinary tool un-sandboxed (pre-M2 behavior).
+    Persisted as the ``sandbox.backend`` config key."""
+    fallback: str = SANDBOX_FALLBACK_ERROR
+    """M2 — what happens when the chosen backend is unreachable (e.g. an
+    E2B ``create()`` raises). ``"error"`` (default) fails the call loud —
+    OC never silently downgrades containment. ``"local"`` runs the call
+    on the host with a logged WARNING. Default ``"error"`` is deliberate:
+    opting into host fallback is an explicit choice. Persisted as the
+    ``sandbox.fallback`` config key."""
 
     def __post_init__(self) -> None:
         """Coerce loosely-typed inputs so the policy is always valid.
@@ -93,8 +133,9 @@ class SandboxPolicy:
         override walker both hand the constructor a bare ``str`` scope
         (and ``list`` tool collections). Normalise them here — a frozen
         dataclass needs :func:`object.__setattr__` to write during
-        ``__post_init__``. An unrecognised scope string surfaces as a
-        :class:`ValueError` rather than a silently broken policy.
+        ``__post_init__``. An unrecognised ``scope`` *or* ``fallback``
+        string surfaces as a :class:`ValueError` rather than a silently
+        broken policy — a config typo fails loud, not silently.
         """
         if not isinstance(self.scope, SandboxScope):
             object.__setattr__(self, "scope", SandboxScope(self.scope))
@@ -102,6 +143,12 @@ class SandboxPolicy:
             object.__setattr__(self, "tools_allow", tuple(self.tools_allow))
         if isinstance(self.tools_deny, list):
             object.__setattr__(self, "tools_deny", tuple(self.tools_deny))
+        if self.fallback not in _VALID_FALLBACKS:
+            valid = ", ".join(sorted(_VALID_FALLBACKS))
+            raise ValueError(
+                f"invalid sandbox.fallback {self.fallback!r}; "
+                f"valid values: {valid}"
+            )
 
     @property
     def enabled(self) -> bool:
@@ -127,9 +174,14 @@ class SandboxPolicy:
         """Build a policy from a config mapping (the ``sandbox:`` block).
 
         A non-mapping (or ``None``) yields the default policy. An
-        unrecognised ``scope`` raises :class:`ValueError` — a typo in
-        ``config.yaml`` should fail loudly, not silently disable the
-        sandbox.
+        unrecognised ``scope`` *or* ``fallback`` raises :class:`ValueError`
+        — a typo in ``config.yaml`` should fail loudly, not silently
+        disable the sandbox or downgrade containment.
+
+        Reads the M2 ``backend`` / ``fallback`` keys alongside the M1
+        ``scope`` / ``tools`` keys: this is the integration point through
+        which :mod:`opencomputer.agent.config_store` populates the new
+        keys (``Config.sandbox`` is built here).
         """
         if not isinstance(data, dict):
             return cls()
@@ -143,17 +195,31 @@ class SandboxPolicy:
             ) from exc
         tools = data.get("tools")
         tools = tools if isinstance(tools, dict) else {}
+        # ``backend``: an empty / whitespace-only string counts as unset
+        # so a blank ``backend:`` line in YAML does not opt into a
+        # nonexistent ""-named backend.
+        raw_backend = data.get("backend")
+        backend: str | None = None
+        if isinstance(raw_backend, str) and raw_backend.strip():
+            backend = raw_backend.strip()
+        # ``fallback``: default to ``error``; ``__post_init__`` validates
+        # the value and raises on anything outside the accepted set.
+        raw_fallback = data.get("fallback", SANDBOX_FALLBACK_ERROR)
         return cls(
             scope=scope,
             tools_allow=_coerce_str_tuple(tools.get("allow")),
             tools_deny=_coerce_str_tuple(tools.get("deny")),
+            backend=backend,
+            fallback=raw_fallback,
         )
 
     def to_mapping(self) -> dict[str, object]:
         """Serialise back to the ``sandbox:`` config block.
 
-        Round-trips :meth:`from_mapping`. Empty allow/deny lists are
-        omitted so a freshly-enabled config stays minimal.
+        Round-trips :meth:`from_mapping`. Default-valued fields — empty
+        allow/deny lists, an unset ``backend``, the default ``error``
+        ``fallback`` — are omitted so a freshly-enabled config stays
+        minimal (mirrors how the empty ``tools`` dict is omitted).
         """
         out: dict[str, object] = {"scope": self.scope.value}
         tools: dict[str, list[str]] = {}
@@ -163,6 +229,10 @@ class SandboxPolicy:
             tools["deny"] = list(self.tools_deny)
         if tools:
             out["tools"] = tools
+        if self.backend is not None:
+            out["backend"] = self.backend
+        if self.fallback != SANDBOX_FALLBACK_ERROR:
+            out["fallback"] = self.fallback
         return out
 
 

@@ -3648,6 +3648,22 @@ class AgentLoop:
                 except Exception:
                     pass  # cron tool may not be registered in some contexts
 
+                # M2 (T2.6): BashTool reads the per-call resolved sandbox
+                # backend off ``runtime.custom['sandbox_backend_strategy']``
+                # — published by ``_resolve_sandbox_backend`` just before
+                # each dispatch. Push the live runtime so the tool sees
+                # that mutation. Same propagation pattern as DelegateTool /
+                # CronTool. ``self._runtime`` is passed by reference (not a
+                # ``dataclasses.replace`` copy) so the per-call key write
+                # is visible to the tool. With no ``sandbox.backend``
+                # configured the key is never set and BashTool's host path
+                # runs byte-identically — the no-op default.
+                try:
+                    from opencomputer.tools.bash import BashTool
+                    BashTool.set_runtime(self._runtime)
+                except Exception:
+                    pass  # bash tool may not be registered in some contexts
+
                 # v1.1 plan-2 M5.2 (2026-05-09): snapshot the message
                 # history BEFORE dispatching this tool block so a later
                 # `oc session rewind --mode conv_only` can restore state
@@ -5688,6 +5704,93 @@ class AgentLoop:
 
     # ─── tool dispatch ─────────────────────────────────────────────
 
+    #: M2 (T2.6) — ``runtime.custom`` key carrying the resolved sandbox
+    #: backend's *name* for one tool call (observability / introspection).
+    _SANDBOX_BACKEND_KEY = "sandbox_backend"
+    #: M2 (T2.6) — ``runtime.custom`` key carrying the resolved
+    #: :class:`~plugin_sdk.SandboxStrategy` *object* for one tool call.
+    #: A sandbox-aware tool (the Bash tool) reads this and routes its
+    #: command through ``strategy.run(...)``. Publishing the resolved
+    #: object — not just the name — avoids the tool re-running the name
+    #: resolution + availability probe the resolver already did, and
+    #: guarantees the tool routes through exactly the backend the
+    #: resolver chose.
+    _SANDBOX_STRATEGY_KEY = "sandbox_backend_strategy"
+
+    def _resolve_sandbox_backend(self, call: ToolCall) -> str | None:
+        """M2 (T2.6) — resolve the sandbox backend for one tool call.
+
+        Calls :func:`opencomputer.sandbox.resolver.resolve_backend` with
+        the tool, the active config and a scope context, and publishes
+        the chosen backend on ``self._runtime.custom``: its *name* under
+        ``"sandbox_backend"`` (observability) and the resolved
+        :class:`~plugin_sdk.SandboxStrategy` object under
+        ``"sandbox_backend_strategy"``. A sandbox-aware tool — currently
+        the Bash tool — reads the strategy object and routes its command
+        through it. When the resolver returns ``None`` both keys are
+        cleared so no stale backend leaks into a later un-sandboxed call.
+
+        **No-op guarantee.** With the default config — no
+        ``sandbox.backend`` configured — the resolver returns ``None``
+        at its branch 2 for every tool that sets no ``sandbox_preference``,
+        so this method clears two (never-set) keys and returns ``None``:
+        the tool then dispatches exactly as it did before M2. The
+        resolver is a true passthrough until the operator opts in.
+
+        Returns the backend name on success, ``None`` for "no sandbox".
+        Re-raises :class:`~plugin_sdk.SandboxUnavailable` (the resolver
+        raises it only for a ``sandbox_preference='required'`` tool with
+        no reachable backend under ``sandbox.fallback=error``) so the
+        caller can surface it as a tool error rather than crash dispatch.
+        Any *other* exception is swallowed (logged) — a resolver bug must
+        never break the tool-dispatch path.
+        """
+        tool = registry.get(call.name)
+        if tool is None:
+            return None
+        from opencomputer.sandbox.policy import SandboxScopeContext
+        from opencomputer.sandbox.resolver import resolve_backend
+        from plugin_sdk.sandbox import SandboxUnavailable
+
+        try:
+            session_id = ""
+            agent_id = None
+            runtime = self._runtime
+            if runtime is not None and runtime.custom:
+                session_id = str(runtime.custom.get("session_id") or "")
+                agent_id = runtime.custom.get("agent_id")
+            ctx = SandboxScopeContext(
+                session_id=session_id or None,
+                agent_id=str(agent_id) if agent_id else None,
+            )
+            backend = resolve_backend(tool, self.config, ctx)
+        except SandboxUnavailable:
+            # A ``required`` tool whose backend can't be resolved under
+            # the ``error`` fallback policy — let the caller turn this
+            # into an error ToolResult (replannable by the model).
+            raise
+        except Exception:  # noqa: BLE001 — a resolver bug must not break dispatch
+            _log.warning(
+                "sandbox resolver raised for tool %s — running un-sandboxed",
+                call.name,
+                exc_info=True,
+            )
+            backend = None
+
+        runtime = self._runtime
+        if runtime is None:
+            return None
+        if backend is None:
+            # No sandbox for this call — drop any stale keys so a prior
+            # call's backend can't leak into an un-sandboxed tool.
+            runtime.custom.pop(self._SANDBOX_BACKEND_KEY, None)
+            runtime.custom.pop(self._SANDBOX_STRATEGY_KEY, None)
+            return None
+        name = getattr(backend, "name", None)
+        runtime.custom[self._SANDBOX_BACKEND_KEY] = name
+        runtime.custom[self._SANDBOX_STRATEGY_KEY] = backend
+        return name
+
     async def _dispatch_tool_calls(
         self, calls: list[ToolCall], session_id: str = "", turn_index: int = 0
     ) -> list[Message]:
@@ -6120,6 +6223,33 @@ class AgentLoop:
                     self._tool_callback("start", c.name, c.id or "", c.arguments)
                 except Exception:
                     pass
+            # M2 (T2.6): resolve the sandbox backend for this call and
+            # publish it on the runtime context for sandbox-aware tools.
+            # With the default config (no sandbox.backend configured) the
+            # resolver returns None and this is a true no-op — the tool
+            # dispatches exactly as it did before M2. The only failure
+            # mode is a ``sandbox_preference='required'`` tool with no
+            # reachable backend under ``sandbox.fallback=error``: that
+            # surfaces as an error ToolResult here (the model can
+            # replan) rather than crashing the dispatch.
+            from plugin_sdk.sandbox import SandboxUnavailable
+
+            try:
+                self._resolve_sandbox_backend(c)
+            except SandboxUnavailable as _sbx_exc:
+                result = ToolResult(
+                    tool_call_id=c.id,
+                    content=f"Error: sandbox unavailable: {_sbx_exc}",
+                    is_error=True,
+                )
+                self._emit_tool_call_event(
+                    call=c,
+                    outcome="blocked",
+                    duration_seconds=_time.monotonic() - start,
+                    session_id=session_id,
+                    result=result,
+                )
+                return result
             try:
                 result = await registry.dispatch(
                     c,

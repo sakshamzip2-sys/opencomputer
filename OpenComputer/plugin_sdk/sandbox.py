@@ -45,12 +45,15 @@ class SandboxResult:
 
 # Allowed values for ``SandboxConfig.strategy``. ``"auto"`` lets
 # ``opencomputer.sandbox.auto_strategy`` pick the best available for the host.
+# ``"e2b"`` runs argv inside an ephemeral E2B cloud sandbox (Milestone 2);
+# it requires the optional ``e2b`` extra and an ``E2B_API_KEY``.
 SandboxStrategyName = Literal[
     "auto",
     "macos_sandbox_exec",
     "linux_bwrap",
     "docker",
     "ssh",
+    "e2b",
     "none",
 ]
 
