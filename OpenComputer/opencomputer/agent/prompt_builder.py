@@ -517,8 +517,28 @@ class PromptBuilder:
         ]
         if not nodes:
             return ""
-        ctx = session_context if session_context is not None else SessionContext()
-        ranked = UserFactsReranker().score(nodes, ctx)[:top_k]
+        ctx = (
+            session_context if session_context is not None else SessionContext()
+        )
+        # M4 — feed the reranker the decay (edge-recency) + drift signals.
+        # Drift is skipped unless a contradicts edge exists; the common
+        # case has none, so this stays cheap.
+        recency_scores: dict[str, float] = {}
+        for n in nodes:
+            rs = s.node_recency_score(n.node_id)
+            if rs is not None:
+                recency_scores[n.node_id] = rs
+        drift_scores: dict[str, float] = {}
+        if s.count_edges(kinds=("contradicts",)) > 0:
+            drift_scores = {
+                n.node_id: s.node_drift_score(n.node_id) for n in nodes
+            }
+        ranked = UserFactsReranker().score(
+            nodes,
+            ctx,
+            recency_scores=recency_scores,
+            drift_scores=drift_scores,
+        )[:top_k]
         if not ranked:
             return ""
         lines = [f"- ({sf.node.kind}) {sf.node.value[:80]}" for sf in ranked]

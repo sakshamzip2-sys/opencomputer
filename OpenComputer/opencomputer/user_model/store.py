@@ -593,6 +593,43 @@ class UserModelStore:
             )
             return int(cur.rowcount or 0)
 
+    def node_recency_score(self, node_id: str) -> float | None:
+        """Return the mean ``recency_weight`` of edges incident to a node.
+
+        Both incoming and outgoing edges count; self-loops de-dup.
+        Returns ``None`` when the node has no incident edges — many
+        profile-bootstrap nodes are edgeless, and the caller falls back
+        to a ``last_seen_at``-based recency for those. The decay engine
+        (:mod:`opencomputer.user_model.decay`) keeps ``recency_weight``
+        current.
+        """
+        incident: dict[str, Edge] = {}
+        for e in (
+            *self.list_edges(from_node=node_id, limit=10_000),
+            *self.list_edges(to_node=node_id, limit=10_000),
+        ):
+            incident[e.edge_id] = e
+        if not incident:
+            return None
+        return sum(e.recency_weight for e in incident.values()) / len(incident)
+
+    def node_drift_score(self, node_id: str) -> float:
+        """Return a ``[0, 1]`` drift penalty for a node.
+
+        Drift rises with the number and reliability of ``contradicts``
+        edges pointing AT the node, combined as
+        ``1 - Π(1 - source_reliability)`` — each contradiction chips
+        away at the node's standing without the total ever exceeding
+        1.0. A node nothing contradicts scores ``0.0``.
+        """
+        survive = 1.0
+        for e in self.list_edges(
+            kind="contradicts", to_node=node_id, limit=10_000
+        ):
+            sr = max(0.0, min(1.0, float(e.source_reliability)))
+            survive *= 1.0 - sr
+        return 1.0 - survive
+
     # ─── helpers ──────────────────────────────────────────────────────
 
     @staticmethod

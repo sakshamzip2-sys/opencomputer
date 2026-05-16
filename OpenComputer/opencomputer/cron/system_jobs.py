@@ -145,6 +145,10 @@ def run_system_tick() -> dict[str, str | int]:
     else:
         summary["motif_import"] = motif_result
 
+    # M4 — user-model edge decay. Self-gated to a daily cadence; a no-op
+    # on the ticks in between, so it is safe to call every system tick.
+    summary["decay_tick"] = _safe_call("decay_tick", _run_decay_tick)
+
     logger.info("system_tick summary: %s", summary)
     return summary
 
@@ -177,6 +181,48 @@ def _run_motif_import_tick() -> dict[str, int]:
         "edges_added": int(edges_added),
         "rejections": int(importer.rejections),
     }
+
+
+_DECAY_INTERVAL_SECONDS = 86400.0
+"""Minimum seconds between user-model decay passes — once per day."""
+
+
+def _run_decay_tick() -> int:
+    """Apply user-model edge decay, at most once per day.
+
+    ``DecayDriftScheduler`` (bus-attached) is never instantiated in the
+    running agent, so without this tick edge ``recency_weight`` would
+    never be recomputed and the reranker's recency signal would go
+    stale. A timestamp file gates the full-graph pass to a daily cadence
+    rather than every 5-minute system tick. Returns the number of edges
+    whose weight was rewritten — 0 when gated or on failure.
+    """
+    import time
+
+    try:
+        from opencomputer.user_model.decay import DecayEngine
+    except Exception:  # noqa: BLE001 — degrade gracefully
+        return 0
+    stamp = _home() / "user_model" / ".last_decay_tick"
+    now = time.time()
+    try:
+        if stamp.exists():
+            last = float(stamp.read_text().strip() or "0")
+            if now - last < _DECAY_INTERVAL_SECONDS:
+                return 0
+    except (OSError, ValueError):
+        pass  # unreadable / corrupt stamp → run decay and rewrite it
+    try:
+        updated = DecayEngine().apply_decay()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("decay_tick: apply_decay failed: %s", exc)
+        return 0
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(now))
+    except OSError as exc:  # noqa: BLE001
+        logger.warning("decay_tick: stamp write failed: %s", exc)
+    return int(updated)
 
 
 def _safe_call(name: str, fn):

@@ -127,13 +127,17 @@ _SECONDS_PER_DAY = 86400.0
 class RerankWeights:
     """Blend weights for :class:`UserFactsReranker`.
 
-    Defaults sum to 1.0 so the composite score stays in ``[0, 1]``.
+    The reranker renormalises the active weights, so they need not sum
+    to 1.0 — but the defaults do (kind+conf+recency+bm25 = 1.0). ``drift``
+    defaults to 0.0: the drift penalty is plumbed but inert until a
+    contradiction detector starts writing ``contradicts`` edges (M4).
     """
 
     kind: float = 0.40
     confidence: float = 0.20
     recency: float = 0.20
     bm25: float = 0.20
+    drift: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,41 +187,73 @@ class UserFactsReranker:
         nodes: Sequence[Node],
         context: SessionContext,
         *,
+        recency_scores: dict[str, float] | None = None,
+        drift_scores: dict[str, float] | None = None,
         now: float | None = None,
     ) -> list[ScoredFact]:
-        """Return ``nodes`` scored and sorted, highest score first."""
+        """Return ``nodes`` scored and sorted, highest score first.
+
+        ``recency_scores`` / ``drift_scores`` map ``node_id`` → a
+        ``[0, 1]`` signal from the decay engine and the drift detector
+        (:meth:`UserModelStore.node_recency_score` /
+        ``node_drift_score``). Both are optional: an absent recency score
+        falls back to ``last_seen_at`` age; an absent drift score is
+        treated as 0 (uncontradicted).
+        """
         reference = time.time() if now is None else float(now)
         w = self.weights
+        recency_scores = recency_scores or {}
+        drift_scores = drift_scores or {}
 
-        # BM25 across the whole candidate set, then max-normalise to
-        # [0, 1] so it composes with the other [0, 1] terms.
+        # BM25 across the candidate set, max-normalised to [0, 1].
         if context.is_context_free:
             bm25_norm = [0.0] * len(nodes)
-            active = w.kind + w.confidence + w.recency
-            wk = w.kind / active if active else 0.0
-            wc = w.confidence / active if active else 0.0
-            wr = w.recency / active if active else 0.0
-            wb = 0.0
+            wb_raw = 0.0
         else:
             query = " ".join(context.recent_messages)
             raw = bm25_scores(query, [n.value for n in nodes])
             top = max(raw, default=0.0)
             bm25_norm = [(s / top if top > 0 else 0.0) for s in raw]
-            wk, wc, wr, wb = w.kind, w.confidence, w.recency, w.bm25
+            wb_raw = w.bm25
+
+        # Renormalise the active weights so the composite stays in
+        # [0, 1] whatever the configured weights and whether BM25 is on.
+        total = w.kind + w.confidence + w.recency + wb_raw + w.drift
+        if total <= 0:
+            total = 1.0
+        wk = w.kind / total
+        wc = w.confidence / total
+        wr = w.recency / total
+        wb = wb_raw / total
+        wd = w.drift / total
 
         scored: list[ScoredFact] = []
         for node, bm25 in zip(nodes, bm25_norm, strict=True):
             kind_term = _KIND_PRIORITY.get(node.kind, 0.1)
             conf_term = max(0.0, min(1.0, node.confidence))
+            # Recency: blend the decay-maintained edge aggregate with
+            # last_seen_at age. Edgeless nodes use age alone.
             age_days = max(
                 0.0, (reference - node.last_seen_at) / _SECONDS_PER_DAY
             )
-            recency_term = 0.5 ** (age_days / _RECENCY_HALF_LIFE_DAYS)
+            age_recency = 0.5 ** (age_days / _RECENCY_HALF_LIFE_DAYS)
+            edge_recency = recency_scores.get(node.node_id)
+            if edge_recency is None:
+                recency_term = age_recency
+            else:
+                recency_term = (
+                    age_recency + max(0.0, min(1.0, edge_recency))
+                ) / 2.0
+            # Drift: a contradicted fact loses standing — drift 0 leaves
+            # the term whole, drift 1 zeroes it.
+            drift = max(0.0, min(1.0, drift_scores.get(node.node_id, 0.0)))
+            drift_term = 1.0 - drift
             composite = (
                 wk * kind_term
                 + wc * conf_term
                 + wr * recency_term
                 + wb * bm25
+                + wd * drift_term
             )
             scored.append(ScoredFact(
                 node=node,
@@ -227,6 +263,7 @@ class UserFactsReranker:
                     "confidence": conf_term,
                     "recency": recency_term,
                     "bm25": bm25,
+                    "drift": drift_term,
                 },
             ))
         scored.sort(key=lambda s: s.score, reverse=True)

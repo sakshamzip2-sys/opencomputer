@@ -315,3 +315,63 @@ def test_collapse_keeps_the_newest_edge(tmp_path: Path) -> None:
     survivors = store.list_edges()
     assert len(survivors) == 1
     assert survivors[0].edge_id == "new"
+
+
+def test_node_recency_score_averages_incident_edges(tmp_path: Path) -> None:
+    """node_recency_score is the mean recency_weight of incident edges."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    c = store.upsert_node(kind="preference", value="C")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           recency_weight=0.5))
+    store.insert_edge(Edge(edge_id="e2", kind="asserts",
+                           from_node=a.node_id, to_node=c.node_id,
+                           recency_weight=1.0))
+    assert store.node_recency_score(a.node_id) == 0.75
+
+
+def test_node_recency_score_is_none_for_edgeless_node(tmp_path: Path) -> None:
+    """An orphan node (no edges) has no edge-recency signal."""
+    store = _store(tmp_path)
+    n = store.upsert_node(kind="identity", value="name: X")
+    assert store.node_recency_score(n.node_id) is None
+
+
+def test_node_drift_score_zero_without_contradicts(tmp_path: Path) -> None:
+    """A node nothing contradicts has drift score 0."""
+    store = _store(tmp_path)
+    n = store.upsert_node(kind="preference", value="lives in Pune")
+    assert store.node_drift_score(n.node_id) == 0.0
+
+
+def test_node_drift_score_rises_with_contradiction(tmp_path: Path) -> None:
+    """An incoming contradicts edge from a reliable source drives drift up."""
+    store = _store(tmp_path)
+    target = store.upsert_node(kind="preference", value="lives in Pune")
+    rival = store.upsert_node(kind="preference", value="lives in Goa")
+    store.insert_edge(Edge(edge_id="c1", kind="contradicts",
+                           from_node=rival.node_id, to_node=target.node_id,
+                           source_reliability=1.0))
+    assert store.node_drift_score(target.node_id) == 1.0
+    # The rival itself is uncontradicted.
+    assert store.node_drift_score(rival.node_id) == 0.0
+
+
+def test_node_drift_score_combines_multiple_contradicts(
+    tmp_path: Path,
+) -> None:
+    """Two half-reliable contradictions compound, staying within [0, 1]."""
+    store = _store(tmp_path)
+    target = store.upsert_node(kind="preference", value="x")
+    r1 = store.upsert_node(kind="preference", value="r1")
+    r2 = store.upsert_node(kind="preference", value="r2")
+    for eid, rival in (("d1", r1), ("d2", r2)):
+        store.insert_edge(Edge(edge_id=eid, kind="contradicts",
+                               from_node=rival.node_id,
+                               to_node=target.node_id,
+                               source_reliability=0.5))
+    drift = store.node_drift_score(target.node_id)
+    assert drift == 0.75  # 1 - (1-0.5)*(1-0.5)
+    assert 0.0 <= drift <= 1.0

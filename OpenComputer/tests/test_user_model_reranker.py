@@ -93,13 +93,15 @@ def test_context_free_mode_drops_bm25_term() -> None:
     assert 0.0 <= out[0].score <= 1.0
 
 
-def test_breakdown_carries_all_four_terms() -> None:
+def test_breakdown_carries_all_terms() -> None:
     """Every ScoredFact exposes the per-term breakdown for `explain`."""
     r = UserFactsReranker()
     out = r.score(
         [_node()], SessionContext(recent_messages=("hello",)), now=_NOW,
     )
-    assert set(out[0].breakdown) == {"kind", "confidence", "recency", "bm25"}
+    assert set(out[0].breakdown) == {
+        "kind", "confidence", "recency", "bm25", "drift",
+    }
 
 
 def test_composite_score_stays_in_unit_range() -> None:
@@ -132,3 +134,49 @@ def test_custom_weights_isolate_a_single_term() -> None:
     # attribute wins because only BM25 is weighted.
     assert out[0].node.value == "writes python code"
     assert out[0].score > 0.0
+
+
+# ─── M4 — decay + drift terms ────────────────────────────────────────
+
+
+def test_drift_penalty_demotes_a_contradicted_fact() -> None:
+    """With w_drift weighted, a contradicted fact ranks below a clean one."""
+    r = UserFactsReranker(
+        RerankWeights(kind=0.0, confidence=0.0, recency=0.0, bm25=0.0,
+                      drift=1.0)
+    )
+    clean = _node(value="clean fact")
+    disputed = _node(value="disputed fact")
+    out = r.score(
+        [clean, disputed], SessionContext(), now=_NOW,
+        drift_scores={disputed.node_id: 0.9},
+    )
+    assert out[0].node.value == "clean fact"
+    assert out[0].score > out[1].score
+
+
+def test_edge_recency_blends_into_recency_term() -> None:
+    """A low edge-recency score pulls a fact's recency term down."""
+    r = UserFactsReranker(
+        RerankWeights(kind=0.0, confidence=0.0, recency=1.0, bm25=0.0,
+                      drift=0.0)
+    )
+    fresh = _node(value="fresh edge")
+    stale = _node(value="stale edge")
+    out = r.score(
+        [fresh, stale], SessionContext(), now=_NOW,
+        recency_scores={fresh.node_id: 1.0, stale.node_id: 0.05},
+    )
+    assert out[0].node.value == "fresh edge"
+
+
+def test_default_weights_keep_drift_inert() -> None:
+    """Default w_drift is 0 — drift_scores must not change the ranking."""
+    r = UserFactsReranker()
+    a, b = _node(value="fact a"), _node(value="fact b")
+    without = r.score([a, b], SessionContext(), now=_NOW)
+    with_drift = r.score(
+        [a, b], SessionContext(), now=_NOW,
+        drift_scores={a.node_id: 0.99, b.node_id: 0.0},
+    )
+    assert [s.score for s in without] == [s.score for s in with_drift]

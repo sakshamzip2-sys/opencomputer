@@ -302,7 +302,10 @@ def review(
     table.add_column("last seen", style="dim", no_wrap=True)
     table.add_column("source", style="dim", no_wrap=True)
     table.add_column("flags", no_wrap=True)
-    table.add_column("value", overflow="fold")
+    # 'value' uses Rich's default ellipsis overflow — on a narrow
+    # terminal a fact truncates to one readable line ("prefers Wed…")
+    # rather than folding into a 1-char-per-line vertical stack.
+    table.add_column("value")
 
     contradicted = 0
     for n in shown:
@@ -397,8 +400,16 @@ def _explain_session(console: Console, query: str | None) -> None:
     if not nodes:
         console.print("[dim]no facts to rank[/dim]")
         return
+    recency_scores: dict[str, float] = {}
+    for n in nodes:
+        rs = store.node_recency_score(n.node_id)
+        if rs is not None:
+            recency_scores[n.node_id] = rs
+    drift_scores = {n.node_id: store.node_drift_score(n.node_id) for n in nodes}
     ctx = SessionContext(recent_messages=(query,) if query else ())
-    scored = UserFactsReranker().score(nodes, ctx)[:20]
+    scored = UserFactsReranker().score(
+        nodes, ctx, recency_scores=recency_scores, drift_scores=drift_scores
+    )[:20]
     label = f"query={query!r}" if query else "context-free"
     table = Table(title=f"reranker score breakdown — top {len(scored)} ({label})")
     table.add_column("#", justify="right", style="dim")
@@ -408,6 +419,7 @@ def _explain_session(console: Console, query: str | None) -> None:
     table.add_column("conf✦", justify="right")
     table.add_column("recency✦", justify="right")
     table.add_column("bm25✦", justify="right")
+    table.add_column("drift✦", justify="right")
     table.add_column("score", justify="right", style="bold")
     for i, sf in enumerate(scored, start=1):
         b = sf.breakdown
@@ -415,7 +427,7 @@ def _explain_session(console: Console, query: str | None) -> None:
             str(i), sf.node.kind, sf.node.value[:40],
             f"{b['kind']:.2f}", f"{b['confidence']:.2f}",
             f"{b['recency']:.2f}", f"{b['bm25']:.2f}",
-            f"{sf.score:.3f}",
+            f"{b['drift']:.2f}", f"{sf.score:.3f}",
         )
     console.print(table)
     console.print(
