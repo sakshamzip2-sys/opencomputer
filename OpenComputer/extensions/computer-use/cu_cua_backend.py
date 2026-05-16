@@ -431,12 +431,42 @@ class CuaDriverBackend(ComputerUseBackend):
         return cua_driver_binary_available()
 
     # ── Capture ────────────────────────────────────────────────────
+    @staticmethod
+    def _is_system_chrome_strip(w: dict[str, Any]) -> bool:
+        """True for the macOS menu bar / dock shield — NOT a real app window.
+
+        Verified live against cua-driver 0.1.9: contrary to the upstream
+        ``describe`` text (which claims menu-bar strips are ``layer != 0``
+        and pre-filtered), the system menu bar surfaces as a *layer-0,
+        on-screen* ``list_windows`` record — e.g. ``Code`` window 7891 with
+        ``{x:0, y:-44, w:1920, h:44}``, empty title, and ``z_index`` HIGHER
+        than the app's real window. Its ``get_window_state`` root is
+        ``AXMenuBar``, not ``AXWindow``. Left in, it wins the frontmost-first
+        sort and ``capture()`` returns the menu bar instead of the app.
+
+        Discriminator (list_windows fields only — no extra round-trip): an
+        untitled, top-anchored (``y <= 0``), thin (``height <= 50``) strip.
+        Real app windows have a title, or sit below the menu bar, or are
+        taller than a 44 px strip — none are dropped by this.
+        """
+        b = w.get("bounds") or {}
+        try:
+            y = int(b.get("y", 0) or 0)
+            height = int(b.get("height", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return (not w.get("title")) and y <= 0 and 0 < height <= 50
+
     def _select_windows(self, app: str | None) -> list[dict[str, Any]]:
         """Resolve on-screen, layer-0 windows, frontmost-first, optional app filter."""
         lw_out = self._session.call_tool("list_windows", {"on_screen_only": True})
         windows = _parse_windows(lw_out)
-        # Layer-0 only — menubar strips / dock shields are layer != 0 noise.
-        windows = [w for w in windows if w["layer"] == 0]
+        # Layer-0 only — most dock shields are layer != 0 noise. The macOS
+        # menu bar, however, is reported as a layer-0 on-screen window by
+        # 0.1.9 (see ``_is_system_chrome_strip``), so a second geometry
+        # filter is required — the layer filter alone does NOT catch it.
+        windows = [w for w in windows
+                   if w["layer"] == 0 and not self._is_system_chrome_strip(w)]
         # Highest z_index = closest to front on the current Space (0.1.9 spec).
         windows.sort(key=lambda w: w["z_index"], reverse=True)
         if app:
@@ -538,10 +568,17 @@ class CuaDriverBackend(ComputerUseBackend):
             if payload:
                 tree = str(payload.get("tree_markdown", "") or "")
                 # click(x,y)/drag address the screenshot-pixel space of the
-                # PNG get_window_state returns. cua-driver 0.1.9's
-                # structuredContent reports that as ``screenshot_width`` /
-                # ``screenshot_height`` (NOT ``screenshot_original_*`` —
-                # those fields do not exist in 0.1.9). Prefer them over the
+                # image get_window_state returns. Verified live against
+                # cua-driver 0.1.9: the structuredContent carries BOTH
+                # ``screenshot_width``/``screenshot_height`` AND
+                # ``screenshot_original_width``/``screenshot_original_height``.
+                # The delivered image's actual pixel dimensions equal
+                # ``screenshot_width``/``screenshot_height`` (the downscaled
+                # form, capped by ``max_image_dimension``); the ``_original_*``
+                # pair is the pre-downscale window size and is NOT the
+                # coordinate space click(x,y) uses. So this reads
+                # ``screenshot_width``/``screenshot_height`` and deliberately
+                # ignores ``screenshot_original_*``. Prefer them over the
                 # list_windows ``bounds``, which are logical screen points
                 # and diverge from screenshot pixels by
                 # ``screenshot_scale_factor`` on a Retina display. The

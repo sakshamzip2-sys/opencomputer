@@ -1016,26 +1016,31 @@ class TestCuaBackend0_1_9CallSites:
         cap = b.capture(mode="som")
         assert cap.width == 1440 and cap.height == 900  # list_windows bounds
 
-    def test_capture_geometry_ignores_nonexistent_original_fields(self):
-        """Regression: cua-driver 0.1.9 has NO ``screenshot_original_width`` /
-        ``screenshot_original_height`` keys. Even if a payload carried them,
-        the backend must report ``screenshot_width``/``screenshot_height``
-        (the actual PNG pixels) — never the fictional ``_original`` keys."""
+    def test_capture_geometry_uses_screenshot_width_not_original(self):
+        """cua-driver 0.1.9 ships BOTH ``screenshot_width``/``screenshot_height``
+        AND ``screenshot_original_width``/``screenshot_original_height`` in the
+        get_window_state structuredContent (verified live: 1568x882 vs
+        1920x1080 on this host). The delivered image's actual pixel size — the
+        space click(x,y) addresses — equals ``screenshot_width`` /
+        ``screenshot_height`` (the downscaled form). The ``_original_*`` pair
+        is the pre-downscale window size and must NOT be reported."""
         gws = {
             "data": {
                 "tree_markdown": '- [0] AXWindow "x"\n',
                 "element_count": 1,
-                "screenshot_width": 2560, "screenshot_height": 1600,
-                # A stray key the parser must NOT honour.
-                "screenshot_original_width": 99999,
-                "screenshot_original_height": 88888,
+                # Real 0.1.9 payload carries both pairs.
+                "screenshot_width": 1568, "screenshot_height": 882,
+                "screenshot_original_width": 1920,
+                "screenshot_original_height": 1080,
+                "screenshot_scale_factor": 1,
             },
             "images": [], "structuredContent": None, "isError": False,
         }
         b = _backend_with_session({"list_windows": _LW_ONE_WINDOW,
                                    "get_window_state": gws})
         cap = b.capture(mode="som")
-        assert cap.width == 2560 and cap.height == 1600
+        # The downscaled image dims win — NOT the _original_ pre-downscale size.
+        assert cap.width == 1568 and cap.height == 882
 
     def test_capture_vision_uses_screenshot_tool_with_window_id(self):
         shot = {"data": "", "images": ["Zm9v"], "structuredContent": None,
@@ -1184,14 +1189,91 @@ class TestCuaBackend0_1_9CallSites:
         assert "hint" in out
 
     def test_error_message_helper_handles_dict_and_str(self):
-        """_error_message extracts a message from both shapes cua-driver
-        uses for isError detail (plain text and {'message': ...} JSON)."""
+        """_error_message extracts a message from both shapes it must tolerate.
+
+        Verified live against cua-driver 0.1.9: EVERY isError response
+        (get_window_state, screenshot, set_value, click, missing-required-arg)
+        delivers its detail as a *plain-string* text content block — the
+        ``{'message': ...}`` JSON form is never emitted by 0.1.9. The dict
+        branch is kept purely as defensive tolerance for a future shape."""
         em = cua_backend_mod._error_message
+        # The live shape: a plain string (json-decoded to a str by
+        # _extract_tool_result because it does not start with { or [).
+        assert em({"data": "No window with window_id 999999 exists."}) == \
+            "No window with window_id 999999 exists."
+        assert em({"data": "  raw text  "}) == "raw text"
+        # Defensive dict tolerance — not a live 0.1.9 shape.
         assert em({"data": {"message": "boom"}}) == "boom"
         assert em({"data": {"error": "bad"}}) == "bad"
-        assert em({"data": "  raw text  "}) == "raw text"
         assert em({"data": None}) == ""
         assert em({"data": {}}) == ""
+
+    def test_capture_skips_macos_menu_bar_strip(self):
+        """Regression — verified live: cua-driver 0.1.9 reports the macOS menu
+        bar as a layer-0, on-screen ``list_windows`` record (untitled, y=-44,
+        height=44, full display width) with a z_index HIGHER than the app's
+        real window. The frontmost-first sort would pick the menu bar and
+        capture() would return AXMenuBar elements instead of the app. The
+        geometry filter must drop it so the real window wins."""
+        lw = {
+            "data": None, "images": [], "isError": False,
+            "structuredContent": {
+                "current_space_id": 1,
+                "windows": [
+                    {  # the macOS menu bar strip — must be dropped
+                        "app_name": "Code", "pid": 38887, "window_id": 7891,
+                        "title": "", "is_on_screen": True, "layer": 0,
+                        "z_index": 5,
+                        "bounds": {"x": 0, "y": -44, "width": 1920,
+                                   "height": 44},
+                    },
+                    {  # the real app window — must be selected
+                        "app_name": "Code", "pid": 38887, "window_id": 1089,
+                        "title": "Computer Use — opencomputer",
+                        "is_on_screen": True, "layer": 0, "z_index": 4,
+                        "bounds": {"x": 0, "y": 0, "width": 1920,
+                                   "height": 1080},
+                    },
+                ],
+            },
+        }
+        gws = {
+            "data": {"tree_markdown": '- [0] AXWindow "Computer Use"\n',
+                     "element_count": 1},
+            "images": [], "structuredContent": None, "isError": False,
+        }
+        b = _backend_with_session({"list_windows": lw, "get_window_state": gws})
+        windows = b._select_windows(None)
+        # Only the real window survives the strip filter.
+        assert [w["window_id"] for w in windows] == [1089]
+        cap = b.capture(mode="som")
+        assert cap.window_title == "Computer Use — opencomputer"
+        assert b._active_window_id == 1089
+        # The get_window_state call targeted the real window, not the strip.
+        assert b._session.last("get_window_state")["window_id"] == 1089
+
+    def test_select_windows_keeps_real_windows_at_screen_top(self):
+        """The menu-bar filter must NOT drop a legitimate app window that
+        happens to sit at y<=0 — a real window is taller than the 50px
+        strip cutoff, or carries a title. Guards against over-filtering."""
+        lw = {
+            "data": None, "images": [], "isError": False,
+            "structuredContent": {
+                "current_space_id": 1,
+                "windows": [
+                    {  # a real maximized window anchored at y=0 — KEEP
+                        "app_name": "Safari", "pid": 1, "window_id": 10,
+                        "title": "", "is_on_screen": True, "layer": 0,
+                        "z_index": 3,
+                        "bounds": {"x": 0, "y": 0, "width": 1920,
+                                   "height": 1080},
+                    },
+                ],
+            },
+        }
+        b = _backend_with_session({"list_windows": lw})
+        windows = b._select_windows(None)
+        assert [w["window_id"] for w in windows] == [10]
 
 
 class TestAsyncBridgeLifecycle:
