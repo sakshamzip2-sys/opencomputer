@@ -1,10 +1,12 @@
 """ASCII art constants for the OpenComputer welcome banner.
 
-``OPENCOMPUTER_BLOCK_LOGO`` is the 71-col × 3-row half-block wordmark
-rendered by the active splash (``cli_banner.build_welcome_banner``).
+The active splash (``cli_banner.build_welcome_banner``) renders the
+Hermes-style ``ansi_shadow`` wordmarks — ``OPEN_COMPUTER_LOGO_HERMES_STYLE``
+(one-line, wide terminals) or ``OPEN_COMPUTER_LOGO_HERMES_STACKED``
+(stacked, narrow terminals). ``OPENCOMPUTER_BLOCK_LOGO``,
 ``OPENCOMPUTER_LOGO`` and ``SIDE_GLYPH`` are kept for backwards compat
-with external consumers and test fixtures; the active splash does not
-render them.
+with external consumers and test fixtures; the active splash no longer
+renders them.
 """
 from __future__ import annotations
 
@@ -39,13 +41,11 @@ SIDE_GLYPH = r"""
         .::::::.
 """
 
-# Active logo: half-block "Solid" wordmark of OPENCOMPUTER from the
-# 2026-05-10 banner-redesign handoff (variant A · recommended). 71
-# cols × 3 rows. Built from a single 5×6-pixel grid per glyph,
-# converted to half-blocks (▀ ▄ █). Every letter same width, same
-# x-height, same stroke. Rendered in light rose #E91E78 by
-# build_welcome_banner; narrow terminals fall back to a one-line
-# inline title.
+# Legacy half-block "Solid" wordmark of OPENCOMPUTER from the 2026-05-10
+# banner-redesign. 71 cols × 3 rows, half-blocks (▀ ▄ █). Kept for
+# back-compat with tests / external consumers; the active splash no
+# longer renders it — narrow terminals now get the stacked Hermes-style
+# wordmark (OPEN_COMPUTER_LOGO_HERMES_STACKED).
 OPENCOMPUTER_BLOCK_LOGO = (
     "▄▀▀▀▄ █▀▀▀▄ █▀▀▀▀ █▄  █ ▄▀▀▀▀ ▄▀▀▀▄ █▄ ▄█ █▀▀▀▄ █   █ ▀▀█▀▀ █▀▀▀▀ █▀▀▀▄\n"
     "█   █ █▄▄▄▀ █▄▄   █ █ █ █     █   █ █ ▀ █ █▄▄▄▀ █   █   █   █▄▄   █▄▄▄▀\n"
@@ -68,6 +68,28 @@ OPEN_COMPUTER_LOGO_HERMES_STYLE = """[bold #FF3D8A] ██████╗ ██
 [#C2185B] ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝       ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝      ╚═════╝    ╚═╝   ╚══════╝╚═╝  ╚═╝[/]"""
 
 OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH = 110  # widest row, cell-counted
+
+
+# 2026-05-15 — stacked Hermes-style wordmark for terminals too narrow
+# for the 110-col one-line OPEN_COMPUTER_LOGO_HERMES_STYLE. Same chunky
+# ``ansi_shadow`` figlet font, "OPEN" stacked over "COMPUTER" (70 cols ×
+# 12 rows), hand-colored with the same 3-tier pink gradient per word.
+# Generated via pyfiglet.figlet_format("OPEN" | "COMPUTER",
+# font="ansi_shadow").
+OPEN_COMPUTER_LOGO_HERMES_STACKED = """[bold #FF3D8A] ██████╗ ██████╗ ███████╗███╗   ██╗[/]
+[bold #FF3D8A]██╔═══██╗██╔══██╗██╔════╝████╗  ██║[/]
+[#E91E78]██║   ██║██████╔╝█████╗  ██╔██╗ ██║[/]
+[#E91E78]██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║[/]
+[#C2185B]╚██████╔╝██║     ███████╗██║ ╚████║[/]
+[#C2185B] ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝[/]
+[bold #FF3D8A] ██████╗ ██████╗ ███╗   ███╗██████╗ ██╗   ██╗████████╗███████╗██████╗ [/]
+[bold #FF3D8A]██╔════╝██╔═══██╗████╗ ████║██╔══██╗██║   ██║╚══██╔══╝██╔════╝██╔══██╗[/]
+[#E91E78]██║     ██║   ██║██╔████╔██║██████╔╝██║   ██║   ██║   █████╗  ██████╔╝[/]
+[#E91E78]██║     ██║   ██║██║╚██╔╝██║██╔═══╝ ██║   ██║   ██║   ██╔══╝  ██╔══██╗[/]
+[#C2185B]╚██████╗╚██████╔╝██║ ╚═╝ ██║██║     ╚██████╔╝   ██║   ███████╗██║  ██║[/]
+[#C2185B] ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝      ╚═════╝    ╚═╝   ╚══════╝╚═╝  ╚═╝[/]"""
+
+OPEN_COMPUTER_LOGO_HERMES_STACKED_WIDTH = 70  # widest row ("COMPUTER")
 
 
 # Laurels Braille-art (user-supplied, generated via laurels.py from the

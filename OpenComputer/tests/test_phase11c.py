@@ -189,16 +189,19 @@ async def test_mcp_connection_unknown_transport_returns_false() -> None:
 # ─── opencomputer mcp CLI round-trip ───────────────────────────────────
 
 
-def _runner_invoke(args: list[str]):
+def _runner_invoke(args: list[str], input: str | None = None):
     """Build the `opencomputer mcp` subapp standalone so tests don't need to
-    touch the full opencomputer typer (which imports MCPManager etc.)."""
+    touch the full opencomputer typer (which imports MCPManager etc.).
+
+    ``input`` feeds stdin — used by the interactive `mcp add` picker tests.
+    """
     import typer
 
     from opencomputer.cli_mcp import mcp_app
 
     root = typer.Typer()
     root.add_typer(mcp_app, name="mcp")
-    return CliRunner().invoke(root, args)
+    return CliRunner().invoke(root, args, input=input)
 
 
 def test_mcp_cli_add_then_list_round_trips(tmp_home: Path) -> None:
@@ -293,6 +296,69 @@ def test_mcp_cli_add_rejects_duplicate_name(tmp_home: Path) -> None:
     result = _runner_invoke(["mcp", "add", "dup", "--transport", "stdio", "--command", "echo"])
     assert result.exit_code != 0
     assert "already exists" in result.stdout
+
+
+def test_mcp_cli_add_no_args_non_tty_emits_hint(tmp_home: Path) -> None:
+    """No args + no TTY → exit 2 with a hint mentioning presets and install."""
+    result = _runner_invoke(["mcp", "add"])  # CliRunner stdin is not a TTY
+    assert result.exit_code != 0
+    body = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
+    assert "presets" in body.lower()
+    assert "install" in body.lower()
+
+
+def test_mcp_cli_add_no_args_tty_renders_picker(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No args + TTY + user picks 'filesystem' → preset installed."""
+    monkeypatch.setattr("opencomputer.cli_mcp._stdin_is_tty", lambda: True)
+    result = _runner_invoke(["mcp", "add"], input="filesystem\n")
+    assert result.exit_code == 0
+    assert "installed" in result.stdout.lower()
+    cfg = load_config()
+    assert any(s.name == "filesystem" for s in cfg.mcp.servers)
+
+
+def test_mcp_cli_add_no_args_tty_custom_prints_examples(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No args + TTY + 'custom' → exit 0 with example flag shapes printed."""
+    monkeypatch.setattr("opencomputer.cli_mcp._stdin_is_tty", lambda: True)
+    result = _runner_invoke(["mcp", "add"], input="custom\n")
+    assert result.exit_code == 0
+    assert "--transport stdio" in result.stdout
+    assert "--transport http" in result.stdout
+    cfg = load_config()
+    assert not any(s.name == "my-server" for s in cfg.mcp.servers)
+
+
+def test_mcp_cli_add_no_args_tty_empty_input_aborts(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty input at the prompt is treated as a silent abort (exit 0)."""
+    monkeypatch.setattr("opencomputer.cli_mcp._stdin_is_tty", lambda: True)
+    result = _runner_invoke(["mcp", "add"], input="\n")
+    assert result.exit_code == 0
+
+
+def test_mcp_cli_add_no_args_tty_eof_aborts_130(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exhausted stdin (EOF) at the prompt aborts with exit 130 — same
+    branch as Ctrl-C / KeyboardInterrupt."""
+    monkeypatch.setattr("opencomputer.cli_mcp._stdin_is_tty", lambda: True)
+    result = _runner_invoke(["mcp", "add"], input="")
+    assert result.exit_code == 130
+
+
+def test_mcp_cli_add_no_args_tty_unknown_preset_errors(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown slug → exit 1 with a hint to run `mcp presets`."""
+    monkeypatch.setattr("opencomputer.cli_mcp._stdin_is_tty", lambda: True)
+    result = _runner_invoke(["mcp", "add"], input="does-not-exist\n")
+    assert result.exit_code == 1
+    assert "unknown preset" in result.stdout.lower()
 
 
 def test_mcp_cli_remove(tmp_home: Path) -> None:

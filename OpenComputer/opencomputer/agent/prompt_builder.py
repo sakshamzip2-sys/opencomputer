@@ -250,6 +250,24 @@ class PromptContext:
     #: live :func:`platform.system` value when ``PromptBuilder.build``
     #: constructs the context, but downstream callers may override.
     os_name: str = ""
+    #: HostProfile wiring (2026-05-15) — startup host-environment
+    #: fingerprint threaded into the ``# System info`` block of
+    #: ``base.j2``. Sourced from :func:`plugin_sdk.detect_host`. Each
+    #: field has a safe default so callers that don't pass a host
+    #: profile (legacy tests / direct ``PromptContext(...)`` construction)
+    #: render an unchanged-shape prompt.
+    #:   * ``arch``           — CPU architecture ("arm64" / "x86_64").
+    #:   * ``os_pretty``      — human OS label ("macOS 14.3").
+    #:   * ``cpu_logical``    — logical CPU count.
+    #:   * ``total_ram_gb``   — total RAM in GiB.
+    #:   * ``is_headless``    — Linux-with-no-display flag.
+    #:   * ``is_container``   — Docker/LXC/Kubernetes flag.
+    arch: str = ""
+    os_pretty: str = ""
+    cpu_logical: int = 0
+    total_ram_gb: float = 0.0
+    is_headless: bool = False
+    is_container: bool = False
     #: V3.A-T3 — workspace-context slot reserved for T8 (CLAUDE.md /
     #: OPENCOMPUTER.md / AGENTS.md aggregation). Defaults to ``""`` so
     #: ``base.j2`` omits the section until the loader is wired. Existing
@@ -387,6 +405,12 @@ class PromptBuilder:
                 _now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         else:
             _now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # HostProfile wiring (2026-05-15) — one cached probe of the host
+        # fingerprint. ``detect_host`` is process-cached + failure-isolated
+        # so this is cheap and can never raise into the prompt build.
+        from plugin_sdk import detect_host
+
+        host = detect_host()
         ctx = PromptContext(
             cwd=os.getcwd(),
             user_home=str(Path.home()),
@@ -396,7 +420,13 @@ class PromptBuilder:
             user_profile=profile,
             soul=soul,
             user_facts=user_facts,
-            os_name=platform.system() or "",
+            os_name=host.os_name or platform.system() or "",
+            arch=host.arch,
+            os_pretty=host.os_pretty,
+            cpu_logical=host.cpu_logical,
+            total_ram_gb=host.total_ram_gb,
+            is_headless=host.is_headless,
+            is_container=host.is_container,
             workspace_context=workspace_context,
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
@@ -418,6 +448,12 @@ class PromptBuilder:
             soul=ctx.soul,
             user_facts=ctx.user_facts,
             os_name=ctx.os_name,
+            arch=ctx.arch,
+            os_pretty=ctx.os_pretty,
+            cpu_logical=ctx.cpu_logical,
+            total_ram_gb=ctx.total_ram_gb,
+            is_headless=ctx.is_headless,
+            is_container=ctx.is_container,
             workspace_context=ctx.workspace_context,
             plan_mode=ctx.plan_mode,
             yolo_mode=ctx.yolo_mode,

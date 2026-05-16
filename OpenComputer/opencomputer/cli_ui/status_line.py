@@ -2,10 +2,10 @@
 
 Renders a single bottom-bar row mirroring Claude Code's UX:
 
-    ⚕ claude-opus-4-7 │ 12.4K/200K │ [██████░░░░] 6% │ $0.06 │ 15m
+    ◆ claude-opus-4-7  ·  ctx 12.4K/200K ██████░░░░ 6%  ·  $0.06  ·  15m
 
 Components:
-  1. ``⚕ `` (U+2695) prefix
+  1. ``◆ `` (U+25C6) prefix — see the redesign note on ``PREFIX`` below
   2. Model id (from ``runtime.custom["model_id"]``)
   3. Tokens used / max-context — formatted ``12.4K`` / ``200K``
   4. 10-char unicode progress bar (U+2588 + U+2591)

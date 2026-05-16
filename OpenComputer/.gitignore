@@ -112,3 +112,18 @@ oc-webui/
 # Parallel-session workspaces (worktree-style scratch dirs created by
 # concurrent Claude Code sessions). Should never enter the OC repo.
 hermes-workspace/
+
+# Exception: oc-workspace is the vendored hermes-workspace fork (v2.3.0),
+# the alternative web UI bound via `oc workspace`. It is a Node/TypeScript
+# project, so its `lib/` directories are real source — NOT the Python
+# packaging `lib/` build artifact ignored above — and the
+# `src/routes/api/sessions/` route directory is a TanStack route, NOT the
+# OpenComputer runtime `sessions/` dir ignored above. Without these
+# re-includes git silently drops 52 source files (37 in src/lib/ alone),
+# 219 modules fail to resolve `@/lib/*`, and `oc workspace build` breaks
+# on every fresh clone / in CI. Third repeat of this bug — see the
+# ui-web / ui-tui exceptions above (caught 2026-05-07 and 2026-05-08).
+!oc-workspace/**/lib/
+!oc-workspace/**/lib/**
+!oc-workspace/src/routes/api/sessions/
+!oc-workspace/src/routes/api/sessions/**

@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from opencomputer.workspace.discovery import (
-    DEFAULT_DEV_SOURCES_PATH,
     WorkspaceNotFoundError,
     discover_workspace_dir,
     is_valid_workspace_dir,
@@ -121,12 +120,12 @@ def test_failure_lists_all_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     profile = tmp_path / "no-such-profile"
     # Reroute Path.home so global candidate misses too.
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "no-such-home"))
-    # Force the dev fallback to a non-existent path; otherwise on the
-    # author's machine the real /Users/saksham/Vscode/claude/sources/
-    # hermes-workspace exists and discovery succeeds.
+    # Force the in-repo workspace candidate to a non-existent path —
+    # OpenComputer/oc-workspace/ now exists in every source checkout, so
+    # without this the discovery would succeed instead of failing.
     monkeypatch.setattr(
-        "opencomputer.workspace.discovery.DEFAULT_DEV_SOURCES_PATH",
-        tmp_path / "no-such-dev-fallback",
+        "opencomputer.workspace.discovery.IN_REPO_WORKSPACE_PATH",
+        tmp_path / "no-such-in-repo-workspace",
     )
 
     with pytest.raises(WorkspaceNotFoundError) as exc_info:
@@ -140,7 +139,7 @@ def test_failure_lists_all_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     # Should include profile-local, global, and the dev fallback.
     assert any("no-such-profile" in str(p) for p in searched)
     assert any(".opencomputer/workspace" in str(p) for p in searched)
-    assert any("no-such-dev-fallback" in str(p) for p in searched)
+    assert any("no-such-in-repo-workspace" in str(p) for p in searched)
 
 
 def test_empty_env_var_treated_as_unset(tmp_path: Path) -> None:

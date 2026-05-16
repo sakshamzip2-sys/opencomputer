@@ -75,6 +75,71 @@ def register(api) -> None:  # PluginAPI is duck-typed
         except Exception:
             pass
 
+    # §9.8 profile-handoff: register a rebind handler that re-points
+    # AGENT_BROWSER_PROFILE on profile swap + flushes active browser
+    # sessions so the next browser tool call re-launches with the new
+    # user-data-dir. Without this, swapping profiles mid-conversation
+    # leaves cookies/OAuth state stuck in the original profile's
+    # browser-profile directory.
+    #
+    # Resolve the cleanup callable AT plugin-load time, when the plugin
+    # dir is on sys.path. The handler runs LATER (during a swap) when
+    # that path entry is gone — a lazy import would fail with
+    # ImportError. We capture the bound function reference into a
+    # closure so the handler doesn't import anything at run time.
+    try:
+        from dispatcher import (  # type: ignore[import-not-found]
+            _emergency_cleanup_all_sessions as _cleanup_browser_sessions,
+        )
+    except Exception:
+        _cleanup_browser_sessions = None  # type: ignore[assignment]
+
+    def _rebind_browser_profile(new_home, old_home):  # noqa: ANN001
+        """Update env var + drop browser sessions on profile swap.
+
+        Browser sessions are owned by the agent-browser daemon. We don't
+        force a restart; instead we tear down the in-process Python-side
+        session bookkeeping so the next tool call sees zero sessions
+        and re-attaches against the new env var. The daemon's own
+        cleanup runs idempotently.
+        """
+        from pathlib import Path as _Path
+
+        try:
+            new_profile_root = (
+                new_home.parent if new_home.name == "home" else new_home
+            )
+            new_browser_dir = _Path(new_profile_root) / "browser-profile"
+            new_browser_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["AGENT_BROWSER_PROFILE"] = str(new_browser_dir)
+        except Exception:
+            # Best-effort: a broken path resolution still lets the next
+            # tool call surface a useful "could not create user-data-dir"
+            # error rather than wedging the swap.
+            return
+
+        # Use the import resolved at plugin-load time, not lazy-loaded.
+        if _cleanup_browser_sessions is not None:
+            try:
+                _cleanup_browser_sessions()
+            except Exception:
+                # Cleanup is best-effort; sessions die at next-request
+                # timeout if this swallows a real error.
+                return
+
+    # The PluginAPI register helper is added by §9.8; older PluginAPI
+    # versions silently no-op (the attribute won't exist) which is
+    # acceptable backwards-compat.
+    if hasattr(api, "register_profile_rebind_handler"):
+        try:
+            api.register_profile_rebind_handler(
+                "browser-harness", _rebind_browser_profile, priority=160,
+            )
+        except Exception:
+            # Older PluginAPI signature or registry shape — never block
+            # plugin load on the rebind plumbing.
+            pass
+
     # Auto-set --no-sandbox + --headless=new on display-less Linux.
     # agent-browser only auto-adds --no-sandbox in containers/root; KVM
     # VPS deployments (Hostinger etc.) are non-root non-container Linux

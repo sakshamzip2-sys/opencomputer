@@ -296,6 +296,36 @@ except SingleInstanceError as e:
 `PluginRegistry.load_all` catches this internally and downgrades it to
 a WARNING so one contended plugin doesn't block the rest.
 
+### `HostProfile`
+
+`@dataclass(frozen=True, slots=True)` snapshot of the host environment,
+captured once at startup. Fields cover the OS (`os_name`, `os_pretty`,
+`os_version`, `arch`, `python_version`), hardware (`cpu_logical`,
+`cpu_physical`, `total_ram_gb`), and display / sandbox state
+(`display_server`, `is_headless`, `is_container`, `is_wsl`, `hostname`).
+Every field has a safe default, so a partially-failed probe still yields
+a usable instance. `summary_line()` returns a compact one-line
+fingerprint for prompts and logs.
+
+Plugins that must adapt to the host lean on the display / sandbox
+fields — e.g. a Linux computer-use backend keys its `xdotool` vs
+`ydotool` choice off `display_server`.
+
+### `detect_host`
+
+`detect_host() -> HostProfile` returns the process-cached `HostProfile`.
+The host doesn't change within a process lifetime, so the result is
+memoised (`functools.cache`) — repeated calls return the *same*
+instance. Every probe is failure-isolated, so this never raises.
+
+```python
+from plugin_sdk import HostProfile, detect_host
+
+host: HostProfile = detect_host()
+if host.display_server == "wayland":
+    ...  # pick ydotool over xdotool
+```
+
 ---
 
 ## Tool contract

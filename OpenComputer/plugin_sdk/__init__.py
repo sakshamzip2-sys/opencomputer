@@ -71,6 +71,7 @@ from plugin_sdk.hooks import (
     HookHandler,
     HookSpec,
 )
+from plugin_sdk.host_profile import HostProfile, detect_host
 from plugin_sdk.inference import (
     Motif,
     MotifExtractor,
@@ -244,6 +245,12 @@ __all__ = [
     "RequestContext",
     "DynamicInjectionProvider",
     "InjectionContext",
+    # host profile (2026-05-15) — startup host-environment fingerprint.
+    # arch / OS pretty-name / CPU / RAM / display server / container +
+    # headless flags. Plugins (e.g. a Linux computer-use backend picking
+    # xdotool vs ydotool) and the agent system prompt both consume it.
+    "HostProfile",
+    "detect_host",
     # doctor
     "HealthContribution",
     "HealthRunFn",

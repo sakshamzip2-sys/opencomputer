@@ -1131,6 +1131,106 @@ class SessionDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
+    # ─── lifecycle / rebind (§9.2 profile-handoff) ──────────────────
+
+    def close(self) -> None:
+        """No-op: ``SessionDB`` opens fresh connections per operation.
+
+        Provided for API parity with ``HandoffAuditLogger.close()`` /
+        provider clients / browser harness — the rebind registry calls
+        close() on subsystems that exit lifecycle. ``SessionDB`` has no
+        persistent connection to close, so this is a documented no-op
+        that's safe to call any number of times.
+        """
+        # Idempotent by design. Defensive: no exception even if called
+        # after the underlying file is gone or path is unset.
+        return None
+
+    def rebind(
+        self,
+        new_db_path: Path,
+        *,
+        source_session_id: str | None = None,
+        target_profile: str | None = None,
+    ) -> None:
+        """Re-point this SessionDB at a different sqlite file.
+
+        Closes §9.2 of
+        ``docs/plans/profile-handoff-investigation.md``: after a
+        profile swap, chat history must continue in the new profile's
+        ``sessions.db`` instead of stranding it in the original
+        profile's.
+
+        Optionally writes a continuation pointer row to the OLD
+        database so :meth:`resume_session` / ``oc resume`` can detect
+        the mid-session swap and direct the user to the new profile.
+
+        Args:
+            new_db_path: Path of the new sqlite file. Created with
+                migrations applied if absent.
+            source_session_id: If provided, write a continuation
+                marker row into the OLD DB for this session id, so a
+                later ``oc resume`` against the OLD profile can hint
+                the user toward the NEW profile. Skipped when ``None``
+                (e.g. before any session has been opened).
+            target_profile: Display name of the target profile, used
+                in the continuation marker body. Defaults to "<unknown>"
+                if not supplied.
+
+        Raises:
+            TypeError: ``new_db_path`` is not a ``Path``.
+        """
+        import time
+
+        if not isinstance(new_db_path, Path):
+            raise TypeError(
+                f"new_db_path must be a Path, got {type(new_db_path).__name__}"
+            )
+
+        # No-op when re-binding to the same file.
+        if new_db_path == self.db_path:
+            return
+
+        # Continuation marker — written into the OLD DB BEFORE swap.
+        # Only when a session is actually in flight (source_session_id
+        # given); a fresh-process rebind has nothing to continue.
+        if source_session_id:
+            target_label = (target_profile or "<unknown>").strip() or "<unknown>"
+            marker_body = (
+                f"[profile-swap] This session continued in profile "
+                f"{target_label!r} at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}. "
+                f"To resume, run: oc -p {target_label} chat -c {source_session_id}"
+            )
+            try:
+                with self._txn() as conn:
+                    # Ensure the session exists so the FK is satisfied —
+                    # idempotent: ensure_session is no-op if it already does.
+                    conn.execute(
+                        "INSERT OR IGNORE INTO sessions(id, platform, model, "
+                        "title, started_at) VALUES (?, ?, ?, ?, ?)",
+                        (source_session_id, "cli", "", "", time.time()),
+                    )
+                    conn.execute(
+                        "INSERT INTO messages(session_id, role, content, "
+                        "timestamp) VALUES (?, ?, ?, ?)",
+                        (source_session_id, "system", marker_body, time.time()),
+                    )
+            except Exception:  # noqa: BLE001 — best-effort marker; never block rebind
+                # Log via the module logger if available; otherwise swallow.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "SessionDB.rebind: continuation marker write failed for "
+                    "session=%s — rebind continues",
+                    source_session_id,
+                    exc_info=True,
+                )
+
+        # Swap the path. The next _connect() call goes to the new file.
+        new_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = new_db_path
+        # Apply migrations to the new file (idempotent if already created).
+        self._init_schema()
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(
             self.db_path,

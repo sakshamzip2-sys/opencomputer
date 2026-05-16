@@ -27,9 +27,10 @@ from typing import TYPE_CHECKING
 from opencomputer import __version__
 from opencomputer.cli_banner_art import (
     OPEN_COMPUTER_CADUCEUS_PINK,
+    OPEN_COMPUTER_LOGO_HERMES_STACKED,
+    OPEN_COMPUTER_LOGO_HERMES_STACKED_WIDTH,
     OPEN_COMPUTER_LOGO_HERMES_STYLE,
     OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH,
-    OPENCOMPUTER_BLOCK_LOGO,
     OPENCOMPUTER_LOGO_FALLBACK,
 )
 
@@ -64,7 +65,14 @@ _DIVIDER = _BORDER
 
 # Layout knobs.
 _WORDMARK_MIN_WIDTH = OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH + 2
-_PANEL_MIN_WIDTH = 70           # below this, drop the panel and just print plain text
+# Panel responsiveness — three tiers. At/above _PANEL_TWO_COL_MIN_WIDTH
+# the laurel + runtime sit BESIDE tools/skills (two-column grid).
+# Between _PANEL_MIN_WIDTH and that: one boxed column, hero stacked OVER
+# the sections, so the narrow right side no longer shreds the tool/skill
+# lists. Below _PANEL_MIN_WIDTH: drop the box (Rich borders eat too many
+# cells to be worth it on a tiny terminal).
+_PANEL_MIN_WIDTH = 44           # below this: no box, plain stacked text
+_PANEL_TWO_COL_MIN_WIDTH = 88   # at/above this: two columns; below: single column
 _TOOLS_MAX_TOOLSETS = 12        # show first N toolset rows
 _SKILLS_MAX_CATEGORIES = 20     # show first N skill-category rows (matches Hermes density)
 _PER_GROUP_CHAR_BUDGET = 60     # truncate ``cat: a, b, c, ...`` if items >N chars
@@ -482,9 +490,11 @@ def _build_right_column(
 
 
 def _render_wordmark(console: Console, term_width: int) -> None:
-    """Render the colored ``OPEN-COMPUTER`` ansi_shadow wordmark above the
-    panel. Narrow-terminal fallback: drop to the half-block logo, then to
-    plain text.
+    """Render the colored Hermes-style ``ansi_shadow`` wordmark above the
+    panel. Wide terminals get the one-line ``OPEN-COMPUTER`` logo;
+    narrower ones get the same chunky font stacked ``OPEN`` over
+    ``COMPUTER``; a pathologically narrow terminal falls back to plain
+    text.
     """
     from rich.text import Text
 
@@ -497,17 +507,20 @@ def _render_wordmark(console: Console, term_width: int) -> None:
         )
         return
 
-    # Half-block fallback at moderate widths (≥73 cols).
-    block_rows = OPENCOMPUTER_BLOCK_LOGO.rstrip("\n").splitlines()
-    block_width = max((len(r) for r in block_rows), default=0)
-    if term_width >= block_width + 2:
-        for row in block_rows:
-            console.print(
-                Text(row, style=_TITLE, no_wrap=True, overflow="ignore"),
-                soft_wrap=True,
-                no_wrap=True,
-                overflow="ignore",
-            )
+    # Stacked Hermes-style fallback — same ``ansi_shadow`` font, OPEN
+    # over COMPUTER, so the chunky wordmark still fits terminals too
+    # narrow for the 110-col one-line logo. The stacked art is exactly
+    # OPEN_COMPUTER_LOGO_HERMES_STACKED_WIDTH cols, so render it down to
+    # that exact width — it fits edge-to-edge and never wraps (no_wrap
+    # below). This keeps it aligned with the panel, which boxes from the
+    # same width.
+    if term_width >= OPEN_COMPUTER_LOGO_HERMES_STACKED_WIDTH:
+        console.print(
+            Text.from_markup(OPEN_COMPUTER_LOGO_HERMES_STACKED),
+            no_wrap=True,
+            overflow="ignore",
+            soft_wrap=False,
+        )
         return
 
     # Pathological narrow: plain bold "OPENCOMPUTER".
@@ -529,14 +542,22 @@ def _render_panel(
     mcp_status: list[dict] | None,
     term_width: int,
 ) -> None:
-    """Render the rounded-bordered panel: caduceus+runtime | tools+skills+mcp.
+    """Render the responsive welcome panel — three width tiers.
 
-    Falls back to plain stacked text below ``_PANEL_MIN_WIDTH`` so the
-    splash stays usable on truly narrow terminals (CI logs, mobile SSH).
+    * ``>= _PANEL_TWO_COL_MIN_WIDTH`` — boxed, two columns: laurel +
+      runtime beside tools/skills/mcp.
+    * ``>= _PANEL_MIN_WIDTH`` — boxed, single column: the same blocks
+      stacked, so the tool/skill lists get the panel's full inner width
+      instead of being crushed into a ~35-cell right column.
+    * below ``_PANEL_MIN_WIDTH`` — no box, plain stacked text (Rich
+      borders eat too many cells to be worth it on a tiny terminal —
+      CI logs, mobile SSH).
     """
     from rich import box
+    from rich.console import Group
     from rich.panel import Panel
     from rich.table import Table
+    from rich.text import Text
 
     left = _build_left_column(model, provider, cwd, session_id, session_label)
     # Apply the prefix-derived recategorization to skills so a flat
@@ -551,29 +572,36 @@ def _render_panel(
 
     if term_width < _PANEL_MIN_WIDTH:
         # Stacked, unboxed — Rich Panel borders eat too many cells on
-        # narrow terminals.
+        # truly tiny terminals.
         console.print(left, highlight=False)
         console.print()
         console.print(right, highlight=False)
         return
 
-    table = Table.grid(padding=(0, 2))
-    # Left column: caduceus + runtime info. The ``_build_left_column``
-    # composite is internally aligned (caduceus centered, runtime
-    # left), so we leave ``justify`` at its default (no Table.grid
-    # override) and let the contents control their own justification.
-    table.add_column()
-    table.add_column(justify="left")
-    table.add_row(left, right)
-
     title = f"[bold {_TITLE}]{format_banner_version_label()}[/]"
-    # Tightened from padding=(0, 2) to (0, 1) — the 2-cell horizontal
-    # padding inside the border added perceived whitespace on both
-    # sides without serving the layout. The Table.grid's own
-    # ``padding=(0, 2)`` (between columns) still spaces the hero from
-    # the sections by 2 cells, which is enough breathing room.
+
+    if term_width < _PANEL_TWO_COL_MIN_WIDTH:
+        # Single-column boxed — below ~88 cols the 31-cell laurel art
+        # leaves the two-column right side too narrow and the tool /
+        # skill lists shred into 2-3 word fragments. Stack the hero
+        # over the sections so each gets the panel's full inner width.
+        body = Group(left, Text(""), Text.from_markup(right, end=""))
+    else:
+        # Two-column grid — laurel + runtime beside tools/skills/mcp.
+        # ``_build_left_column`` is internally aligned (caduceus
+        # centered, runtime left), so the grid leaves ``justify`` at its
+        # default and lets the contents align themselves.
+        table = Table.grid(padding=(0, 2))
+        table.add_column()
+        table.add_column(justify="left")
+        table.add_row(left, right)
+        body = table
+
+    # padding=(0, 1) — 2-cell horizontal padding inside the border added
+    # whitespace without serving the layout. In the two-column body the
+    # grid's own ``padding=(0, 2)`` still spaces hero from sections.
     panel = Panel(
-        table,
+        body,
         title=title,
         border_style=_BORDER,
         box=box.ROUNDED,
@@ -638,9 +666,12 @@ def build_welcome_banner(
 
     Layout (top to bottom):
 
-      1. Pink ``OPEN-COMPUTER`` ansi_shadow wordmark (≥112 cols), with
-         half-block fallback (≥73 cols) and plain-text fallback below.
-      2. Rounded panel titled ``OpenComputer v{ver} · {sha}``:
+      1. Pink Hermes-style ``ansi_shadow`` wordmark — one-line
+         ``OPEN-COMPUTER`` (≥112 cols) or stacked ``OPEN``/``COMPUTER``
+         (≥72 cols), with a plain-text fallback below.
+      2. Rounded panel titled ``OpenComputer v{ver} · {sha}`` —
+         responsive: two columns side-by-side when wide, one stacked
+         column when narrower, unboxed plain text on a tiny terminal:
          - left column: Braille caduceus (centered) over a left-aligned
            runtime block: ``{model}`` (accent) ``· {provider}`` (dim),
            ``{cwd}`` (dim), ``Session: {label}`` (gray), and a

@@ -56,6 +56,21 @@ def _save_servers(servers: tuple[MCPServerConfig, ...]) -> Path:
     return save_config(new_cfg)
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is an interactive terminal.
+
+    Wrapped in a helper (rather than calling ``sys.stdin.isatty()`` inline)
+    so tests can monkeypatch it — ``CliRunner`` swaps ``sys.stdin`` for a
+    fake stream during ``invoke()``, which a direct patch can't reach.
+    """
+    import sys
+
+    try:
+        return sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
+
+
 def _enforce_osv_malware_check(
     command: str, args: tuple[str, ...] | list[str], skip: bool
 ) -> None:
@@ -262,7 +277,9 @@ def list_bundles() -> None:
 
 @mcp_app.command("add")
 def add_server(
-    name: str = typer.Argument(..., help="Server name (used as tool prefix)."),
+    name: str | None = typer.Argument(
+        None, help="Server name (used as tool prefix). Omit for the interactive preset picker."
+    ),
     transport: str = typer.Option("stdio", "--transport", "-t", help="stdio | sse | http"),
     command: str = typer.Option(
         "", "--command", "-c", help="(stdio) Executable, e.g. python3 or npx."
@@ -284,9 +301,15 @@ def add_server(
 ) -> None:
     """Add a new MCP server to config.yaml.
 
-    For stdio: --command + --arg(s) + --env(s).
-    For sse/http: --url + optional --header(s) for auth.
+    With no NAME on a TTY: interactively pick from the bundled presets.
+    With NAME: manual flag-driven shape —
+    for stdio: --command + --arg(s) + --env(s);
+    for sse/http: --url + optional --header(s) for auth.
     """
+    if name is None:
+        _add_discovery_flow(disabled=disabled, skip_osv_check=skip_osv_check)
+        return
+
     if transport not in ("stdio", "sse", "http"):
         raise typer.BadParameter(f"transport must be stdio | sse | http (got {transport!r})")
     if transport == "stdio" and not command:
@@ -322,6 +345,67 @@ def add_server(
         f"[green]added[/green] {name} ({transport}) → {path}"
         f"  [dim]{'enabled' if new_server.enabled else 'disabled'}[/dim]"
     )
+
+
+def _add_discovery_flow(*, disabled: bool, skip_osv_check: bool) -> None:
+    """Bare ``mcp add`` entry point — render presets, prompt, delegate.
+
+    On a TTY: shows the preset table, prompts for a slug, and routes the
+    pick through ``mcp_install`` so OSV pre-flight, env-var status, and the
+    homepage line behave identically to ``mcp install <slug>``. On a
+    non-TTY (CI / piped) it keeps the strict no-args error so scripts don't
+    silently change shape.
+    """
+    from opencomputer.mcp.presets import PRESETS, get_preset
+
+    if not _stdin_is_tty():
+        console.print(
+            "[red]error:[/red] Missing argument 'NAME'.\n\n"
+            f"[dim]Hint: run `oc mcp add` interactively to pick from {len(PRESETS)} "
+            "bundled presets, or `oc mcp install <slug>` directly. "
+            "Run `oc mcp presets` to list them.[/dim]"
+        )
+        raise typer.Exit(code=2)
+
+    console.print("\n[dim]No name given — here's what's available.[/dim]\n")
+    # Reuse the exact `mcp presets` table so formatting never diverges.
+    mcp_presets()
+    console.print(
+        "\n[bold]Pick a preset slug to install, "
+        "or 'custom' to add a server by hand[/bold] [dim](Enter to abort).[/dim]"
+    )
+
+    from rich.prompt import Prompt
+
+    try:
+        choice = Prompt.ask("slug", console=console, default="", show_default=False)
+    except (KeyboardInterrupt, EOFError):
+        raise typer.Exit(code=130) from None
+    choice = choice.strip().lower()
+
+    if not choice:
+        raise typer.Exit(code=0)  # silent abort — empty input
+
+    if choice == "custom":
+        console.print(
+            "\n[bold]Custom server.[/bold] Re-run with the flag shape, for example:\n"
+            "\n    oc mcp add my-server --transport stdio --command npx "
+            "--arg -y --arg some-mcp-package"
+            "\n    oc mcp add my-server --transport http  --url https://example.com/mcp "
+            '--header "Authorization=Bearer XYZ"'
+            "\n\n[dim]See `oc mcp add --help` for the full flag list.[/dim]"
+        )
+        return
+
+    if get_preset(choice) is None:
+        console.print(
+            f"[red]error:[/red] unknown preset {choice!r}. "
+            "Run `oc mcp presets` to see the full list."
+        )
+        raise typer.Exit(code=1)
+
+    # Delegate so behaviour never diverges from `oc mcp install <slug>`.
+    mcp_install(preset=choice, name="", disabled=disabled, skip_osv_check=skip_osv_check)
 
 
 @mcp_app.command("remove")
@@ -533,10 +617,19 @@ def mcp_presets() -> None:
         console.print("[dim]No presets bundled.[/dim]")
         return
 
-    table = Table(title=f"MCP Presets ({len(PRESETS)})")
+    # show_lines draws a rule between every preset so the multi-line
+    # descriptions don't run together; expand + a ratio on Description
+    # hands it the terminal's spare width so each entry wraps to fewer
+    # lines and reads with more breathing room.
+    table = Table(
+        title=f"MCP Presets ({len(PRESETS)})",
+        show_lines=True,
+        expand=True,
+        padding=(0, 1),
+    )
     table.add_column("Slug", style="cyan", no_wrap=True)
-    table.add_column("Description")
-    table.add_column("Required env", style="yellow")
+    table.add_column("Description", ratio=1)
+    table.add_column("Required env", style="yellow", no_wrap=True)
     for slug, p in PRESETS.items():
         env_str = ", ".join(p.required_env) or "—"
         table.add_row(slug, p.description, env_str)

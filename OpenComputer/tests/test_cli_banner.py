@@ -52,6 +52,7 @@ def test_ascii_art_constants_exist():
     """
     from opencomputer.cli_banner_art import (
         OPEN_COMPUTER_CADUCEUS_PINK,
+        OPEN_COMPUTER_LOGO_HERMES_STACKED,
         OPEN_COMPUTER_LOGO_HERMES_STYLE,
         OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH,
         OPENCOMPUTER_BLOCK_LOGO,
@@ -73,6 +74,10 @@ def test_ascii_art_constants_exist():
     assert "OPEN-COMPUTER" not in OPEN_COMPUTER_LOGO_HERMES_STYLE  # rendered as art, not text
     assert "██" in OPEN_COMPUTER_LOGO_HERMES_STYLE  # solid-block letterforms
     assert OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH > 100
+    # Stacked Hermes wordmark — narrow-terminal variant, same ansi_shadow font.
+    assert isinstance(OPEN_COMPUTER_LOGO_HERMES_STACKED, str)
+    assert "██" in OPEN_COMPUTER_LOGO_HERMES_STACKED  # solid-block letterforms
+    assert len(OPEN_COMPUTER_LOGO_HERMES_STACKED.splitlines()) == 12  # OPEN / COMPUTER
     assert isinstance(OPEN_COMPUTER_CADUCEUS_PINK, str)
     assert "⠀" in OPEN_COMPUTER_CADUCEUS_PINK or "⣿" in OPEN_COMPUTER_CADUCEUS_PINK
 
@@ -168,6 +173,11 @@ def _render(monkeypatch, *, width=140, tools=None, skills=None, **kwargs):
         **kwargs,
     )
     return buf.getvalue()
+
+
+def _has_braille(text: str) -> bool:
+    """True if ``text`` contains any Braille-block glyph (the laurel art)."""
+    return any(0x2800 <= ord(ch) <= 0x28FF for ch in text)
 
 
 def test_renders_hermes_style_ansi_shadow_wordmark(monkeypatch):
@@ -404,13 +414,20 @@ def test_accepts_all_legacy_kwargs_without_error(monkeypatch):
     )
 
 
-def test_narrow_terminal_falls_back_gracefully(monkeypatch):
-    """Below ``_WORDMARK_MIN_WIDTH`` we drop the ansi_shadow art and use
-    a smaller fallback. Splash must not crash and must still print the
-    OpenComputer name.
+def test_narrow_terminal_renders_stacked_hermes_wordmark(monkeypatch):
+    """Below ``_WORDMARK_MIN_WIDTH`` but ≥72 cols, the splash renders the
+    stacked Hermes-style ``ansi_shadow`` wordmark — same chunky font as
+    the wide one-liner, just OPEN stacked over COMPUTER. The legacy
+    half-block fallback must not regress back in.
     """
     out = _render(monkeypatch, width=80)
-    assert "OpenComputer" in out or "OPENCOMPUTER" in out
+    assert "OpenComputer" in out  # panel title still renders
+    # Stacked ansi_shadow blocks present...
+    assert "██╗" in out
+    assert "╔" in out
+    assert "╚" in out
+    # ...and the legacy half-block art does NOT.
+    assert "▄▀▀▀▄" not in out
 
 
 def test_pathologically_narrow_does_not_crash(monkeypatch):
@@ -418,6 +435,59 @@ def test_pathologically_narrow_does_not_crash(monkeypatch):
     out = _render(monkeypatch, width=20)
     # Plain fallback at min: bold OPENCOMPUTER appears.
     assert "OPENCOMPUTER" in out
+
+
+def test_panel_single_column_boxed_at_medium_width(monkeypatch):
+    """Between _PANEL_MIN_WIDTH and _PANEL_TWO_COL_MIN_WIDTH the panel is
+    boxed but single-column — hero stacked over the sections. The box
+    must close and every section must survive.
+    """
+    out = _render(
+        monkeypatch,
+        width=78,
+        tools={"core": ["Bash", "Edit", "Read"]},
+        skills={"general": ["debug-python"]},
+    )
+    assert "╭" in out and "╰" in out  # boxed
+    assert "Available Tools" in out
+    assert "Available Skills" in out
+    assert "Bash" in out and "debug-python" in out
+    # Single-column: the Tools header sits on its OWN line, not sharing a
+    # line with the laurel art (sharing would mean two-column).
+    tools_lines = [ln for ln in out.splitlines() if "Available Tools" in ln]
+    assert tools_lines, "Available Tools header missing"
+    assert not _has_braille(tools_lines[0]), (
+        "Available Tools shares a line with the laurel art — that is the "
+        "two-column layout; expected single-column at width 78"
+    )
+
+
+def test_panel_two_column_boxed_at_wide_width(monkeypatch):
+    """At/above _PANEL_TWO_COL_MIN_WIDTH the panel is two-column — the
+    laurel art and the Tools header render on the SAME line.
+    """
+    out = _render(monkeypatch, width=140, tools={"core": ["Bash"]})
+    tools_lines = [ln for ln in out.splitlines() if "Available Tools" in ln]
+    assert tools_lines, "Available Tools header missing"
+    assert _has_braille(tools_lines[0]), (
+        "Available Tools is on its own line — expected two-column layout "
+        "with the laurel art beside it at width 140"
+    )
+
+
+def test_panel_unboxed_below_min_width(monkeypatch):
+    """Below _PANEL_MIN_WIDTH the panel drops the box entirely; section
+    content still renders and the splash still finishes cleanly.
+    """
+    out = _render(
+        monkeypatch,
+        width=38,
+        tools={"core": ["Bash"]},
+        skills={"general": ["x"]},
+    )
+    assert "╭" not in out and "╰" not in out  # no box
+    assert "Available Tools" in out  # content still rendered
+    assert "Welcome to OpenComputer!" in out  # splash finished
 
 
 def test_empty_model_and_cwd_do_not_crash(monkeypatch):

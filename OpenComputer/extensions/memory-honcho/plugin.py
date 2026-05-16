@@ -147,3 +147,27 @@ def register(api: Any) -> None:
         )
         return
     register_fn(provider)
+
+    # §9.8 profile-handoff: rebuild the Honcho client against the new
+    # profile's env (HONCHO_API_KEY, HONCHO_BASE_URL, namespace) on
+    # profile swap. The dotenv handler at priority 20 has already
+    # updated os.environ — we re-read and rebuild.
+    def _rebind_honcho(new_home, old_home):  # noqa: ANN001, ARG001
+        try:
+            new_provider = HonchoSelfHostedProvider(_config_from_env())
+            register_fn(new_provider)  # idempotent — replaces
+        except Exception:
+            import logging
+            logging.getLogger("memory-honcho").warning(
+                "Honcho rebind after profile swap failed; memory mirror "
+                "may still point at old profile's namespace",
+                exc_info=True,
+            )
+
+    if hasattr(api, "register_profile_rebind_handler"):
+        try:
+            api.register_profile_rebind_handler(
+                "memory-honcho", _rebind_honcho, priority=155,
+            )
+        except Exception:
+            pass

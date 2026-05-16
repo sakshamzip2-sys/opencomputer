@@ -70,9 +70,28 @@ def cycle_profile(runtime: Any) -> str | None:
 def consume_pending_profile_swap(runtime: Any) -> str | None:
     """Apply ``pending_profile_id`` if set. Called at turn entry.
 
-    Pure: only mutates ``runtime.custom`` and writes the sticky
-    ``active_profile`` file. Memory rebinding and prompt-cache eviction
-    are the caller's responsibility (handled in ``agent/loop.py``).
+    Mutates **three** sources of truth in lockstep so every code path
+    that resolves "what is the active profile" sees the new value:
+
+    1. ``runtime.custom["active_profile_id"]`` (this process, agent loop)
+    2. ``~/.opencomputer/active_profile`` sticky file (filesystem, all
+       processes — read by :func:`scope_subprocess_env`)
+    3. ``os.environ["OPENCOMPUTER_HOME"]`` (this process — read by
+       :func:`_home`, dotenv, plugin path resolution)
+
+    Plus best-effort reset of the
+    ``plugin_sdk.profile_context.current_profile_home`` ContextVar so
+    plugins that pinned it to the old profile see the new one on next
+    lazy resolution.
+
+    Closes the §3 split-brain documented in
+    ``docs/plans/profile-handoff-investigation.md``: before this fix,
+    only (1) + (2) updated, leaving in-process callers of ``_home()``
+    pinned to the old profile while subprocesses saw the new one.
+
+    Memory rebinding and prompt-cache eviction remain the caller's
+    responsibility (handled in ``agent/loop.py``); this helper only
+    owns the three-state environment switch.
 
     Returns the new active profile id, or ``None`` if no swap occurred.
     """
@@ -83,8 +102,38 @@ def consume_pending_profile_swap(runtime: Any) -> str | None:
     if pending == current:
         return None
 
-    from opencomputer.profiles import write_active_profile
+    import os
+
+    from opencomputer.profiles import get_profile_dir, write_active_profile
+
+    # (2) sticky file
     write_active_profile(None if pending == "default" else pending)
+
+    # (3) env var — this closes §3 split-brain. ``get_profile_dir(None)``
+    # returns the default root (~/.opencomputer/ or test-override via
+    # OPENCOMPUTER_HOME_ROOT); ``get_profile_dir(name)`` returns
+    # ~/.opencomputer/profiles/<name>/. Either way it's the canonical
+    # path that _home() should resolve to going forward. Subprocesses
+    # spawned BEFORE this point inherited the old value at fork-time
+    # and keep it (correct); subprocesses spawned AFTER inherit the new
+    # value (correct). The mutation is therefore safe — no retroactive
+    # surprise for in-flight children.
+    new_home = get_profile_dir(None if pending == "default" else pending)
+    os.environ["OPENCOMPUTER_HOME"] = str(new_home)
+
+    # Reset the plugin-sdk ContextVar so any plugin task that pinned it
+    # to the old profile cedes back to the env-var-resolved default on
+    # next read. We do NOT set it to the new home — that would mask
+    # the plugin's per-task scoping intent. Resetting to None means
+    # plugin_sdk re-reads the env var (which we just updated).
+    try:
+        from plugin_sdk.profile_context import current_profile_home
+
+        current_profile_home.set(None)
+    except Exception:  # noqa: BLE001 — plugin_sdk shape change shouldn't wedge swap
+        pass
+
+    # (1) runtime.custom
     runtime.custom["active_profile_id"] = pending
     return pending
 
