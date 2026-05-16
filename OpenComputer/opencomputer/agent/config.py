@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from opencomputer.agent.context_pruning import ContextPruningConfig
     from opencomputer.agent.tokenjuice import TokenjuiceConfig
+    from opencomputer.sandbox.policy import SandboxPolicy
 
 
 def _default_tokenjuice_config() -> Any:
@@ -37,6 +38,14 @@ def _default_context_pruning_config() -> Any:
     from opencomputer.agent.context_pruning import ContextPruningConfig
 
     return ContextPruningConfig()
+
+
+def _default_sandbox_policy() -> Any:
+    """Lazy import — keeps the ``opencomputer.sandbox`` package out of the
+    ``config`` module's import graph (``config`` loads very early)."""
+    from opencomputer.sandbox.policy import SandboxPolicy
+
+    return SandboxPolicy()
 
 
 def _home() -> Path:
@@ -365,6 +374,26 @@ class DelegationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RepetitionDetectorConfig:
+    """Thresholds for the agent-loop repetition detector.
+
+    Consumed by ``opencomputer.agent.loop_safety.LoopDetector`` (the
+    OpenClaw-1.C anti-loop / repetition detector). Defaults match that
+    class's own constructor defaults, so a config that omits the
+    ``loop.repetition`` block behaves exactly as before this was added.
+    """
+
+    max_tool_repeats: int = 3
+    """Identical ``(tool, args)`` calls within the window that flag a loop."""
+    max_text_repeats: int = 2
+    """Identical assistant-message repeats within the window that flag a loop."""
+    window_size: int = 10
+    """Sliding-window size — how many recent calls / messages are tracked."""
+    max_consecutive_flags: int = 2
+    """Consecutive flagged records before the loop hard-stops (``must_stop``)."""
+
+
+@dataclass(frozen=True, slots=True)
 class LoopConfig:
     """Behavior of the main agent loop.
 
@@ -433,6 +462,13 @@ class LoopConfig:
     the caller's role argument. Hermes parity with
     ``delegation.orchestrator_enabled``."""
     delegation: DelegationConfig = field(default_factory=lambda: DelegationConfig())
+    #: 2026-05-16 — tunable thresholds for the loop_safety.LoopDetector
+    #: repetition detector (Hermes + OpenClaw parity, M1). Until now the
+    #: detector was constructed with hardcoded defaults; this makes it
+    #: config-tunable. Defaults match the prior hardcoded values.
+    repetition: RepetitionDetectorConfig = field(
+        default_factory=RepetitionDetectorConfig
+    )
     """Subagent model/provider override. None values inherit parent.
 
     Hermes parity with ``delegation.{model,provider,base_url,api_key}``."""
@@ -1698,6 +1734,14 @@ class Config:
     #: dispatcher falls through to the active profile's default agent
     #: template (current behavior, fully backwards-compatible).
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    #: 2026-05-16 — sandbox scope policy (Hermes + OpenClaw parity, M1).
+    #: ``scope=none`` (default) means sandboxing is off — exact pre-M1
+    #: behavior — so upgrading users see zero change until they run
+    #: ``oc sandbox enable``. Persisted as the top-level ``sandbox:``
+    #: block; because it carries a ``SandboxScope`` enum it is parsed
+    #: separately in ``config_store.load_config`` rather than through the
+    #: generic override walker — same handling as the ``routing:`` block.
+    sandbox: SandboxPolicy = field(default_factory=_default_sandbox_policy)
     #: 2026-05-10 — Pinned files mechanism (Optimize Grade E mitigation).
     #: Files listed here get their content injected into the system prompt
     #: at session start, so the agent doesn't re-read them via the Read
@@ -1809,6 +1853,7 @@ __all__ = [
     "split_or_routing_suffix",
     "split_hf_routing_suffix",
     "DelegationConfig",
+    "RepetitionDetectorConfig",
     "GoalJudgeConfig",
     "ModelConfig",
     "LoopConfig",

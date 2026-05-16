@@ -23,6 +23,7 @@ from opencomputer.agent.config import (
     _home,
     default_config,
 )
+from opencomputer.sandbox.policy import SandboxPolicy
 
 _log = logging.getLogger("opencomputer.config")
 
@@ -970,6 +971,22 @@ def load_config(path: Path | None = None) -> Config:
     # v1.1 plan-3 M10.1 (2026-05-09) — top-level `routing:` block.
     routing_block = raw.pop("routing", None)
     parsed_routing = _parse_routing_block(routing_block)
+    # M1 sandbox parity (2026-05-16) — top-level `sandbox:` block. Popped
+    # and parsed separately: it carries a `SandboxScope` enum, which the
+    # generic override walker would store as a bare str. Same pattern as
+    # the `routing:` and `hooks:` blocks above. An invalid scope is a
+    # config typo — surface it loudly, like the timezone check below.
+    sandbox_block = raw.pop("sandbox", None)
+    parsed_sandbox: SandboxPolicy | None
+    if sandbox_block is None:
+        parsed_sandbox = None
+    else:
+        try:
+            parsed_sandbox = SandboxPolicy.from_mapping(sandbox_block)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid sandbox config in {cfg_path}: {exc}"
+            ) from exc
 
     # G9 (Hermes parity, 2026-05-09) — normalize the nested
     # ``tools: {include, exclude, prompts, resources}`` form into the
@@ -1005,6 +1022,7 @@ def load_config(path: Path | None = None) -> Config:
         or parsed_agent_hooks
         or parsed_http_hooks
         or parsed_routing
+        or parsed_sandbox is not None
     ):
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
         if parsed_hooks:
@@ -1017,6 +1035,8 @@ def load_config(path: Path | None = None) -> Config:
             kwargs["http_hooks"] = parsed_http_hooks
         if parsed_routing is not None:
             kwargs["routing"] = parsed_routing
+        if parsed_sandbox is not None:
+            kwargs["sandbox"] = parsed_sandbox
         cfg = Config(**kwargs)
     return cfg
 
@@ -1124,6 +1144,12 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
             routing_dict["default"] = default_out
         if routing_dict:
             result["routing"] = routing_dict
+    # M1 sandbox parity (2026-05-16) — sandbox scope policy. Emit only
+    # when non-default so existing configs stay tidy. Uses the policy's
+    # own serializer (round-trips ``SandboxPolicy.from_mapping``); the
+    # scope enum renders as its plain-string value, so it is yaml-safe.
+    if cfg.sandbox != SandboxPolicy():
+        result["sandbox"] = cfg.sandbox.to_mapping()
     # 2026-05-10 — pinned files (Optimize Grade E mitigation). Only
     # serialize when non-default so first-run configs stay clean.
     prompt_cfg = getattr(cfg, "prompt", None)

@@ -34,7 +34,11 @@ from opencomputer.agent.compaction import CompactionEngine
 from opencomputer.agent.config import Config
 from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
-from opencomputer.agent.loop_safety import LoopAbortError, LoopDetector
+from opencomputer.agent.loop_safety import (
+    LoopAbortError,
+    LoopDetector,
+    record_loop_trip,
+)
 from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.agent.memory_context import MemoryContext
@@ -1078,7 +1082,13 @@ class AgentLoop:
         # can't poison the parent's window even if a future refactor
         # hot-paths a single LoopDetector across loops. Default thresholds
         # are permissive; healthy sessions never trip.
-        self._loop_detector = LoopDetector()
+        _rep_cfg = config.loop.repetition
+        self._loop_detector = LoopDetector(
+            max_tool_repeats=_rep_cfg.max_tool_repeats,
+            max_text_repeats=_rep_cfg.max_text_repeats,
+            window_size=_rep_cfg.window_size,
+            max_consecutive_flags=_rep_cfg.max_consecutive_flags,
+        )
 
         # Wave-5 T1 — Hermes-port tool-loop guard. Detects identical
         # tool-name+args repetition within a turn and either warns
@@ -3075,10 +3085,20 @@ class AgentLoop:
                         sid, _loop_depth, _text_hash,
                     )
                     if self._loop_detector.must_stop(sid, _loop_depth):
-                        raise LoopAbortError(
+                        _trip_detail = (
                             self._loop_detector.warning(sid, _loop_depth)
-                            or "loop detector aborted",
+                            or "loop detector aborted"
                         )
+                        # M1 (2026-05-16): record the abort to audit.db
+                        # before raising — telemetry for post-hoc tuning.
+                        record_loop_trip(
+                            self.config.home / "audit.db",
+                            session_id=sid,
+                            depth=_loop_depth,
+                            kind="text",
+                            detail=_trip_detail,
+                        )
+                        raise LoopAbortError(_trip_detail)
 
                 # PR #221 follow-up Item 2 — persist the per-turn deltas onto
                 # the ``sessions`` row so ``/usage`` (and any future analytics)
@@ -3741,6 +3761,15 @@ class AgentLoop:
                 # message rather than letting the model spin.
                 _flagged_this_turn = False
                 for _tc in step.assistant_message.tool_calls or []:
+                    # M1 (2026-05-16): tools that declare ``loop_safe`` —
+                    # build-status pollers, retry-with-backoff tools — opt
+                    # out of repetition detection; their correct use IS to
+                    # repeat with identical args.
+                    _rec_tool = registry.get(_tc.name)
+                    if _rec_tool is not None and getattr(
+                        _rec_tool, "loop_safe", False
+                    ):
+                        continue
                     try:
                         _args_blob = json.dumps(
                             _tc.arguments or {}, sort_keys=True, default=str,
@@ -3758,10 +3787,20 @@ class AgentLoop:
                         sid, _loop_depth, _tc.name, _args_hash,
                     )
                     if self._loop_detector.must_stop(sid, _loop_depth):
-                        raise LoopAbortError(
+                        _trip_detail = (
                             self._loop_detector.warning(sid, _loop_depth)
-                            or "loop detector aborted",
+                            or "loop detector aborted"
                         )
+                        # M1 (2026-05-16): record the abort to audit.db
+                        # before raising — telemetry for post-hoc tuning.
+                        record_loop_trip(
+                            self.config.home / "audit.db",
+                            session_id=sid,
+                            depth=_loop_depth,
+                            kind="tool",
+                            detail=_trip_detail,
+                        )
+                        raise LoopAbortError(_trip_detail)
                     if (
                         not _flagged_this_turn
                         and self._loop_detector.flagged(sid, _loop_depth)

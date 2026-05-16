@@ -96,6 +96,14 @@ class SandboxConfig:
     is also accepted). Ignored by other strategies. Validated against a
     strict regex before use; metacharacters refused outright."""
 
+    container_key: str | None = None
+    """Stable container identity for scope-based container reuse. ``None``
+    (default) → each invocation gets a fresh transient container, which
+    preserves the historical per-call behavior. The sandbox runner sets
+    this from the active sandbox scope policy. Only the Docker strategy
+    consumes it — the host-process strategies (bwrap / macOS / ssh / none)
+    have no container to key and ignore it."""
+
     # Reserved for future expansion (e.g. seccomp profile, syscall allowlist).
     # Kept frozen so callers can hash + compare configs.
     _reserved: tuple[str, ...] = field(default=(), repr=False)

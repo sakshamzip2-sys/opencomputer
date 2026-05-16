@@ -27,8 +27,14 @@ to mutate the loop's safety state.
 
 from __future__ import annotations
 
+import logging
+import sqlite3
+import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
+
+_log = logging.getLogger("opencomputer.agent.loop_safety")
 
 
 class LoopAbortError(RuntimeError):
@@ -219,4 +225,58 @@ class LoopDetector:
         return frame.consecutive_flags >= self.max_consecutive_flags
 
 
-__all__ = ["LoopAbortError", "LoopDetector"]
+def record_loop_trip(
+    audit_db_path: Path,
+    *,
+    session_id: str,
+    depth: int,
+    kind: str,
+    detail: str,
+) -> None:
+    """Append a loop-abort event to the ``tool_loop_trips`` table of audit.db.
+
+    Called by the agent loop when :meth:`LoopDetector.must_stop` fires and a
+    :class:`LoopAbortError` is about to be raised. ``kind`` is ``"tool"`` or
+    ``"text"`` — which repetition window tripped; ``detail`` is the
+    human-readable warning text.
+
+    The table is created on first use (it co-exists with the F1 HMAC chain
+    tables in the same ``audit.db`` file — loop trips are operational
+    telemetry, not chained security events, so they get a plain table).
+
+    Best-effort: a SQLite failure is logged at WARNING and swallowed — loop
+    telemetry must never wedge the agent loop (the same three-tier-swallow
+    contract the session counters follow).
+    """
+    try:
+        conn = sqlite3.connect(audit_db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS tool_loop_trips ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " ts REAL NOT NULL,"
+                " session_id TEXT NOT NULL,"
+                " depth INTEGER NOT NULL,"
+                " kind TEXT NOT NULL,"
+                " detail TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO tool_loop_trips"
+                " (ts, session_id, depth, kind, detail)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (time.time(), session_id, depth, kind, detail),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        _log.warning(
+            "loop-detection: failed to write a trip to audit.db at %s "
+            "(the agent loop continues; the trip was still logged and "
+            "raised as LoopAbortError)",
+            audit_db_path,
+            exc_info=True,
+        )
+
+
+__all__ = ["LoopAbortError", "LoopDetector", "record_loop_trip"]
