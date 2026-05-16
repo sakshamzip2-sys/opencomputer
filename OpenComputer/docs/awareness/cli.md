@@ -84,6 +84,29 @@ oc awareness correct 7c2e... "name: Saksham" --confirm    # identity → --confi
 Correcting a fact to its current value is a no-op. Identity facts require
 `--confirm`.
 
+## `oc awareness migrate`
+
+Clean up legacy graph cruft accumulated before the M2 write-boundary fixes.
+
+```bash
+oc awareness migrate            # dry-run — prints the plan, changes nothing
+oc awareness migrate --apply    # perform the migration
+```
+
+Two passes:
+
+1. **Noise flagging.** Every node is run through `NodeKindValidator`; nodes
+   whose value is agent-internal machinery (`uses agent_loop`,
+   `runs turn_start/…`, …) are flagged `needs_review` in their metadata.
+   They are *not* deleted — inspect them with `oc awareness review
+   --needs-review` and evict any with `oc awareness forget`.
+2. **Edge collapse.** The pre-M2 motif importer inserted a fresh-id edge on
+   every 5-minute cron tick; `migrate` collapses each
+   `(kind, from, to, source)` group down to its newest edge.
+
+`migrate` is **dry-run by default** — it prints exactly what `--apply` would
+do and changes nothing. Re-running `--apply` is idempotent.
+
 ---
 
 ## The soft-delete model
@@ -96,3 +119,23 @@ preserves them, keeping the soft-delete reversible and the provenance intact.
 
 Soft-deleted facts are excluded from `review` and the prompt's `<user-facts>`
 block, but remain in the graph for `review --deleted` and `explain`.
+
+## Writer validation
+
+New nodes written by the motif importer pass through `NodeKindValidator`
+(`plugin_sdk.user_model`) before they land. The validator rejects a write
+when the kind is outside the `NodeKind` taxonomy, the value is empty, or the
+value embeds an **agent-internal token** — machinery names like `agent_loop`,
+`ambient-sensors`, `gateway.dispatch`, or event-type prefixes such as
+`tool_call/`, `turn_start/`, `session_end/`. These are the agent observing
+its *own* lifecycle, not facts about you.
+
+Rejections are logged at WARNING and counted per import run; the count
+surfaces in the cron `system_tick` summary as `motif_import_rejections`, so
+writer-cleanup health is observable without extra tooling. Rejections are
+fail-open — a rejected node is skipped, never a crash.
+
+The validator is conservative by design: the denylist holds only
+unambiguous tokens (`cron` is excluded — too common a substring), and
+plugin / user-explicit writes are not blocked. `oc awareness migrate`
+applies the same validator retroactively to flag pre-existing noise.

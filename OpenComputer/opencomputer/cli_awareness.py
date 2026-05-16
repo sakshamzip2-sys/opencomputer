@@ -257,6 +257,13 @@ def review(
         int,
         typer.Option("--limit", help="Cap on facts shown (ignored with --all)."),
     ] = 50,
+    needs_review: Annotated[
+        bool,
+        typer.Option(
+            "--needs-review",
+            help="Show only facts flagged by `awareness migrate`.",
+        ),
+    ] = False,
 ) -> None:
     """Show what the agent currently believes about you.
 
@@ -272,6 +279,8 @@ def review(
     nodes = store.list_nodes(limit=fetch)
     if not deleted:
         nodes = [n for n in nodes if not _node_is_deleted(n)]
+    if needs_review:
+        nodes = [n for n in nodes if n.metadata.get("needs_review")]
     ranked = _rank_for_review(nodes)
     total = len(ranked)
     shown = ranked if show_all else ranked[: max(0, limit)]
@@ -600,3 +609,81 @@ def correct(
         f"  [dim]now:[/dim] [bold]{new_value}[/bold] "
         f"[dim]({new_node.node_id[:8]})[/dim]"
     )
+
+
+@awareness_app.command("migrate")
+def migrate(
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Perform the migration. Without it, only a dry-run plan prints.",
+        ),
+    ] = False,
+) -> None:
+    """Clean up legacy user-model graph cruft.
+
+    Two passes: (1) flag agent-internal-noise facts with a
+    ``needs_review`` marker — surfaced by ``review --needs-review``;
+    (2) collapse the duplicate edges left by the pre-M2 motif importer.
+
+    Dry-run by default — prints the plan and changes nothing. Pass
+    ``--apply`` to mutate the graph.
+    """
+    from opencomputer.user_model.store import UserModelStore
+    from plugin_sdk.user_model import NodeKindValidator
+
+    store = UserModelStore()
+    console = Console()
+    validator = NodeKindValidator()
+
+    # Pass 1 — scan for agent-internal-noise nodes not already flagged
+    # or soft-deleted.
+    noise: list[tuple[Node, str]] = []
+    for n in store.list_nodes(limit=1_000_000):
+        if _node_is_deleted(n) or n.metadata.get("needs_review"):
+            continue
+        verdict = validator.check(n.kind, n.value)
+        if not verdict.valid:
+            noise.append((n, verdict.reason))
+
+    # Pass 2 — count redundant edges (no mutation in dry-run).
+    dup_edges = store.collapse_duplicate_edges(dry_run=True)
+
+    if not apply:
+        console.print(
+            "[bold]awareness migrate — dry run[/bold] "
+            "[dim](no changes made)[/dim]"
+        )
+        console.print(f"  facts to flag [bold]needs_review[/bold]: {len(noise)}")
+        for n, reason in noise[:20]:
+            console.print(
+                f"    [dim]{n.node_id[:8]}[/dim] ({n.kind}) "
+                f"{n.value[:48]} — [dim]{reason}[/dim]"
+            )
+        if len(noise) > 20:
+            console.print(f"    [dim]… and {len(noise) - 20} more[/dim]")
+        console.print(f"  duplicate edges to collapse: {dup_edges}")
+        console.print(
+            "[dim]re-run with [bold]--apply[/bold] to perform the "
+            "migration.[/dim]"
+        )
+        return
+
+    flagged = 0
+    for n, reason in noise:
+        new_meta = dict(n.metadata)
+        new_meta["needs_review"] = True
+        new_meta["review_reason"] = reason
+        store.update_node_metadata(n.node_id, new_meta)
+        flagged += 1
+    collapsed = store.collapse_duplicate_edges()
+    console.print("[green]✓[/green] awareness migrate applied")
+    console.print(f"  facts flagged needs_review: [bold]{flagged}[/bold]")
+    console.print(f"  duplicate edges collapsed: [bold]{collapsed}[/bold]")
+    if flagged:
+        console.print(
+            "[dim]flagged facts stay in the prompt until the M3 reranker — "
+            "inspect with [bold]oc awareness review --needs-review[/bold], "
+            "evict with [bold]oc awareness forget[/bold].[/dim]"
+        )

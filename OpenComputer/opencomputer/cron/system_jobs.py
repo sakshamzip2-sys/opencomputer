@@ -139,6 +139,9 @@ def run_system_tick() -> dict[str, str | int]:
     if isinstance(motif_result, dict):
         summary["motif_import_nodes"] = int(motif_result.get("nodes_added", 0))
         summary["motif_import_edges"] = int(motif_result.get("edges_added", 0))
+        summary["motif_import_rejections"] = int(
+            motif_result.get("rejections", 0)
+        )
     else:
         summary["motif_import"] = motif_result
 
@@ -166,7 +169,14 @@ def _run_motif_import_tick() -> dict[str, int]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("motif_import_tick: import_recent failed: %s", exc)
         return {"nodes_added": 0, "edges_added": 0}
-    return {"nodes_added": int(nodes_added), "edges_added": int(edges_added)}
+    # ``rejections`` — node writes the M2 validator skipped as
+    # agent-internal noise. Surfaced so the system_tick summary makes
+    # writer-cleanup health observable.
+    return {
+        "nodes_added": int(nodes_added),
+        "edges_added": int(edges_added),
+        "rejections": int(importer.rejections),
+    }
 
 
 def _safe_call(name: str, fn):

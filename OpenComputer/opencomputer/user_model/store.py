@@ -559,6 +559,40 @@ class UserModelStore:
                 (clamped, edge_id),
             )
 
+    #: Inner SELECT — every edge that is NOT the newest of its
+    #: (kind, from_node, to_node, source) identity group, i.e. the
+    #: redundant duplicates left by the pre-M2 fresh-uuid importer.
+    _DUP_EDGE_INNER = """
+        SELECT edge_id FROM (
+            SELECT edge_id, ROW_NUMBER() OVER (
+                PARTITION BY kind, from_node, to_node, source
+                ORDER BY created_at DESC, edge_id
+            ) AS rn FROM edges
+        ) WHERE rn > 1
+    """
+
+    def collapse_duplicate_edges(self, *, dry_run: bool = False) -> int:
+        """Delete redundant edges, keeping the newest per identity group.
+
+        Identity is ``(kind, from_node, to_node, source)``. The motif
+        importer historically inserted a fresh-uuid edge on every cron
+        tick; M2 fixed that at source (deterministic edge ids) but the
+        legacy backlog still needs collapsing. With ``dry_run=True`` the
+        redundant rows are counted, not deleted. Returns the number of
+        edges deleted — or, in dry-run, that would be deleted.
+        """
+        if dry_run:
+            with self._connect() as conn:
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM ({self._DUP_EDGE_INNER})"
+                ).fetchone()
+            return int(row[0]) if row else 0
+        with self._txn() as conn:
+            cur = conn.execute(
+                f"DELETE FROM edges WHERE edge_id IN ({self._DUP_EDGE_INNER})"
+            )
+            return int(cur.rowcount or 0)
+
     # ─── helpers ──────────────────────────────────────────────────────
 
     @staticmethod

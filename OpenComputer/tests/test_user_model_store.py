@@ -250,3 +250,68 @@ def test_update_node_metadata_preserves_incident_edges(tmp_path: Path) -> None:
     assert store.count_edges() == 2
     assert len(store.list_edges(from_node=a.node_id)) == 1
     assert len(store.list_edges(to_node=a.node_id)) == 1
+
+
+def test_collapse_duplicate_edges_keeps_one_per_group(tmp_path: Path) -> None:
+    """Duplicate edges (same kind/from/to/source) collapse to a single row."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    for i in range(5):
+        store.insert_edge(Edge(
+            edge_id=f"dup-{i}", kind="asserts",
+            from_node=a.node_id, to_node=b.node_id,
+            source="motif_importer", created_at=100.0 + i,
+        ))
+    deleted = store.collapse_duplicate_edges()
+    assert deleted == 4
+    assert store.count_edges() == 1
+
+
+def test_collapse_duplicate_edges_dry_run_counts_only(tmp_path: Path) -> None:
+    """dry_run=True returns the count but mutates nothing."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    for i in range(3):
+        store.insert_edge(Edge(
+            edge_id=f"dup-{i}", kind="asserts",
+            from_node=a.node_id, to_node=b.node_id, source="motif_importer",
+        ))
+    assert store.collapse_duplicate_edges(dry_run=True) == 2
+    assert store.count_edges() == 3  # untouched
+
+
+def test_collapse_keeps_distinct_edges(tmp_path: Path) -> None:
+    """Edges differing in kind / endpoints / source are NOT collapsed."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(edge_id="e1", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer"))
+    store.insert_edge(Edge(edge_id="e2", kind="contradicts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer"))
+    store.insert_edge(Edge(edge_id="e3", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="user_explicit"))
+    assert store.collapse_duplicate_edges() == 0
+    assert store.count_edges() == 3
+
+
+def test_collapse_keeps_the_newest_edge(tmp_path: Path) -> None:
+    """Within a group the most recently created edge is the survivor."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="A")
+    b = store.upsert_node(kind="preference", value="B")
+    store.insert_edge(Edge(edge_id="old", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer", created_at=100.0))
+    store.insert_edge(Edge(edge_id="new", kind="asserts",
+                           from_node=a.node_id, to_node=b.node_id,
+                           source="motif_importer", created_at=200.0))
+    store.collapse_duplicate_edges()
+    survivors = store.list_edges()
+    assert len(survivors) == 1
+    assert survivors[0].edge_id == "new"
