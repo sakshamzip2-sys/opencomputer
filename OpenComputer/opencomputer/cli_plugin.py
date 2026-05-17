@@ -304,6 +304,32 @@ def install(
     ),
 ) -> None:
     """Install a plugin from a local directory, remote catalog, git, URL, or PyPI."""
+    # Best-of-three Recipe 5 — ``<marketplace>/<plugin>`` install form.
+    # If the first slash-segment names a registered marketplace, resolve
+    # the slug against that marketplace's catalog. Checked before the
+    # source-policy gate and the github-shorthand path (both of which
+    # would mis-classify ``mp/plugin``); the catalog install path runs
+    # its own security scan + BEFORE_INSTALL gate.
+    if (
+        "/" in source
+        and not _is_url_arg(source)
+        and not _is_git_arg(source)
+    ):
+        mp_name, _, mp_slug = source.partition("/")
+        from opencomputer.plugins.marketplaces import get_marketplace
+
+        mp = get_marketplace(mp_name)
+        if mp is not None and mp_slug and "/" not in mp_slug:
+            _install_from_remote(
+                slug=mp_slug,
+                profile=profile,
+                is_global=is_global,
+                force=force,
+                refresh=refresh,
+                catalog_url=mp.url,
+            )
+            return
+
     # v1.1 plan-3 M11.3 — every install path runs through the typed
     # source-policy gate before any network IO.  Deny-by-default for
     # network kinds keeps the supply-chain surface narrow.
@@ -491,8 +517,14 @@ def _install_from_remote(
     is_global: bool,
     force: bool,
     refresh: bool,
+    catalog_url: str | None = None,
 ) -> None:
-    """D.3 T1 — install a plugin slug via the remote catalog."""
+    """D.3 T1 — install a plugin slug via the remote catalog.
+
+    ``catalog_url`` overrides the resolved single catalog — set by the
+    ``<marketplace>/<plugin>`` install form (best-of-three Recipe 5) so
+    the slug is resolved against that specific marketplace's catalog.
+    """
     from opencomputer.plugins.remote_install import (
         CatalogError,
         install_from_catalog,
@@ -504,6 +536,7 @@ def _install_from_remote(
         result = install_from_catalog(
             slug,
             dest_root=dest_root,
+            catalog_url=catalog_url,
             refresh=refresh,
             force=force,
             trusted_keys=_load_trusted_catalog_keys(),
@@ -1464,6 +1497,149 @@ def verify(
     for diff in report.differences:
         _console.print(f"  - {diff.kind}: {diff.path}")
     raise typer.Exit(code=1)
+
+
+# ── named marketplaces (best-of-three Recipe 5) ──────────────────────
+
+marketplace_app = typer.Typer(
+    help="Manage named plugin marketplaces (plural catalog sources)."
+)
+
+
+@marketplace_app.command("add")
+def marketplace_add(
+    name: str = typer.Argument(..., help="Short name for the marketplace."),
+    url: str = typer.Argument(..., help="https:// catalog endpoint."),
+    trust_key: str = typer.Option(
+        "",
+        "--trust-key",
+        help="Advisory signing-key fingerprint to record for this source.",
+    ),
+) -> None:
+    """Register a named marketplace."""
+    from opencomputer.plugins.marketplaces import (
+        MarketplaceError,
+        add_marketplace,
+    )
+
+    try:
+        mp = add_marketplace(name, url, trust_key=trust_key)
+    except MarketplaceError as exc:
+        _console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    _console.print(
+        f"[green]added marketplace[/green] [cyan]{mp.name}[/cyan] → {mp.url}"
+    )
+
+
+@marketplace_app.command("remove")
+def marketplace_remove(
+    name: str = typer.Argument(..., help="Marketplace name to remove."),
+) -> None:
+    """Remove a marketplace. Installed plugins are not affected."""
+    from opencomputer.plugins.marketplaces import remove_marketplace
+
+    if remove_marketplace(name):
+        _console.print(f"[green]removed marketplace[/green] {name}")
+    else:
+        _console.print(f"[yellow]no marketplace named[/yellow] {name!r}")
+        raise typer.Exit(code=1)
+
+
+@marketplace_app.command("list")
+def marketplace_list() -> None:
+    """List configured marketplaces."""
+    from opencomputer.plugins.marketplaces import load_marketplaces
+
+    items = load_marketplaces()
+    if not items:
+        _console.print(
+            "[dim]no marketplaces configured — "
+            "oc plugin marketplace add <name> <url>[/dim]"
+        )
+        return
+    table = Table(title="Plugin marketplaces", header_style="bold")
+    table.add_column("Name", style="cyan")
+    table.add_column("URL")
+    table.add_column("Trust key", style="dim")
+    for mp in items:
+        table.add_row(mp.name, mp.url, mp.trust_key or "—")
+    _console.print(table)
+
+
+def _catalog_plugin_entries(catalog: dict) -> list[tuple[str, dict]]:
+    """Normalise a catalog's ``plugins`` block to ``[(slug, entry)]``,
+    tolerating both the dict-keyed and list shapes."""
+    plugins = catalog.get("plugins")
+    if isinstance(plugins, dict):
+        return [(str(k), v if isinstance(v, dict) else {})
+                for k, v in plugins.items()]
+    if isinstance(plugins, list):
+        out: list[tuple[str, dict]] = []
+        for entry in plugins:
+            if isinstance(entry, dict):
+                slug = str(entry.get("id") or entry.get("slug") or "")
+                if slug:
+                    out.append((slug, entry))
+        return out
+    return []
+
+
+@plugin_app.command("search")
+def plugin_search(
+    query: str = typer.Argument(..., help="Substring to match plugin ids."),
+) -> None:
+    """Search plugin ids across every configured marketplace."""
+    from opencomputer.plugins.marketplaces import (
+        load_marketplaces,
+        marketplace_cache_path,
+    )
+    from opencomputer.plugins.remote_install import CatalogError, fetch_catalog
+
+    marketplaces = load_marketplaces()
+    if not marketplaces:
+        _console.print(
+            "[yellow]no marketplaces configured[/yellow] — "
+            "oc plugin marketplace add <name> <url>"
+        )
+        raise typer.Exit(code=1)
+
+    needle = query.strip().lower()
+    rows: list[tuple[str, str, str]] = []
+    for mp in marketplaces:
+        try:
+            catalog = fetch_catalog(
+                url=mp.url,
+                cache_path_override=marketplace_cache_path(mp.name),
+            )
+        except CatalogError as exc:
+            _console.print(
+                f"[yellow]skipping {mp.name}:[/yellow] {exc}"
+            )
+            continue
+        for slug, entry in _catalog_plugin_entries(catalog):
+            if needle in slug.lower():
+                rows.append(
+                    (mp.name, slug, str(entry.get("description", "")))
+                )
+
+    if not rows:
+        _console.print(f"[dim]no plugins match {query!r}[/dim]")
+        return
+    table = Table(title=f"Search: {query}", header_style="bold")
+    table.add_column("Marketplace", style="cyan")
+    table.add_column("Plugin", style="bold")
+    table.add_column("Description")
+    for mp_name, slug, desc in sorted(rows):
+        table.add_row(mp_name, slug, desc)
+    _console.print(table)
+    _console.print(
+        "[dim]install with[/dim] "
+        "[cyan]oc plugin install <marketplace>/<plugin>[/cyan]"
+    )
+
+
+plugin_app.add_typer(marketplace_app, name="marketplace")
 
 
 __all__ = ["plugin_app"]
