@@ -505,7 +505,43 @@ async def test_on_stop_hook_classifies_real_reply_past_trailing_tool_result(
 # ── Registration + fire-site wiring ───────────────────────────────────
 
 
-def test_register_life_event_stop_hook_registers_against_stop():
+@pytest.fixture
+def _isolate_stop_registration():
+    """Make the STOP-hook registration tests hermetic.
+
+    ``register_life_event_stop_hook`` is idempotent via the module-global
+    ``classifier._STOP_HOOK_REGISTERED`` flag, and registers ``on_stop_hook``
+    on the process-wide singleton hook ``engine``. In the full suite an
+    earlier ``AgentLoop`` construction flips that flag ``True`` and registers
+    the handler; a later test then calls ``engine.unregister_all`` and strips
+    the STOP bucket — but the flag stays ``True``. The two register-tests
+    below would then no-op (flag ``True``) and never re-register the handler,
+    so their assertions fail. Production is unaffected — the real engine is a
+    never-cleared singleton, so flag and engine never desync.
+
+    This fixture saves the flag and the ``engine`` STOP bucket, resets both to
+    a known state (flag ``False``, STOP bucket empty), yields, then restores
+    exactly what it found — so each register-test starts hermetic and leaves
+    no side effect on other tests.
+    """
+    from opencomputer.hooks.engine import engine
+
+    saved_flag = _classifier_mod._STOP_HOOK_REGISTERED
+    # engine._hooks is the raw defaultdict — copy the STOP bucket's list.
+    saved_bucket = list(engine._hooks[HookEvent.STOP])
+
+    _classifier_mod._STOP_HOOK_REGISTERED = False
+    engine.unregister_all(HookEvent.STOP)
+    try:
+        yield
+    finally:
+        _classifier_mod._STOP_HOOK_REGISTERED = saved_flag
+        engine._hooks[HookEvent.STOP] = saved_bucket
+
+
+def test_register_life_event_stop_hook_registers_against_stop(
+    _isolate_stop_registration,
+):
     """``register_life_event_stop_hook`` registers ``on_stop_hook`` for STOP."""
     from opencomputer.awareness.life_events.classifier import (
         register_life_event_stop_hook,
@@ -520,7 +556,7 @@ def test_register_life_event_stop_hook_registers_against_stop():
     )
 
 
-def test_register_life_event_stop_hook_is_idempotent():
+def test_register_life_event_stop_hook_is_idempotent(_isolate_stop_registration):
     """Repeated registration calls register the handler exactly once.
 
     AgentLoop is constructed per session; the registration call runs once
