@@ -26,10 +26,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from opencomputer.sandbox._common import TIMEOUT_EXIT_CODE, TIMEOUT_STDERR
+from opencomputer.sandbox._common import (
+    TIMEOUT_EXIT_CODE,
+    TIMEOUT_STDERR,
+    coerce_exit_code,
+)
 from opencomputer.sandbox.e2b import (
     E2BSandboxStrategy,
-    _coerce_exit_code,
     _e2b_available,
 )
 from plugin_sdk.sandbox import SandboxConfig, SandboxUnavailable
@@ -637,7 +640,7 @@ def test_run_raises_unavailable_when_api_key_missing(
 
 
 # --------------------------------------------------------------------------
-# _coerce_exit_code helper
+# coerce_exit_code helper (shared — opencomputer.sandbox._common)
 # --------------------------------------------------------------------------
 
 
@@ -654,7 +657,7 @@ def test_run_raises_unavailable_when_api_key_missing(
     ],
 )
 def test_coerce_exit_code(value: object, expected: int) -> None:
-    assert _coerce_exit_code(value) == expected
+    assert coerce_exit_code(value) == expected
 
 
 # --------------------------------------------------------------------------

@@ -95,6 +95,13 @@ finding (a "garbled docstring" that did not exist).
 6. **Reviews — agent or self — need verification both ways.** The review
    agent missed a real bug and invented a fake one. Treat every review
    finding as a lead to verify, not a fact.
+7. **Deleting a symbol needs a repo-wide caller grep, not a scoped test
+   glob.** The `coerce_exit_code` consolidation removed
+   `_coerce_exit_code` from three backends; the local regression sweep
+   globbed `tests/*sandbox*` and missed `tests/test_e2b_backend.py` (no
+   "sandbox" in the filename), which unit-tested the helper directly.
+   CI caught the collection `ImportError` post-push. Before removing any
+   symbol, `grep -rn` the whole repo for callers — filename globs lie.
 
 ## 5. Known limitations / honest follow-ups
 
