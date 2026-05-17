@@ -118,6 +118,13 @@ METHOD_SESSION_MOST_RECENT = "session.most_recent"
 METHOD_SKILL_SHOW = "skill.show"
 METHOD_SESSION_FORK = "session.fork"
 
+# 2026-05-17 TUI-parity Milestone 1 batch 7 — interrupt + tool inventory.
+# session.interrupt signals a mid-run turn to cancel (the agent loop
+# watches the steer registry's per-session cancel Event); tools.list
+# enumerates registered tools for a capability-inspector overlay.
+METHOD_SESSION_INTERRUPT = "session.interrupt"
+METHOD_TOOLS_LIST = "tools.list"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -196,6 +203,8 @@ __all__ = [
     "METHOD_SESSION_MOST_RECENT",
     "METHOD_SKILL_SHOW",
     "METHOD_SESSION_FORK",
+    "METHOD_SESSION_INTERRUPT",
+    "METHOD_TOOLS_LIST",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

@@ -56,6 +56,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
     METHOD_SESSION_FORK,
+    METHOD_SESSION_INTERRUPT,
     METHOD_SESSION_LIST,
     METHOD_SESSION_MOST_RECENT,
     METHOD_SESSION_RENAME,
@@ -67,6 +68,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
     METHOD_SUBAGENTS_LIST,
+    METHOD_TOOLS_LIST,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -619,6 +621,43 @@ class SessionForkResult(_StrictModel):
     ok: bool
 
 
+# 2026-05-17 TUI-parity Milestone 1 batch 7 — interrupt + tool inventory.
+
+
+class SessionInterruptParams(_StrictModel):
+    """Signal a mid-run turn to cancel."""
+
+    session_id: str
+
+
+class SessionInterruptResult(_StrictModel):
+    """Interrupt outcome.
+
+    ``ok`` is always True on a success response — the cancel signal is
+    fire-and-forget (the agent loop picks it up between/within turns).
+    Interrupting an idle session is harmless: the loop clears a stale
+    cancel Event on its next dispatch.
+    """
+
+    session_id: str
+    ok: bool
+
+
+class ToolInfo(_StrictModel):
+    """One registered tool — name + (truncated) description."""
+
+    name: str
+    description: str = ""
+
+
+class ToolsListParams(_StrictModel):
+    """No params — the full registered-tool inventory."""
+
+
+class ToolsListResult(_StrictModel):
+    tools: tuple[ToolInfo, ...] = ()
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -648,6 +687,11 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     ),
     METHOD_SKILL_SHOW: (SkillShowParams, SkillShowResult),
     METHOD_SESSION_FORK: (SessionForkParams, SessionForkResult),
+    METHOD_SESSION_INTERRUPT: (
+        SessionInterruptParams,
+        SessionInterruptResult,
+    ),
+    METHOD_TOOLS_LIST: (ToolsListParams, ToolsListResult),
 }
 
 
@@ -827,6 +871,8 @@ __all__ = [
     "METHOD_SESSION_MOST_RECENT",
     "METHOD_SKILL_SHOW",
     "METHOD_SESSION_FORK",
+    "METHOD_SESSION_INTERRUPT",
+    "METHOD_TOOLS_LIST",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -893,6 +939,11 @@ __all__ = [
     "SkillShowResult",
     "SessionForkParams",
     "SessionForkResult",
+    "SessionInterruptParams",
+    "SessionInterruptResult",
+    "ToolInfo",
+    "ToolsListParams",
+    "ToolsListResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",

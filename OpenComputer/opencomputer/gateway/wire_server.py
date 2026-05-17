@@ -51,6 +51,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
     METHOD_SESSION_FORK,
+    METHOD_SESSION_INTERRUPT,
     METHOD_SESSION_LIST,
     METHOD_SESSION_MOST_RECENT,
     METHOD_SESSION_RENAME,
@@ -62,6 +63,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
     METHOD_SUBAGENTS_LIST,
+    METHOD_TOOLS_LIST,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -370,6 +372,8 @@ class WireServer:
                         METHOD_SESSION_MOST_RECENT,
                         METHOD_SKILL_SHOW,
                         METHOD_SESSION_FORK,
+                        METHOD_SESSION_INTERRUPT,
+                        METHOD_TOOLS_LIST,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -871,6 +875,43 @@ class WireServer:
                     "messages_copied": result.messages_copied,
                     "ok": True,
                 },
+            )
+        elif req.method == METHOD_SESSION_INTERRUPT:
+            # 2026-05-17 TUI-parity M1 batch 7 — signal a mid-run turn to
+            # cancel. Sets the steer registry's per-session cancel Event,
+            # which the agent loop watches between/within turns. Setting
+            # it for an idle session is harmless — the loop clears a stale
+            # event on its next dispatch.
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.interrupt: session_id is required"
+                )
+                return
+            try:
+                _steer_registry.cancel_event(session_id).set()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.interrupt: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.interrupt: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"session_id": session_id, "ok": True}
+            )
+        elif req.method == METHOD_TOOLS_LIST:
+            # 2026-05-17 TUI-parity M1 batch 7 — registered-tool inventory
+            # for a capability-inspector overlay.
+            try:
+                tools = self._collect_tools()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("tools.list: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"tools.list: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"tools": tools}
             )
         else:
             await self._send_response(
@@ -1561,6 +1602,24 @@ class WireServer:
             "started_at": row.get("started_at"),
             "source": row.get("source"),
         }
+
+    @staticmethod
+    def _collect_tools() -> list[dict[str, str]]:
+        """Build the ``METHOD_TOOLS_LIST`` payload — every registered
+        tool's ``{name, description}``.
+
+        Reads the process-global tool registry via
+        :meth:`opencomputer.tools.registry.ToolRegistry.tool_summaries`
+        (descriptions truncated by the registry). Never raises — a
+        registry failure degrades to ``[]``.
+        """
+        try:
+            from opencomputer.tools.registry import registry
+
+            return list(registry.tool_summaries())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tools.list: registry unavailable (%s) — empty", exc)
+            return []
 
     @staticmethod
     def _collect_model_options() -> dict[str, Any]:
