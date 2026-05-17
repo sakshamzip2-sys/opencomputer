@@ -139,3 +139,47 @@ def test_cli_list_empty_message() -> None:
 def test_cli_search_without_marketplaces_exits_nonzero() -> None:
     result = runner.invoke(plugin_app, ["search", "anything"])
     assert result.exit_code == 1
+
+
+# ── install <marketplace>/<plugin> routing ───────────────────────────
+
+
+def test_install_marketplace_prefix_routes_to_that_catalog(
+    monkeypatch,
+) -> None:
+    """`oc plugin install mp1/widget` must resolve `widget` against the
+    `mp1` marketplace's catalog URL — not the github/source-policy path."""
+    import opencomputer.cli_plugin as cli_plugin
+
+    add_marketplace("mp1", "https://mp1.dev/catalog.json")
+    captured: dict = {}
+
+    def _fake_remote(*, slug, profile, is_global, force, refresh, catalog_url):  # noqa: ANN001, ANN003
+        captured["slug"] = slug
+        captured["catalog_url"] = catalog_url
+
+    monkeypatch.setattr(cli_plugin, "_install_from_remote", _fake_remote)
+    result = runner.invoke(plugin_app, ["install", "mp1/widget"])
+    assert result.exit_code == 0
+    assert captured == {
+        "slug": "widget",
+        "catalog_url": "https://mp1.dev/catalog.json",
+    }
+
+
+def test_install_unknown_prefix_does_not_route_to_marketplace(
+    monkeypatch,
+) -> None:
+    """A `foo/bar` arg where `foo` is not a registered marketplace must
+    NOT hit the marketplace path — it falls through to normal install."""
+    import opencomputer.cli_plugin as cli_plugin
+
+    called = {"remote": False}
+
+    def _fake_remote(**_kw):  # noqa: ANN003
+        called["remote"] = True
+
+    monkeypatch.setattr(cli_plugin, "_install_from_remote", _fake_remote)
+    # no marketplace registered → "ghost/bar" must fall through
+    runner.invoke(plugin_app, ["install", "ghost/bar"])
+    assert called["remote"] is False
