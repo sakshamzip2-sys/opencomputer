@@ -78,6 +78,14 @@ METHOD_PERMISSION_RESPONSE = "permission.response"
 # the live state from the first frame.
 METHOD_MEMORY_STATUS = "memory.status"
 
+# 2026-05-17 TUI-parity Milestone 1 — session-lifecycle RPCs. The M1
+# protocol-mapping spike (docs/refs/hermes-tui-protocol-vs-oc-wire.md)
+# found a Hermes-parity TUI needs ~57 RPC methods vs OC's 11. These two
+# are batch 1: a resume picker cannot render a session without a method
+# that returns its transcript, and cannot prune stale rows without delete.
+METHOD_SESSION_RESUME = "session.resume"
+METHOD_SESSION_DELETE = "session.delete"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -144,6 +152,8 @@ __all__ = [
     "METHOD_PERMISSION_RESPONSE",
     "METHOD_MEMORY_STATUS",
     "METHOD_EVOLUTION_STATUS",
+    "METHOD_SESSION_RESUME",
+    "METHOD_SESSION_DELETE",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

@@ -45,7 +45,9 @@ from opencomputer.gateway.protocol import (
     METHOD_MEMORY_STATUS,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
+    METHOD_SESSION_DELETE,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_RESUME,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
@@ -346,6 +348,8 @@ class WireServer:
                         METHOD_PERMISSION_RESPONSE,
                         METHOD_MEMORY_STATUS,
                         METHOD_EVOLUTION_STATUS,
+                        METHOD_SESSION_RESUME,
+                        METHOD_SESSION_DELETE,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -574,6 +578,56 @@ class WireServer:
                 await self._send_response(
                     ws, req.id, False, error=f"evolution.status: {exc}"
                 )
+        elif req.method == METHOD_SESSION_RESUME:
+            # 2026-05-17 TUI-parity M1 — load a stored session's transcript
+            # so a resume picker can render past turns. v1: always default
+            # profile (matches the rest of the wire surface).
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.resume: session_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_session_resume(_loop, session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.resume: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.resume: {exc}"
+                )
+                return
+            if payload is None:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error=f"session.resume: no session {session_id}",
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SESSION_DELETE:
+            # 2026-05-17 TUI-parity M1 — delete a stored session + its
+            # cascaded rows. Idempotent: deleting an unknown id is a
+            # success with found=False, not an error.
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.delete: session_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                found = bool(_loop.db.delete_session(session_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.delete: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.delete: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"deleted": session_id, "found": found}
+            )
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -1043,6 +1097,65 @@ class WireServer:
             )
         entries.sort(key=lambda e: e["target"])
         return entries
+
+    @staticmethod
+    def _collect_session_resume(
+        loop: Any, session_id: str
+    ) -> dict[str, Any] | None:
+        """Build the ``METHOD_SESSION_RESUME`` payload for one AgentLoop.
+
+        Reads the ``sessions`` row + every stored message for ``session_id``
+        via :class:`opencomputer.agent.state.SessionDB`, flattening each
+        :class:`plugin_sdk.core.Message` into the wire-safe
+        :class:`~opencomputer.gateway.protocol_v2.TranscriptMessage` shape
+        (role + text + optional tool name — reasoning / tool-call JSON is
+        dropped; a resume picker renders text, not raw tool payloads).
+
+        Failure modes (helper never raises — mirrors ``_collect_memory_status``):
+
+        * ``loop.db`` missing (minimal test harness) → returns ``None``.
+        * No session row with that id → returns ``None``. The dispatch
+          case turns ``None`` into an ``ok=False`` "no session" response.
+        * ``get_messages`` raising → logged at WARN, transcript returns
+          empty but the session ``info`` is still delivered.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("session.resume: loop has no db — None")
+            return None
+
+        info = db.get_session(session_id)
+        if info is None:
+            return None
+
+        messages: list[dict[str, Any]] = []
+        try:
+            for msg in db.get_messages(session_id):
+                role = getattr(msg, "role", "")
+                # Role may be a str enum (plugin_sdk.core.Role) — normalise.
+                role_str = str(getattr(role, "value", role) or "")
+                messages.append(
+                    {
+                        "role": role_str,
+                        "text": str(getattr(msg, "content", "") or ""),
+                        "name": getattr(msg, "name", None),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "session.resume: failed to load messages for %s: %s — "
+                "returning metadata with empty transcript",
+                session_id,
+                exc,
+            )
+            messages = []
+
+        return {
+            "session_id": session_id,
+            "info": dict(info),
+            "messages": messages,
+            "message_count": len(messages),
+        }
 
     async def broadcast_permission_request(
         self,

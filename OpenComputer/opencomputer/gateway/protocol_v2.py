@@ -50,7 +50,9 @@ from opencomputer.gateway.protocol import (
     METHOD_MEMORY_STATUS,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
+    METHOD_SESSION_DELETE,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_RESUME,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
@@ -324,6 +326,61 @@ class EvolutionStatusResult(_StrictModel):
     defaults: EvolutionStatusDefaults
 
 
+# 2026-05-17 TUI-parity Milestone 1 — session-lifecycle RPC schemas.
+
+
+class TranscriptMessage(_StrictModel):
+    """One conversation message in a resumed transcript.
+
+    A flattened, wire-safe projection of :class:`plugin_sdk.core.Message`:
+    only the fields a TUI/IDE client needs to re-render past turns. The
+    reasoning / tool-call / attachment fields of the full ``Message`` are
+    deliberately dropped — a resume picker shows text, not raw tool JSON.
+    """
+
+    role: str            # "user" | "assistant" | "system" | "tool"
+    text: str = ""       # the message ``content``
+    name: str | None = None  # tool name, for tool-role messages
+
+
+class SessionResumeParams(_StrictModel):
+    """Load a stored session's transcript for the resume picker."""
+
+    session_id: str
+
+
+class SessionResumeResult(_StrictModel):
+    """A session's metadata + full transcript.
+
+    ``info`` is the raw ``sessions`` row dict (id, title, started_at,
+    platform, model, cwd, …) — passed through untyped because the column
+    set evolves with the schema and clients only index known keys.
+    """
+
+    session_id: str
+    info: dict[str, Any] = Field(default_factory=dict)
+    messages: tuple[TranscriptMessage, ...] = ()
+    message_count: int = 0
+
+
+class SessionDeleteParams(_StrictModel):
+    """Delete a stored session and its cascaded rows."""
+
+    session_id: str
+
+
+class SessionDeleteResult(_StrictModel):
+    """Delete outcome.
+
+    ``found`` is False when no row had that id — deletion is idempotent,
+    so this is a successful response (``ok=True``), not an error; the
+    flag just tells the client whether anything actually changed.
+    """
+
+    deleted: str  # echoes the requested session_id
+    found: bool
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -338,6 +395,8 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_PERMISSION_RESPONSE: (PermissionResponseParams, PermissionResponseResult),
     METHOD_MEMORY_STATUS: (MemoryStatusParams, MemoryStatusResult),
     METHOD_EVOLUTION_STATUS: (EvolutionStatusParams, EvolutionStatusResult),
+    METHOD_SESSION_RESUME: (SessionResumeParams, SessionResumeResult),
+    METHOD_SESSION_DELETE: (SessionDeleteParams, SessionDeleteResult),
 }
 
 
@@ -505,6 +564,8 @@ __all__ = [
     "METHOD_PERMISSION_RESPONSE",
     "METHOD_MEMORY_STATUS",
     "METHOD_EVOLUTION_STATUS",
+    "METHOD_SESSION_RESUME",
+    "METHOD_SESSION_DELETE",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -544,6 +605,11 @@ __all__ = [
     "EvolutionStatusParams",
     "EvolutionStatusResult",
     "EvolutionStatusDefaults",
+    "TranscriptMessage",
+    "SessionResumeParams",
+    "SessionResumeResult",
+    "SessionDeleteParams",
+    "SessionDeleteResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",
