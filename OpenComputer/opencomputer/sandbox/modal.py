@@ -51,6 +51,7 @@ import time
 from opencomputer.sandbox._common import (
     TIMEOUT_EXIT_CODE,
     TIMEOUT_STDERR,
+    coerce_exit_code,
     decode_stream,
     filtered_env,
 )
@@ -208,27 +209,10 @@ class ModalSandboxStrategy(SandboxStrategy):
             )
 
         return SandboxResult(
-            exit_code=_coerce_exit_code(returncode),
+            exit_code=coerce_exit_code(returncode),
             stdout=decode_stream(stdout),
             stderr=decode_stream(stderr),
             duration_seconds=time.monotonic() - start,
             wrapped_command=wrapped,
             strategy_name=self.name,
         )
-
-
-def _coerce_exit_code(value: object) -> int:
-    """Best-effort coerce a Modal returncode to ``int``.
-
-    ``Sandbox.wait`` returns ``int | None``; ``None`` (the process didn't
-    set an exit code) maps to ``-1``, matching the host-process strategies'
-    shape.
-    """
-    if isinstance(value, int):
-        return value
-    if value is None:
-        return -1
-    try:
-        return int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return -1

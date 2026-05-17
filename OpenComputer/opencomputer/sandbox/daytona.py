@@ -44,6 +44,7 @@ import time
 from opencomputer.sandbox._common import (
     TIMEOUT_EXIT_CODE,
     TIMEOUT_STDERR,
+    coerce_exit_code,
     decode_stream,
     filtered_env,
 )
@@ -188,27 +189,10 @@ class DaytonaSandboxStrategy(SandboxStrategy):
         # M-2: ``result`` is stdout-only (plus the 2>&1-merged stderr we wrap
         # the command with); ``SandboxResult.stderr`` is therefore always "".
         return SandboxResult(
-            exit_code=_coerce_exit_code(getattr(response, "exit_code", 0)),
+            exit_code=coerce_exit_code(getattr(response, "exit_code", 0)),
             stdout=decode_stream(getattr(response, "result", "")),
             stderr="",
             duration_seconds=time.monotonic() - start,
             wrapped_command=wrapped,
             strategy_name=self.name,
         )
-
-
-def _coerce_exit_code(value: object) -> int:
-    """Best-effort coerce a Daytona exit code to ``int``.
-
-    The SDK returns an ``int``; this guards a defensive ``None`` (e.g. a
-    partial response) by mapping it to ``-1``, matching the host-process
-    strategies' shape.
-    """
-    if isinstance(value, int):
-        return value
-    if value is None:
-        return -1
-    try:
-        return int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return -1
