@@ -51,6 +51,19 @@ def _make_mock_modal_class(*, create_return=None, create_side_effect=None):
     return cls
 
 
+def _make_mock_modal_app():
+    """Mock for ``modal.App`` whose ``lookup`` returns a sentinel app.
+
+    ``run()`` calls ``App.lookup(name, create_if_missing=True)`` (via
+    ``asyncio.to_thread``) to obtain the App that ``Sandbox.create``
+    runtime-requires. Returns ``(app_cls, sentinel_app)``.
+    """
+    sentinel_app = MagicMock(name="modal-app")
+    app_cls = MagicMock()
+    app_cls.lookup = MagicMock(return_value=sentinel_app)
+    return app_cls, sentinel_app
+
+
 # --- is_available -----------------------------------------------------------
 
 
@@ -86,7 +99,8 @@ def test_modal_run_happy_path(monkeypatch):
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-token")
     sandbox = _make_fake_sandbox(returncode=0, stdout="hi\n", stderr="")
     cls = _make_mock_modal_class(create_return=sandbox)
-    with patch("modal.Sandbox", cls):
+    app_cls, sentinel_app = _make_mock_modal_app()
+    with patch("modal.Sandbox", cls), patch("modal.App", app_cls):
         result = asyncio.run(
             ModalSandboxStrategy().run(["echo", "hi"], config=SandboxConfig())
         )
@@ -100,6 +114,14 @@ def test_modal_run_happy_path(monkeypatch):
     # Modal takes argv as varargs — the backend passes argv positionally,
     # NOT a single joined shell string (the e2b/daytona shlex.join pattern).
     assert cls.create.aio.await_args.args == ("echo", "hi")
+    # B2 regression: ``Sandbox.create`` runtime-requires an ``App``. The
+    # backend MUST look one up and pass it — a backend that omits ``app``
+    # (the shipped M2 bug) raises on every real call. Assert the call
+    # shape Modal actually requires, so the mock cannot mask a regression.
+    app_cls.lookup.assert_called_once()
+    assert cls.create.aio.await_args.kwargs["app"] is sentinel_app
+    # ``block_network`` enforces the default ``network_allowed=False``.
+    assert cls.create.aio.await_args.kwargs["block_network"] is True
 
 
 # --- non-zero exit ----------------------------------------------------------
@@ -109,7 +131,8 @@ def test_modal_non_zero_exit_returns_code(monkeypatch):
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-token")
     sandbox = _make_fake_sandbox(returncode=7, stdout="", stderr="boom")
     cls = _make_mock_modal_class(create_return=sandbox)
-    with patch("modal.Sandbox", cls):
+    app_cls, _ = _make_mock_modal_app()
+    with patch("modal.Sandbox", cls), patch("modal.App", app_cls):
         result = asyncio.run(
             ModalSandboxStrategy().run(["false"], config=SandboxConfig())
         )
@@ -126,7 +149,12 @@ def test_modal_wait_raises_still_terminates(monkeypatch):
     sandbox = _make_fake_sandbox()
     sandbox.wait.aio = AsyncMock(side_effect=RuntimeError("net down"))
     cls = _make_mock_modal_class(create_return=sandbox)
-    with patch("modal.Sandbox", cls), pytest.raises(RuntimeError):
+    app_cls, _ = _make_mock_modal_app()
+    with (
+        patch("modal.Sandbox", cls),
+        patch("modal.App", app_cls),
+        pytest.raises(RuntimeError),
+    ):
         asyncio.run(
             ModalSandboxStrategy().run(["echo", "x"], config=SandboxConfig())
         )
@@ -173,7 +201,8 @@ def test_modal_conforms_against_mocked_sdk(monkeypatch):
     cls = MagicMock()
     cls.create = MagicMock()
     cls.create.aio = AsyncMock(side_effect=fake_create)
-    with patch("modal.Sandbox", cls):
+    app_cls, _ = _make_mock_modal_app()
+    with patch("modal.Sandbox", cls), patch("modal.App", app_cls):
         assert_conforms(ModalSandboxStrategy())
 
 
@@ -228,3 +257,36 @@ def test_modal_has_nonzero_cost_rate():
     with tempfile.TemporaryDirectory() as tmp:
         guard = SandboxCostGuard(storage_path=Path(tmp) / "cost.json")
         assert guard.rate_for("modal") > 0
+
+
+# --- T2.5 spec gate: module-name shadowing ---------------------------------
+
+
+def test_modal_module_name_does_not_shadow_real_sdk():
+    """`opencomputer/sandbox/modal.py` shares the bare name `modal` with the
+    PyPI package. `from modal import App, Sandbox` inside `run()` must
+    resolve to the real SDK, not recurse into this strategy module.
+
+    Spec T2.5 mandated this import-order guard. The strategy uses absolute
+    imports under `from __future__ import annotations`, so the risk is low
+    — but the project has been bitten by module-name collisions before
+    (loader `sys.modules` reuse), so the guard is explicit.
+    """
+    import importlib
+    import importlib.util
+
+    if importlib.util.find_spec("modal") is None:
+        pytest.skip("modal SDK not installed (optional [modal] extra)")
+
+    import opencomputer.sandbox.modal as oc_modal
+    real_modal = importlib.import_module("modal")
+
+    # Distinct modules — the strategy module did not become `modal` itself.
+    assert oc_modal is not real_modal
+    assert oc_modal.__name__ == "opencomputer.sandbox.modal"
+    assert real_modal.__name__ == "modal"
+    # The real SDK exposes the names `run()` imports; ours exposes the
+    # strategy. `from modal import App, Sandbox` therefore reaches the SDK.
+    assert hasattr(real_modal, "Sandbox")
+    assert hasattr(real_modal, "App")
+    assert hasattr(oc_modal, "ModalSandboxStrategy")

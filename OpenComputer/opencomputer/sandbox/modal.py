@@ -1,7 +1,8 @@
 """Modal strategy — containment via an ephemeral Modal cloud sandbox.
 
-Each call: creates a fresh ``modal.Sandbox`` via ``Sandbox.create.aio(*argv)``
-— Modal's sandbox model runs the command as the entrypoint, then exposes
+Each call: looks up (find-or-create) a bare Modal ``App``, creates a
+fresh ``modal.Sandbox`` via ``Sandbox.create.aio(*argv, app=app)`` —
+Modal's sandbox model runs the command as the entrypoint, then exposes
 ``returncode`` + ``stdout`` / ``stderr`` StreamReaders. The backend awaits
 ``sandbox.wait.aio()`` (returncode), reads both streams, and calls
 ``sandbox.terminate.aio()`` in ``finally``.
@@ -24,13 +25,19 @@ Spike-resolved behaviours (M-1…M-3, named for parallel with ``e2b.py`` /
 * **M-3 — non-zero exit does NOT raise.** ``sandbox.wait.aio()`` returns
   the returncode; the backend reads ``sandbox.returncode``. No
   exception-handling for normal command failures.
-* **``app`` is optional** (verified from ``modal.Sandbox.create``
-  signature). M2 passes ``app=None`` for the simplest path; the SDK uses
-  an implicit/anonymous app.
-* **``block_network`` is supported on create.** M2 follows the approved
-  warn-and-proceed (e2b / daytona parity); enforcing
-  ``network_allowed=False`` via ``block_network=True`` is a noted
-  follow-up.
+* **``app`` is REQUIRED.** ``Sandbox.create``'s ``app`` kwarg defaults
+  to ``None`` in the signature but is runtime-required when a sandbox is
+  created from outside a Modal container — the M2 spike misread the
+  signature default as "optional". The backend obtains a bare deployed
+  app via ``App.lookup(name, create_if_missing=True)``; that is a
+  synchronous network call, run off the event loop with
+  ``asyncio.to_thread``.
+* **``block_network`` enforces network containment.** ``Sandbox.create``
+  takes ``block_network: bool``; the backend passes
+  ``block_network=not config.network_allowed`` so the default
+  ``network_allowed=False`` genuinely blocks outbound network — no
+  warn-and-proceed (unlike Daytona, whose ``network_block_all`` lives on
+  a params object and is left as a follow-up).
 """
 
 from __future__ import annotations
@@ -59,6 +66,10 @@ _log = logging.getLogger("opencomputer.sandbox.modal")
 #: Auth env var Modal reads first. The other path is a ``~/.modal.toml``
 #: written by ``modal token set``.
 _MODAL_TOKEN_ENV = "MODAL_TOKEN_ID"
+
+#: Modal app name the sandbox attaches to. ``App.lookup`` finds-or-creates
+#: a single bare deployed app under this name, shared by every run.
+_MODAL_APP_NAME = "opencomputer-sandbox"
 
 
 def _modal_toml_exists() -> bool:
@@ -113,7 +124,7 @@ class ModalSandboxStrategy(SandboxStrategy):
     ) -> SandboxResult:
         # Lazy import: a missing optional dep must never crash module load.
         try:
-            from modal import Sandbox
+            from modal import App, Sandbox
         except ImportError as exc:
             raise SandboxUnavailable(
                 "modal strategy: the 'modal' package is not installed; "
@@ -125,18 +136,6 @@ class ModalSandboxStrategy(SandboxStrategy):
                 "modal strategy: MODAL credentials not found — set "
                 "MODAL_TOKEN_ID + MODAL_TOKEN_SECRET, or run `modal token "
                 "set` to write ~/.modal.toml"
-            )
-
-        # Follow the approved warn-and-proceed; Modal exposes ``block_network``
-        # on ``create.aio`` but M2 honors the approved pre-mortem (e2b /
-        # daytona parity). Enforcing this is a noted follow-up.
-        if not config.network_allowed:
-            _log.warning(
-                "modal strategy: network containment was requested "
-                "(network_allowed=False) but is not enforced in M2 — the "
-                "wrapped command WILL have outbound network access. Use a "
-                "local strategy (docker / bwrap / sandbox-exec) to enforce "
-                "network-deny today."
             )
 
         # Modal's create+wait pattern has no stdin channel: stdin can't be
@@ -156,9 +155,22 @@ class ModalSandboxStrategy(SandboxStrategy):
         start = time.monotonic()
 
         async def _create_wait_read() -> tuple[int | None, object, object]:
+            # ``Sandbox.create`` REQUIRES an ``App`` when created from
+            # outside a Modal container. ``App.lookup`` finds-or-creates a
+            # bare deployed app; it is a synchronous network call, so run
+            # it off the event loop with ``to_thread``.
+            app = await asyncio.to_thread(
+                App.lookup, _MODAL_APP_NAME, create_if_missing=True
+            )
             # M-1: argv is varargs; pass positionally (no shlex.join).
+            # ``block_network`` natively enforces ``network_allowed=False``.
             sandbox = await Sandbox.create.aio(
-                *argv, env=envs, timeout=cap, workdir=cwd,
+                *argv,
+                app=app,
+                env=envs,
+                timeout=cap,
+                workdir=cwd,
+                block_network=not config.network_allowed,
             )
             try:
                 # M-3: wait returns the returncode (no exception on non-zero).
