@@ -223,3 +223,61 @@ def test_dispatch_legacy_loop_path_uses_real_home(tmp_path: Path, monkeypatch) -
         f"Expected {tmp_path / 'fakehome'}, got {resolved} "
         f"— legacy loop= path is using Path() (CWD) instead of _home()"
     )
+
+
+def test_gateway_named_profile_home_resolver_uses_profiles_segment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Fix 1 (real bug): the Gateway's ``_resolve_profile_home`` closure
+    must route a NAMED profile to the canonical
+    ``~/.opencomputer/profiles/<name>`` directory — exactly what
+    :func:`opencomputer.profiles.get_profile_dir` returns — NOT the
+    bare ``~/.opencomputer/<name>``.
+
+    The bug: the named-profile branch built ``Path.home() /
+    ".opencomputer" / profile_id`` (missing the ``profiles/`` segment),
+    so a message routed to a named profile constructed an AgentLoop
+    against a wrong, silently-``mkdir``'d empty directory — that
+    profile lost all its memory / sessions / config / .env.
+    """
+    from opencomputer.gateway.server import Gateway
+    from opencomputer.profiles import get_profile_dir
+
+    # Pin the profile root so the assertion doesn't depend on the real
+    # ``~/.opencomputer``.
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path / "ocroot"))
+
+    fake_loop = MagicMock()
+    gateway = Gateway(loop=fake_loop)
+    resolver = gateway._router._profile_home_resolver
+
+    resolved = resolver("workprofile")
+    expected = get_profile_dir("workprofile")
+    assert resolved == expected, (
+        f"named-profile home resolved to {resolved}, expected {expected} "
+        f"(canonical get_profile_dir path with the 'profiles/' segment)"
+    )
+    # The canonical path MUST include the 'profiles' segment.
+    assert "profiles" in resolved.parts, (
+        f"named-profile home {resolved} is missing the 'profiles/' segment "
+        f"— the gateway would route to a blank mkdir'd directory and lose "
+        f"that profile's memory/sessions/config."
+    )
+
+
+def test_gateway_default_profile_home_resolver_uses_home(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Fix 1: the ``default`` branch of ``_resolve_profile_home`` must
+    stay unchanged — it returns ``_home()`` (the active
+    OPENCOMPUTER_HOME), NOT a ``profiles/`` path."""
+    from opencomputer.agent.config import _home
+    from opencomputer.gateway.server import Gateway
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "defaulthome"))
+
+    fake_loop = MagicMock()
+    gateway = Gateway(loop=fake_loop)
+    resolver = gateway._router._profile_home_resolver
+
+    assert resolver("default") == _home()

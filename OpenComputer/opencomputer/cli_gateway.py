@@ -309,8 +309,14 @@ def _uninstall_service(*, profile: str, system: bool) -> None:
 
     backend = get_backend()
     if hasattr(backend, "uninstall"):
-        backend.uninstall(profile=profile)
-        typer.echo("Uninstalled service")
+        # ``ServiceBackend.uninstall`` takes NO arguments — passing
+        # ``profile=`` raised TypeError on every platform. (Making
+        # ``uninstall`` profile-aware is a separate, larger Protocol
+        # change; not done here.)
+        result = backend.uninstall()
+        typer.echo(f"Uninstalled {result.backend} service")
+        for note in result.notes:
+            typer.echo(f"  note: {note}")
     else:
         typer.echo("uninstall not supported by current backend")
 

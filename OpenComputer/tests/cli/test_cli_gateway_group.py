@@ -112,6 +112,45 @@ def test_install_calls_backend(monkeypatch):
     assert install_called["extra_args"] == "gateway"
 
 
+def test_uninstall_calls_backend_uninstall_without_profile_kwarg(monkeypatch):
+    """Fix 2 (real bug): ``backend.uninstall()`` takes NO arguments
+    (the ``ServiceBackend`` Protocol). The old code passed
+    ``profile=`` which raised ``TypeError`` — ``oc gateway uninstall``
+    was 100% broken on every platform.
+
+    This FakeBackend mirrors the real Protocol: ``uninstall()`` accepts
+    no kwargs. The pre-fix call ``backend.uninstall(profile=...)``
+    raises ``TypeError`` against it.
+    """
+    from opencomputer.service.base import UninstallResult
+
+    uninstall_called = {}
+
+    class FakeBackend:
+        def uninstall(self) -> UninstallResult:
+            uninstall_called["hit"] = True
+            return UninstallResult(
+                backend="systemd-user",
+                file_removed=True,
+                config_path=Path("/tmp/foo.service"),
+                notes=[],
+            )
+
+    monkeypatch.setattr(
+        "opencomputer.service.factory.get_backend", lambda: FakeBackend()
+    )
+    result = runner.invoke(gateway_app, ["uninstall", "--profile", "work"])
+    assert result.exit_code == 0, (
+        f"oc gateway uninstall failed (exit {result.exit_code}); "
+        f"output={result.output!r}"
+    )
+    assert uninstall_called.get("hit") is True
+    # The pre-fix code raised TypeError; ensure it does not surface.
+    assert result.exception is None or not isinstance(
+        result.exception, TypeError
+    ), f"uninstall raised TypeError: {result.exception!r}"
+
+
 def test_start_calls_backend_start(monkeypatch):
     class FakeBackend:
         def start(self):
