@@ -79,7 +79,11 @@ class FakeSandboxBackend(SandboxBackend):
         # in spirit; a test double has no subprocess to spawn).
         await asyncio.sleep(0)
         start = time.monotonic()
-        exit_code, stdout, stderr = _interpret(argv, config)
+        exit_code, stdout, stderr = interpret_probe(
+            argv,
+            env=filtered_env(config),
+            cpu_seconds_limit=config.cpu_seconds_limit,
+        )
         return SandboxResult(
             exit_code=exit_code,
             stdout=stdout,
@@ -90,15 +94,23 @@ class FakeSandboxBackend(SandboxBackend):
         )
 
 
-def _interpret(argv: list[str], config: SandboxConfig) -> tuple[int, str, str]:
-    """Map a probe argv to ``(exit_code, stdout, stderr)`` — purely in-memory."""
+def interpret_probe(
+    argv: list[str], *, env: dict[str, str], cpu_seconds_limit: int
+) -> tuple[int, str, str]:
+    """Map a probe argv to ``(exit_code, stdout, stderr)`` — purely in-memory.
+
+    Public so M2's cloud-backend test mocks (Daytona, Modal) can delegate to
+    the same probe-vocabulary interpreter as ``FakeSandboxBackend``. The
+    backend supplies its already-filtered ``env`` dict + the ``cpu_seconds_limit``
+    so the mock makes the same env / timeout decisions a real backend would.
+    """
     tokens = _probe_tokens(argv)
     if not tokens:
         return 0, "", ""
     head = tokens[0]
     if head == "printenv":
         var = tokens[1] if len(tokens) > 1 else ""
-        value = filtered_env(config).get(var, "")
+        value = env.get(var, "")
         # printenv prints ``value\n`` + exit 0 when set; exit 1 when unset.
         return (0, f"{value}\n", "") if value else (1, "", "")
     if head == "echo":
@@ -118,7 +130,7 @@ def _interpret(argv: list[str], config: SandboxConfig) -> tuple[int, str, str]:
             seconds = float(tokens[1])
         except (IndexError, ValueError):
             seconds = 0.0
-        if seconds > config.cpu_seconds_limit:
+        if seconds > cpu_seconds_limit:
             return TIMEOUT_EXIT_CODE, "", TIMEOUT_STDERR
         return 0, "", ""
     # Any probe outside the conformance vocabulary: benign success. The fake
@@ -212,10 +224,17 @@ async def _run_behavioural_probes(backend: SandboxBackend, name: str) -> None:
         f"{name}: wrapped_command must be a list"
     )
 
-    # stderr capture.
+    # stderr capture. Lenient — some cloud backends (e.g. Daytona's
+    # ``process.exec`` only captures stdout, verified from SDK source) merge
+    # stderr into stdout via a ``2>&1`` wrap. Accept the marker in either
+    # stream; a backend that drops the output entirely still fails.
     result = await backend.run(list(_PROBE_STDERR), config=SandboxConfig())
-    assert "conformance-stderr-ok" in result.stderr, (
-        f"{name}: stderr not captured (got {result.stderr!r})"
+    assert (
+        "conformance-stderr-ok" in result.stderr
+        or "conformance-stderr-ok" in result.stdout
+    ), (
+        f"{name}: stderr probe output not captured "
+        f"(stdout={result.stdout!r}, stderr={result.stderr!r})"
     )
 
     # Exit-code fidelity — a non-zero child exit must reach the result.
@@ -231,8 +250,12 @@ async def _run_behavioural_probes(backend: SandboxBackend, name: str) -> None:
     assert result.exit_code == TIMEOUT_EXIT_CODE, (
         f"{name}: timeout exit_code {result.exit_code} != {TIMEOUT_EXIT_CODE}"
     )
-    assert TIMEOUT_STDERR in result.stderr, (
-        f"{name}: timeout stderr lacks {TIMEOUT_STDERR!r} (got {result.stderr!r})"
+    # Lenient on the sentinel's stream, for the same reason as stderr above.
+    assert (
+        TIMEOUT_STDERR in result.stderr or TIMEOUT_STDERR in result.stdout
+    ), (
+        f"{name}: timeout sentinel {TIMEOUT_STDERR!r} not surfaced "
+        f"(stdout={result.stdout!r}, stderr={result.stderr!r})"
     )
 
     # Env allowlist — ABC clause 2. An allowlisted var passes through; a
