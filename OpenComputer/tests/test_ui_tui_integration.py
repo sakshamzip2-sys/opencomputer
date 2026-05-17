@@ -30,6 +30,7 @@ _TUI_SRC = _REPO / "opencomputer" / "ui-tui" / "src"
 _DIST = _REPO / "opencomputer" / "ui-tui" / "dist"
 _CLIENT_BUNDLE = _DIST / "wireClient.js"
 _RENDER_BUNDLE = _DIST / "renderSmoke.js"
+_OVERLAYS_BUNDLE = _DIST / "overlaysSmoke.js"
 
 
 def _find_node() -> str | None:
@@ -178,3 +179,39 @@ def test_app_renders_without_crashing() -> None:
     # The app's banner + a status line must be in the rendered output.
     assert "OpenComputer TUI" in frame, f"banner missing from frame: {frame!r}"
     assert "disconnected" in frame, f"status line missing from frame: {frame!r}"
+
+
+@pytest.mark.skipif(
+    _NODE is None or not _OVERLAYS_BUNDLE.is_file(),
+    reason="Node toolchain or built overlays-smoke bundle unavailable",
+)
+def test_all_overlays_render() -> None:
+    """Every one of the six overlay components mounts and renders its panel.
+
+    overlaysSmoke.js mounts ModelPicker / SkillsHub / Settings / Agents /
+    Rollback / Tools with sample data and prints the combined frame.
+    """
+    assert _NODE is not None  # guaranteed by skipif
+    proc = subprocess.run(
+        [_NODE, str(_OVERLAYS_BUNDLE)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    out = proc.stdout
+    assert "FRAME_START" in out and "FRAME_END" in out, (
+        f"overlays-smoke produced no frame.\nstdout={out!r}\nstderr={proc.stderr!r}"
+    )
+    frame = out.split("FRAME_START", 1)[1].split("FRAME_END", 1)[0]
+    # Each overlay's panel title must appear — proves all six render.
+    for title in (
+        "Model picker",
+        "Skills hub",
+        "Settings",
+        "Subagents",
+        "Checkpoints",
+        "Tools",
+    ):
+        assert title in frame, f"overlay {title!r} missing from frame:\n{frame}"
+    # Sample data rows rendered, not just the panel chrome.
+    assert "claude-opus-4-7" in frame and "demo-skill" in frame, frame

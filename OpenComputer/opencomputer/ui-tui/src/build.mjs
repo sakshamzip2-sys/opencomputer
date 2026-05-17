@@ -37,11 +37,17 @@ await esbuild.build({
   outfile: "../dist/wireClient.js",
 });
 
-// Render-smoke harness (test artifact — see tests/test_ui_tui_integration.py).
+// Render-smoke harnesses (test artifacts — see tests/test_ui_tui_integration.py).
 await esbuild.build({
   ...common,
   entryPoints: ["renderSmoke.tsx"],
   outfile: "../dist/renderSmoke.js",
+});
+
+await esbuild.build({
+  ...common,
+  entryPoints: ["overlaysSmoke.tsx"],
+  outfile: "../dist/overlaysSmoke.js",
 });
 
 // `oc tui` runs the bundle as ESM — the dist/ marker makes Node treat
