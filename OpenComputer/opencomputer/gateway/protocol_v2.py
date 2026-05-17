@@ -56,6 +56,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_MOST_RECENT,
     METHOD_SESSION_RENAME,
     METHOD_SESSION_RESUME,
     METHOD_SESSION_USAGE,
@@ -63,6 +64,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
+    METHOD_SUBAGENTS_LIST,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -526,6 +528,55 @@ class SessionUsageResult(_StrictModel):
     ended_at: float | None = None
 
 
+# 2026-05-17 TUI-parity Milestone 1 batch 5 — subagents + recent session.
+
+
+class SubagentsListParams(_StrictModel):
+    """List spawned subagents. ``running_only`` filters to live records."""
+
+    limit: int = 50
+    running_only: bool = False
+
+
+class SubagentInfo(_StrictModel):
+    """One spawned-subagent record, flattened wire-safe.
+
+    Projection of :class:`opencomputer.agent.subagent_store.StoredSubagent`:
+    ``datetime`` fields become ISO-8601 strings; ``display_state`` is the
+    derived state (``orphaned`` for a running record whose host died).
+    """
+
+    agent_id: str
+    goal: str
+    state: str
+    display_state: str
+    role: str
+    depth: int
+    started_at: str
+    parent_session_id: str | None = None
+    child_session_id: str | None = None
+    ended_at: str | None = None
+    error: str | None = None
+
+
+class SubagentsListResult(_StrictModel):
+    subagents: tuple[SubagentInfo, ...] = ()
+
+
+class SessionMostRecentParams(_StrictModel):
+    """No params — the single newest session for the active profile."""
+
+
+class SessionMostRecentResult(_StrictModel):
+    """The latest session, or ``found=False`` when there are no sessions."""
+
+    found: bool
+    session_id: str | None = None
+    title: str | None = None
+    started_at: float | None = None
+    source: str | None = None
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -548,6 +599,11 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_CONFIG_SET: (ConfigSetParams, ConfigSetResult),
     METHOD_SESSION_RENAME: (SessionRenameParams, SessionRenameResult),
     METHOD_SESSION_USAGE: (SessionUsageParams, SessionUsageResult),
+    METHOD_SUBAGENTS_LIST: (SubagentsListParams, SubagentsListResult),
+    METHOD_SESSION_MOST_RECENT: (
+        SessionMostRecentParams,
+        SessionMostRecentResult,
+    ),
 }
 
 
@@ -723,6 +779,8 @@ __all__ = [
     "METHOD_CONFIG_SET",
     "METHOD_SESSION_RENAME",
     "METHOD_SESSION_USAGE",
+    "METHOD_SUBAGENTS_LIST",
+    "METHOD_SESSION_MOST_RECENT",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -780,6 +838,11 @@ __all__ = [
     "SessionRenameResult",
     "SessionUsageParams",
     "SessionUsageResult",
+    "SubagentsListParams",
+    "SubagentInfo",
+    "SubagentsListResult",
+    "SessionMostRecentParams",
+    "SessionMostRecentResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",

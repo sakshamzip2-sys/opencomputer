@@ -51,6 +51,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_MOST_RECENT,
     METHOD_SESSION_RENAME,
     METHOD_SESSION_RESUME,
     METHOD_SESSION_USAGE,
@@ -58,6 +59,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
+    METHOD_SUBAGENTS_LIST,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -362,6 +364,8 @@ class WireServer:
                         METHOD_CONFIG_SET,
                         METHOD_SESSION_RENAME,
                         METHOD_SESSION_USAGE,
+                        METHOD_SUBAGENTS_LIST,
+                        METHOD_SESSION_MOST_RECENT,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -760,6 +764,39 @@ class WireServer:
                     req.id,
                     True,
                     payload={"session_id": session_id, "found": False},
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SUBAGENTS_LIST:
+            # 2026-05-17 TUI-parity M1 batch 5 — spawned-subagent history
+            # for an agents overlay. Old DBs without a subagents table
+            # degrade to an empty list (helper swallows the error).
+            limit = int(req.params.get("limit", 50))
+            running_only = bool(req.params.get("running_only", False))
+            try:
+                _loop = await self._router.get_or_load("default")
+                subs = self._collect_subagents(
+                    _loop, limit=limit, running_only=running_only
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("subagents.list: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"subagents.list: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"subagents": subs}
+            )
+        elif req.method == METHOD_SESSION_MOST_RECENT:
+            # 2026-05-17 TUI-parity M1 batch 5 — the newest session, for
+            # the TUI's "resume last" affordance. Empty profile → found=False.
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_most_recent(_loop)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.most_recent: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.most_recent: {exc}"
                 )
                 return
             await self._send_response(ws, req.id, True, payload=payload)
@@ -1326,6 +1363,101 @@ class WireServer:
             "cost_usd": getattr(row, "cost_usd", None),
             "started_at": getattr(row, "started_at", None),
             "ended_at": getattr(row, "ended_at", None),
+        }
+
+    @staticmethod
+    def _collect_subagents(
+        loop: Any, *, limit: int, running_only: bool
+    ) -> list[dict[str, Any]]:
+        """Build the ``METHOD_SUBAGENTS_LIST`` payload for one AgentLoop.
+
+        Opens a :class:`opencomputer.agent.subagent_store.SubagentStore`
+        over the same DB file as the loop's SessionDB (the ``subagents``
+        table lives in ``sessions.db``) and flattens each record into a
+        wire-safe dict — ``datetime`` fields become ISO-8601 strings.
+
+        Failure modes (helper never raises):
+
+        * ``loop.db`` missing → ``[]``.
+        * DB predates the ``subagents`` table (``SubagentStoreUnavailable``)
+          → ``[]`` logged at debug. The overlay renders empty.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("subagents.list: loop has no db — empty")
+            return []
+
+        try:
+            from opencomputer.agent.subagent_store import (
+                SubagentStore,
+                SubagentStoreUnavailable,
+            )
+
+            store = SubagentStore(db.db_path, allow_create=False)
+            # history() excludes running records by design (they live in
+            # list_running()). For an "all" view the overlay needs both —
+            # running first, then the most-recent terminal history. The
+            # two sets are disjoint (state is exclusive) so no dedup.
+            if running_only:
+                records = list(store.list_running())
+            else:
+                records = list(store.list_running()) + list(
+                    store.history(limit=max(1, limit))
+                )
+        except SubagentStoreUnavailable:
+            logger.debug("subagents.list: store unavailable (old DB) — empty")
+            return []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("subagents.list: store read failed: %s — empty", exc)
+            return []
+
+        out: list[dict[str, Any]] = []
+        for r in records:
+            started = getattr(r, "started_at", None)
+            ended = getattr(r, "ended_at", None)
+            out.append(
+                {
+                    "agent_id": getattr(r, "agent_id", ""),
+                    "goal": getattr(r, "goal", ""),
+                    "state": getattr(r, "state", ""),
+                    "display_state": getattr(r, "display_state", "")
+                    or getattr(r, "state", ""),
+                    "role": getattr(r, "role", ""),
+                    "depth": getattr(r, "depth", 0),
+                    "started_at": started.isoformat() if started else "",
+                    "parent_session_id": getattr(r, "parent_session_id", None),
+                    "child_session_id": getattr(r, "child_session_id", None),
+                    "ended_at": ended.isoformat() if ended else None,
+                    "error": getattr(r, "error", None),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _collect_most_recent(loop: Any) -> dict[str, Any]:
+        """Build the ``METHOD_SESSION_MOST_RECENT`` payload.
+
+        Returns the newest session row's id/title/timestamp, or
+        ``{"found": False}`` when ``loop.db`` is missing or the profile
+        has no sessions. Never raises.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            return {"found": False}
+        try:
+            rows = db.list_sessions(limit=1)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("session.most_recent: list failed: %s", exc)
+            return {"found": False}
+        if not rows:
+            return {"found": False}
+        row = rows[0]
+        return {
+            "found": True,
+            "session_id": row.get("id"),
+            "title": row.get("title"),
+            "started_at": row.get("started_at"),
+            "source": row.get("source"),
         }
 
     @staticmethod

@@ -106,6 +106,12 @@ METHOD_CONFIG_SET = "config.set"
 METHOD_SESSION_RENAME = "session.rename"
 METHOD_SESSION_USAGE = "session.usage"
 
+# 2026-05-17 TUI-parity Milestone 1 batch 5 — subagents + recent session.
+# subagents.list powers an agents overlay; session.most_recent powers the
+# TUI's "resume last session" affordance.
+METHOD_SUBAGENTS_LIST = "subagents.list"
+METHOD_SESSION_MOST_RECENT = "session.most_recent"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -180,6 +186,8 @@ __all__ = [
     "METHOD_CONFIG_SET",
     "METHOD_SESSION_RENAME",
     "METHOD_SESSION_USAGE",
+    "METHOD_SUBAGENTS_LIST",
+    "METHOD_SESSION_MOST_RECENT",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",
