@@ -1595,6 +1595,48 @@ def _handle_image(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_paste(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/paste`` — attach an image from the system clipboard.
+
+    Hermes-parity ("Attach clipboard image from your clipboard"). Pulls
+    the image off the OS clipboard via the cross-platform engine in
+    :mod:`opencomputer.cli_ui.clipboard`, writes it to a temp PNG, and
+    queues it for the next user message through ``on_image_attach`` —
+    the same callback ``/image`` uses. Clipboard-only; ``args`` ignored.
+    """
+    import tempfile
+    import time
+
+    from opencomputer.cli_ui import clipboard
+
+    if not clipboard.has_clipboard_image():
+        ctx.console.print(
+            "[yellow]No image found on the clipboard. "
+            "Copy an image first, or use /image <path> for a file.[/yellow]"
+        )
+        return SlashResult(handled=True)
+
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    counter = int(time.time() * 1000) % 100000
+    dest = (
+        Path(tempfile.gettempdir())
+        / "opencomputer-clipboard"
+        / f"paste_{ts}_{counter}.png"
+    )
+    if not clipboard.save_clipboard_image(dest):
+        ctx.console.print(
+            "[yellow]Couldn't read the image from your clipboard.[/yellow]"
+        )
+        return SlashResult(handled=True)
+
+    ok, msg = ctx.on_image_attach(str(dest))
+    if ok:
+        ctx.console.print(f"[green]✓[/green] {msg}")
+    else:
+        ctx.console.print(f"[yellow]{msg}[/yellow]")
+    return SlashResult(handled=True)
+
+
 # ─── Hermes-parity Tier B (2026-04-30): /retry + /stop ───────────────
 
 
@@ -1694,6 +1736,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "plugins":  _handle_plugins_inline,
     "profile":  _handle_profile_inline,
     "image":    _handle_image,
+    "paste":    _handle_paste,
     "tools":    _handle_tools_inline,
     "retry":    _handle_retry,
     "stop":     _handle_stop_bg,

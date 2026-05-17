@@ -240,6 +240,16 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="session",
         args_hint="<path>",
     ),
+    # Hermes-parity — "Attach clipboard image from your clipboard". The
+    # clipboard-image engine (cli_ui/clipboard.py) already exists; this
+    # surfaces it as a slash command alongside the path-based /image.
+    CommandDef(
+        name="paste",
+        description=(
+            "Attach an image from the system clipboard for the next message."
+        ),
+        category="session",
+    ),
     CommandDef(
         name="tools",
         description="List enabled tools (read-only inventory).",
