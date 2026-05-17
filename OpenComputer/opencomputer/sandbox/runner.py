@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from opencomputer.sandbox.auto import auto_strategy
+from opencomputer.sandbox.daytona import DaytonaSandboxStrategy
 from opencomputer.sandbox.docker import DockerStrategy
 from opencomputer.sandbox.e2b import E2BSandboxStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
@@ -51,10 +52,13 @@ def _named_strategy(name: str) -> SandboxStrategy:
         s = SSHSandboxStrategy()
     elif name == "e2b":
         s = E2BSandboxStrategy()
+    elif name == "daytona":
+        s = DaytonaSandboxStrategy()
     else:
         raise SandboxUnavailable(
             f"unknown sandbox strategy {name!r}; "
-            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / e2b / none"
+            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / "
+            "e2b / daytona / none"
         )
     if not s.is_available():
         raise SandboxUnavailable(

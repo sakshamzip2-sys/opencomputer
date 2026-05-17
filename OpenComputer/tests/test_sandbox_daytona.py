@@ -160,3 +160,32 @@ def test_daytona_conforms_against_mocked_sdk(monkeypatch):
     sandbox.process.exec = AsyncMock(side_effect=fake_exec)
     with patch("daytona.AsyncDaytona", cls):
         assert_conforms(DaytonaSandboxStrategy())
+
+
+# --- T2.2 wiring ------------------------------------------------------------
+
+
+def test_daytona_in_strategy_name_literal():
+    """``"daytona"`` is in ``SandboxStrategyName`` — CLI auto-derives via Literal."""
+    import typing
+
+    from plugin_sdk.sandbox import SandboxStrategyName
+
+    assert "daytona" in typing.get_args(SandboxStrategyName)
+
+
+def test_daytona_resolvable_via_named_strategy(monkeypatch):
+    """``runner._named_strategy("daytona")`` returns a ``DaytonaSandboxStrategy``."""
+    from opencomputer.sandbox.runner import _named_strategy
+
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+    backend = _named_strategy("daytona")
+    assert isinstance(backend, DaytonaSandboxStrategy)
+    assert backend.name == "daytona"
+
+
+def test_daytona_exported_from_sandbox_package():
+    """``from opencomputer.sandbox import DaytonaSandboxStrategy`` works."""
+    from opencomputer.sandbox import DaytonaSandboxStrategy as Exported
+
+    assert Exported is DaytonaSandboxStrategy

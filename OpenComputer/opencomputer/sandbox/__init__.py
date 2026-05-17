@@ -25,6 +25,10 @@ Strategies
   sandbox. Requires the optional ``e2b`` extra + an ``E2B_API_KEY``.
   Always networked — cannot enforce ``network_allowed=False`` (it warns
   and proceeds). Milestone 2.
+* :class:`DaytonaSandboxStrategy` — runs argv inside an ephemeral
+  Daytona cloud sandbox. Requires the optional ``daytona`` extra + a
+  ``DAYTONA_API_KEY``. Wraps commands with ``2>&1`` to preserve stderr
+  (the SDK's ``ExecuteResponse.result`` captures stdout only). Milestone 2.1.
 * :class:`NoneSandboxStrategy` — no containment. For trusted internal
   callers and tests. Logs a WARNING on every invocation.
 
@@ -46,6 +50,7 @@ containment is intentionally disabled (tests, CI, single-tenant servers).
 from __future__ import annotations
 
 from opencomputer.sandbox.auto import auto_strategy
+from opencomputer.sandbox.daytona import DaytonaSandboxStrategy
 from opencomputer.sandbox.docker import DockerStrategy
 from opencomputer.sandbox.e2b import E2BSandboxStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
@@ -55,6 +60,7 @@ from opencomputer.sandbox.runner import run_sandboxed
 from opencomputer.sandbox.ssh import SSHSandboxStrategy
 
 __all__ = [
+    "DaytonaSandboxStrategy",
     "DockerStrategy",
     "E2BSandboxStrategy",
     "LinuxBwrapStrategy",
