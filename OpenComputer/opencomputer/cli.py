@@ -1746,75 +1746,15 @@ def _run_chat_session(
     except Exception:  # noqa: BLE001 — never crash on capability sniff
         runtime.custom["_provider_supports_native_thinking"] = False
 
-    # Register the ThinkingInjector once per process. Idempotent — if a
-    # previous session/test re-init already registered it, unregister
-    # first to avoid InjectionEngine.register's "already registered"
-    # ValueError.
-    from opencomputer.agent.injection import engine as injection_engine
-    from opencomputer.agent.thinking_injector import ThinkingInjector
-    injection_engine.unregister("thinking_tags_fallback")
-    injection_engine.register(ThinkingInjector())
-
-    # v1.1 plan-2 M7 (2026-05-09) — register the path-glob rules
-    # injector so .opencomputer/rules/*.md fire on the next turn after
-    # any path-touching tool call. Empty rules list → provider stays
-    # registered but contributes nothing (cheap no-op per turn).
-    try:
-        from opencomputer.agent.path_rules_injection import (
-            PathGlobRulesProvider,
-            load_rules_for_active_profile,
-        )
-
-        injection_engine.unregister("path_glob_rules")
-        injection_engine.register(
-            PathGlobRulesProvider(rules=load_rules_for_active_profile())
-        )
-    except Exception:  # noqa: BLE001 — never break loop boot on rules load fail
-        import logging as _log_mod
-        _log_mod.getLogger("opencomputer.cli").debug(
-            "path-glob rules registration failed (suppressed)", exc_info=True
-        )
-
-    # 2026-05-13 — profile handoff: register the inbox-injection provider so
-    # any pending handoff in the active profile's ``inbox/`` lands as a
-    # system-prompt section on the next turn. Idempotent. Applies to ALL
-    # surfaces (CLI, webui, workspace, wire clients, gateway adapters) —
-    # the provider keys off the active profile, not the surface.
-    try:
-        from opencomputer.agent.handoff import HandoffInjectionProvider
-
-        def _active_profile_home() -> object:
-            from pathlib import Path
-
-            from opencomputer.profiles import (
-                get_profile_dir,
-                read_active_profile,
-            )
-
-            active = read_active_profile()
-            root = get_profile_dir(active)
-            return Path(root) / "home"
-
-        injection_engine.unregister("handoff_inbox")
-        injection_engine.register(
-            HandoffInjectionProvider(
-                profile_home_resolver=_active_profile_home,
-            ),
-        )
-    except Exception:  # noqa: BLE001 — never break loop boot
-        import logging as _log_mod
-        _log_mod.getLogger("opencomputer.cli").warning(
-            "handoff inbox injection provider registration failed",
-            exc_info=True,
-        )
-
-    # life-event teeth — register the per-turn life-event hint provider for
-    # the CLI surface (always on; the helper handles idempotent
-    # (re)registration + fail-soft boot).
-    from opencomputer.awareness.life_events.injection import (
-        register_life_event_injection_provider,
+    # Register OC's built-in injection providers for the CLI surface.
+    # One call wires ThinkingInjector, PathGlobRulesProvider,
+    # HandoffInjectionProvider (with the CLI-correct sticky-active-profile
+    # resolver) and LifeEventInjectionProvider — each idempotent +
+    # fail-soft. See opencomputer.agent.injection_registration.
+    from opencomputer.agent.injection_registration import (
+        register_default_injection_providers,
     )
-    register_life_event_injection_provider("cli")
+    register_default_injection_providers("cli")
 
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     loop._runtime = runtime
@@ -4092,12 +4032,14 @@ def wire(
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
 
-    # life-event teeth — register the per-turn life-event hint provider for
-    # the wire surface (idempotent + fail-soft).
-    from opencomputer.awareness.life_events.injection import (
-        register_life_event_injection_provider,
+    # Register OC's built-in injection providers for the wire surface.
+    # One call wires ThinkingInjector, PathGlobRulesProvider,
+    # HandoffInjectionProvider (ContextVar-aware resolver) and
+    # LifeEventInjectionProvider — each idempotent + fail-soft.
+    from opencomputer.agent.injection_registration import (
+        register_default_injection_providers,
     )
-    register_life_event_injection_provider("wire")
+    register_default_injection_providers("wire")
 
     # 2026-05-11 — bind ``loop`` (not the captured ``cfg``/``provider``
     # locals) so any mid-flight mutation to the wire server's loop

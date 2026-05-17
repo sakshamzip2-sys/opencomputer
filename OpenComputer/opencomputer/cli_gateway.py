@@ -158,12 +158,14 @@ def _run_foreground(install_daemon: bool = False, daemon_profile: str = "default
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
-    # life-event teeth — register the per-turn life-event hint provider for
-    # the gateway surface (idempotent + fail-soft).
-    from opencomputer.awareness.life_events.injection import (
-        register_life_event_injection_provider,
+    # Register OC's built-in injection providers for the gateway surface.
+    # One call wires ThinkingInjector, PathGlobRulesProvider,
+    # HandoffInjectionProvider (ContextVar-aware resolver) and
+    # LifeEventInjectionProvider — each idempotent + fail-soft.
+    from opencomputer.agent.injection_registration import (
+        register_default_injection_providers,
     )
-    register_life_event_injection_provider("gateway")
+    register_default_injection_providers("gateway")
 
     # mcp-openclaw-port M2 — session_scoped MCP is intentionally NOT wired
     # into gateway mode. The gateway dispatches one AgentLoop across many

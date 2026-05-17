@@ -346,14 +346,16 @@ async def _run_agent_completion(
     profile_id = profile_home.name
     loop = build_agent_loop_for_profile(profile_id, profile_home)
 
-    # life-event teeth — register the per-turn life-event hint provider for
-    # the webui surface (serves both ``oc webui`` and ``oc workspace``).
-    # This route runs per request; the helper is idempotent so per-request
-    # (re)registration is fine + fail-soft.
-    from opencomputer.awareness.life_events.injection import (
-        register_life_event_injection_provider,
+    # Register OC's built-in injection providers for the webui surface
+    # (serves both ``oc webui`` and ``oc workspace``). One call wires
+    # ThinkingInjector, PathGlobRulesProvider, HandoffInjectionProvider
+    # (ContextVar-aware resolver) and LifeEventInjectionProvider. This
+    # route runs per request; every registration is idempotent so
+    # per-request (re)registration is fine + fail-soft.
+    from opencomputer.agent.injection_registration import (
+        register_default_injection_providers,
     )
-    register_life_event_injection_provider("webui")
+    register_default_injection_providers("webui")
 
     # Per-request model override: a workspace user may pick a model from
     # the dropdown that differs from the profile's default. We respect
