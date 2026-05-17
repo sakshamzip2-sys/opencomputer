@@ -23,6 +23,39 @@ OpenComputer skills follow the [Anthropic Agent Skills spec](https://docs.claude
 ### Optional fields
 - `version`: semver string (e.g. `0.1.0`).
 - `size_review_date`: ISO date (e.g. `2026-05-02`). Documents an intentional exemption from the body-size warning. Use when a skill genuinely earns its >500-line size.
+- `priority`: float; higher values surface earlier in the skill list. Default `null` = alphabetical fallback.
+- `requires`: OpenClaw-parity host-capability gate. Map of `binaries` / `env` / `os` / `plugins` lists; the skill loads but is flagged with `unmet_requirements` when any item is missing.
+- `required_environment_variables` / `required_credential_files`: Hermes-parity passthrough hints — make env vars / credential files visible to ExecuteCode + the Docker sandbox.
+
+### CC §7 fields (parsed by the loader)
+Both snake_case and dashed (`always-on`, `disable-model-invocation`, …) keys work; the loader accepts both Python and Claude-Code conventions.
+
+- `disable_model_invocation` (bool; default `false`): only humans can invoke this skill via `/<name>`; the LLM cannot auto-call it. Use for destructive operations (`deploy`, `commit`) where you want a manual gate even when the agent could pick the skill.
+- `user_invocable` (bool; default `true`): set to `false` to hide the skill from the `/`-autocomplete menu. Body content can still be injected via `always_on`; only the slash discovery surface is hidden.
+- `argument_hint` (string; default `""`): free-text hint shown next to the slash name in autocomplete (e.g. `"<file_path>"`).
+- `paths` (list[str] or scalar string; default `[]`): cwd-gating glob array. When non-empty, the skill only auto-activates in directories whose cwd-or-ancestor matches at least one pattern (see [`skill_matches_cwd`](../../opencomputer/agent/memory.py)). Empty = universal.
+- `model` (string; default `""`): per-skill model override. Mirrors `AgentTemplate.model`.
+- `allowed_tools` (list[str]; default `[]`): per-skill tool allowlist. When non-empty, only these tools are visible to the model while the skill is the active context.
+- `always_on` (bool; default `false`): the skill body is auto-injected into every system prompt (rendered by Slot 4b of `base.j2`). The model sees the standing rules on turn 0 without needing to invoke the Skill tool first. Bodies are capped at 16 KB — oversize bodies silently flip the flag back to `false` with a `WARN` log. Use sparingly; every opt-in adds prompt-token cost to every turn across every session.
+
+#### `always_on` composability matrix
+
+| Combined with | Result |
+|---|---|
+| `paths: [...]` (non-matching cwd) | Body NOT injected — `paths` wins. The author opted into cwd-gated activation; honor it. |
+| `paths: [...]` (matching cwd) | Body IS injected. |
+| `disable_model_invocation: true` | Body IS injected; the model just can't invoke the skill via the tool surface. The two fields are orthogonal — body provides knowledge, invocation flag controls triggering. |
+| `user_invocable: false` | Body IS injected; only the slash menu hides the skill. |
+| `context: fork` | Orthogonal — `context` affects invocation lifetime, not prompt presence. Body injects normally. |
+
+#### When to use `always_on`
+
+Reserved for **discipline-forcing rules** that must reach the model unconditionally — typically meta-skills about how to use other skills (e.g. `using-superpowers`). Avoid for:
+- Per-task playbooks (use `paths:` instead).
+- Anything model-invocable that the agent should choose to use based on relevance — let it discover via the description.
+- Anything over ~8 KB of body — even within the 16 KB cap, every always-on byte multiplies by every turn × every session.
+
+When in doubt, ship without `always_on` and add it later if the model demonstrably misses the skill it should be calling.
 
 ## Body rules
 

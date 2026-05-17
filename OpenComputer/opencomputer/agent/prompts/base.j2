@@ -245,6 +245,25 @@ How to use skills:
 When NO skill matches, work from first principles using the standard tools.
 {% endif %}
 
+{# ─── Slot 4b — Standing skill bodies (always_on opt-in) ─── #}
+{# Plan: docs/superpowers/specs/2026-05-16-using-superpowers-injection/PLAN.md #}
+{# Each entry is a (name, body) tuple emitted by                              #}
+{# prompt_builder._collect_always_on_bodies in alphabetical order. Bodies are #}
+{# verbatim markdown — no Jinja re-evaluation, no HTML escaping (autoescape   #}
+{# is off for .j2 templates).                                                 #}
+{% if always_on_skills %}
+# Standing skill instructions
+
+The skills below have opted into auto-injection (`always_on: true` in their SKILL.md frontmatter). Their bodies are standing instructions — apply them in every turn unless the user's explicit instructions or a higher-priority skill overrides them.
+
+{% for skill_name, skill_body in always_on_skills %}
+## From skill: {{ skill_name }}
+
+{{ skill_body }}
+
+{% endfor %}
+{% endif %}
+
 {# ─── Slot 5 — Context files (workspace) — Hermes v2 D8 ─── #}
 {% if workspace_context -%}
 <workspace-context>

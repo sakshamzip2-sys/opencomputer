@@ -291,3 +291,17 @@ commit (`85174ce2`, a life-event-teeth plan doc) so it carries
 fork-helper work only. That commit object is preserved — `git
 cherry-pick 85174ce2` recovers it if the life-event-teeth track needs
 it.
+
+---
+
+## ADDENDUM — 2026-05-17 (using-superpowers always-on injection)
+
+A separate plan spawned after the original handoff was written:
+`docs/superpowers/specs/2026-05-16-using-superpowers-injection/`.
+**Shipped** on branch
+`worktree-always-on-skill-injection-2026-05-17`. New
+`SkillMeta.always_on: bool` frontmatter flag auto-injects opt-in skill
+bodies into Slot 4b of every system prompt; `using-superpowers/SKILL.md`
+flipped on. See its `STATUS.md` for the ship summary and the entry in
+`CHANGELOG.md`. Independent of Tracks A/B/C — no overlap with the
+parity or awareness-cleanup PRs.

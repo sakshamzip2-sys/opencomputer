@@ -23,9 +23,16 @@ if TYPE_CHECKING:
     from opencomputer.user_model.reranker import SessionContext
     from opencomputer.user_model.store import UserModelStore
 
+import frontmatter
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from opencomputer.agent.memory import SkillMeta
+from opencomputer.agent.memory import (
+    ALWAYS_ON_BODY_CAP_BYTES,
+    SkillMeta,
+    skill_matches_cwd,
+)
+
+logger = __import__("logging").getLogger("opencomputer.agent.prompt_builder")
 
 _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
 
@@ -45,6 +52,78 @@ _TRUNCATION_TAIL_FRAC = 0.20
 # Marker reserves the remaining 10% so head+tail+marker fits within the
 # cap. The marker text itself is much shorter than 10K bytes; the slack
 # accommodates UTF-8 multi-byte boundary safety + a small comfort margin.
+
+
+def _collect_always_on_bodies(
+    skills: list[SkillMeta] | None,
+    *,
+    cwd: Path | None = None,
+) -> list[tuple[str, str]]:
+    """Return ``[(name, body), ...]`` for skills with ``always_on=True``.
+
+    Used by Slot 4b in ``base.j2`` to inject the body of every opt-in
+    skill into every system prompt.
+
+    Plan (M2 / T2.1): docs/superpowers/specs/2026-05-16-using-superpowers-
+    injection/PLAN.md.
+
+    Bodies are loaded from each skill's SKILL.md path with frontmatter
+    stripped. Ordering is alphabetical by ``name.lower()`` so the prompt
+    stays byte-stable across sessions (Anthropic prefix-cache invariant).
+
+    Composability:
+      * ``paths``: when ``cwd`` is supplied, skills are filtered through
+        :func:`opencomputer.agent.memory.skill_matches_cwd` first — a
+        skill with a non-matching ``paths:`` glob does NOT inject even
+        when ``always_on=True``. ``paths`` wins over ``always_on``: per
+        the plan's M3.T3.1 composability resolution. ``cwd=None`` (the
+        legacy call shape) skips path gating so existing callers stay
+        on the universal-matching path.
+      * ``context: fork`` / ``disable_model_invocation``: orthogonal —
+        ``always_on`` controls prompt injection while those control
+        invocation behaviour, so both render side by side.
+
+    Defensive: a missing SKILL.md or a body that exceeds
+    :data:`ALWAYS_ON_BODY_CAP_BYTES` is dropped from the result with a
+    WARN log. Cap enforcement primarily lives at parse time
+    (``memory._parse_skill_extras`` + the loader); this is a belt-and-
+    braces second check in case a skill author hand-constructed a
+    :class:`SkillMeta` outside the loader.
+    """
+    if not skills:
+        return []
+    out: list[tuple[str, str]] = []
+    for s in sorted(skills, key=lambda x: x.name.lower()):
+        if not s.always_on:
+            continue
+        if cwd is not None and not skill_matches_cwd(s, cwd):
+            # ``paths`` filter rejects the skill for this cwd — drop
+            # silently; the user already opted into cwd-gated activation
+            # by declaring ``paths:`` in the frontmatter.
+            continue
+        try:
+            post = frontmatter.load(str(s.path))
+            body = post.content
+        except Exception:
+            logger.warning(
+                "skill %s: failed to load always_on body from %s",
+                s.id,
+                s.path,
+                exc_info=True,
+            )
+            continue
+        body_bytes = len(body.encode("utf-8"))
+        if body_bytes > ALWAYS_ON_BODY_CAP_BYTES:
+            logger.warning(
+                "skill %s: always_on body is %d bytes (>%d cap); "
+                "skipping render to protect prompt-token budget.",
+                s.id,
+                body_bytes,
+                ALWAYS_ON_BODY_CAP_BYTES,
+            )
+            continue
+        out.append((s.name, body))
+    return out
 
 
 def _format_truncation_note(name: str, kept_head: int, kept_tail: int, total: int) -> str:
@@ -364,6 +443,7 @@ class PromptBuilder:
         persona_preferred_tone: str = "",
         pinned_files_block: str = "",
         timezone: str = "",
+        cwd: Path | str | None = None,
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -412,8 +492,14 @@ class PromptBuilder:
         from plugin_sdk import detect_host
 
         host = detect_host()
+        # Explicit cwd wins over process-global os.getcwd() so callers
+        # running inside a cron job, subprocess, or test that has
+        # chdir'd somewhere unrelated can pass the agent's real working
+        # directory without relying on process-state leakage. None →
+        # legacy behavior (sample os.getcwd() at build time).
+        effective_cwd = str(cwd) if cwd is not None else os.getcwd()
         ctx = PromptContext(
-            cwd=os.getcwd(),
+            cwd=effective_cwd,
             user_home=str(Path.home()),
             now=_now_str,
             skills=skills or [],
@@ -466,6 +552,10 @@ class PromptBuilder:
             user_tone=ctx.user_tone,
             persona_preferred_tone=ctx.persona_preferred_tone,
             pinned_files_block=pinned_files_block,
+            always_on_skills=_collect_always_on_bodies(
+                ctx.skills,
+                cwd=Path(ctx.cwd) if ctx.cwd else None,
+            ),
         )
 
     def build_user_facts(
@@ -607,6 +697,7 @@ class PromptBuilder:
         user_tone: str = "",
         persona_preferred_tone: str = "",
         pinned_files_block: str = "",
+        cwd: Path | str | None = None,
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -641,6 +732,7 @@ class PromptBuilder:
             user_tone=user_tone,
             persona_preferred_tone=persona_preferred_tone,
             pinned_files_block=pinned_files_block,
+            cwd=cwd,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base

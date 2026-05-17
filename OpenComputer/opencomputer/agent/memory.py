@@ -30,7 +30,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 import frontmatter
 
@@ -39,6 +39,20 @@ if TYPE_CHECKING:
     from opencomputer.agent.memory_vec_index import VectorIndex
 
 logger = logging.getLogger("opencomputer.agent.memory")
+
+# ─── always-on skill injection (plan: 2026-05-16-using-superpowers-injection) ─
+#
+# A skill that declares ``always_on: true`` in its frontmatter opts its
+# (frontmatter-stripped) body into auto-injection in every system prompt
+# (rendered by Slot 4b of ``opencomputer/agent/prompts/base.j2``).
+#
+# To keep prompt-token cost bounded, an opted-in body MUST fit under the
+# cap below. The loader silently flips the flag back to False and emits
+# a WARN log when a body exceeds it — the skill itself still loads, the
+# author just doesn't get auto-injection. 16 KB is ~5× the size of the
+# canonical opt-in (``using-superpowers/SKILL.md`` at ~3 KB), leaving
+# headroom for the skill to grow without forcing a cap bump.
+ALWAYS_ON_BODY_CAP_BYTES: int = 16 * 1024
 
 # ─── exceptions ───────────────────────────────────────────────────────
 
@@ -411,6 +425,15 @@ class SkillMeta:
     #: set seen by the model to this subset while the skill is the
     #: active context. Empty = inherit full tool set.
     allowed_tools: tuple[str, ...] = field(default_factory=tuple)
+    #: ``always_on: true`` — the skill's body is auto-injected into every
+    #: system prompt (Slot 4b in ``base.j2``), so the model sees its
+    #: standing instructions on turn 0 without first invoking the Skill
+    #: tool. Bodies are capped at :data:`ALWAYS_ON_BODY_CAP_BYTES`; an
+    #: oversize body flips the flag back to False with a WARN log so a
+    #: well-meaning skill never blows up the prompt-token budget.
+    #: Authored for ``using-superpowers``; opt-in for any other skill
+    #: whose discipline-forcing rules must reach the model unconditionally.
+    always_on: bool = False
 
 
 # ─── Hermes-parity skill-frontmatter parsers (P3.4 + P3.5) ────────────
@@ -501,7 +524,24 @@ def _platform_name() -> str:
 # ─── CC §7 extra-frontmatter parser ────────────────────────────────────
 
 
-def _parse_skill_extras(raw: object) -> dict[str, object]:
+class _SkillExtras(TypedDict):
+    """Strongly-typed return shape for :func:`_parse_skill_extras`.
+
+    Mirrors the SkillMeta optional-frontmatter fields so the parsed
+    dict can be ``**``-splatted into ``SkillMeta(...)`` without losing
+    per-field types at the splat boundary.
+    """
+
+    disable_model_invocation: bool
+    user_invocable: bool
+    argument_hint: str
+    paths: tuple[str, ...]
+    skill_model: str
+    allowed_tools: tuple[str, ...]
+    always_on: bool
+
+
+def _parse_skill_extras(raw: object) -> _SkillExtras:
     """Parse the CC §7 optional frontmatter knobs and return a dict
     suitable to splat into :class:`SkillMeta` (under the field names
     declared on the dataclass).
@@ -521,16 +561,20 @@ def _parse_skill_extras(raw: object) -> dict[str, object]:
         - ``paths``                    (tuple[str,...]; default ())
         - ``skill_model``              (str;  default "")
         - ``allowed_tools``            (tuple[str,...]; default ())
+        - ``always_on``                (bool; default False)
 
-    Spec: docs/OC-FROM-CLAUDE-CODE.md §7.
+    Spec: docs/OC-FROM-CLAUDE-CODE.md §7 + plan
+    ``docs/superpowers/specs/2026-05-16-using-superpowers-injection/PLAN.md``
+    for ``always_on``.
     """
-    out: dict[str, object] = {
+    out: _SkillExtras = {
         "disable_model_invocation": False,
         "user_invocable": True,
         "argument_hint": "",
         "paths": (),
         "skill_model": "",
         "allowed_tools": (),
+        "always_on": False,
     }
     if not isinstance(raw, dict):
         return out
@@ -576,6 +620,14 @@ def _parse_skill_extras(raw: object) -> dict[str, object]:
     if isinstance(val, list):
         cleaned_tools = tuple(t for t in val if isinstance(t, str) and t)
         out["allowed_tools"] = cleaned_tools
+
+    # always_on — Slot 4b auto-injection opt-in. Strictly bool to avoid
+    # truthy-string surprises (a stray ``always_on: "true"`` is YAML-
+    # quoted string and SHOULD NOT enable injection — the author meant
+    # to type the bool and didn't).
+    val = _get("always_on", "always-on")
+    if isinstance(val, bool):
+        out["always_on"] = val
 
     return out
 
@@ -1332,6 +1384,29 @@ class MemoryManager:
                 unmet = _evaluate_skill_requirements(
                     requires, installed_plugin_ids=installed_plugin_ids,
                 )
+                # CC §7 + always-on extras. The parser is permissive: a
+                # malformed value falls back to the field default rather
+                # than raising — one broken frontmatter key must not
+                # starve sibling skills' load.
+                extras = _parse_skill_extras(meta)
+                # always_on body-cap enforcement (plan T1.3). An author
+                # who opts in but ships a bloated body would silently
+                # blow up every prompt; flip the flag off + WARN so the
+                # skill still loads but doesn't auto-inject.
+                if extras["always_on"] is True:
+                    body_bytes = len(post.content.encode("utf-8"))
+                    if body_bytes > ALWAYS_ON_BODY_CAP_BYTES:
+                        logger.warning(
+                            "skill %s: always_on flag disabled — body "
+                            "is %d bytes, exceeds cap of %d (%d KB). "
+                            "Trim the SKILL.md body or split content "
+                            "into references/.",
+                            skill_dir.name,
+                            body_bytes,
+                            ALWAYS_ON_BODY_CAP_BYTES,
+                            ALWAYS_ON_BODY_CAP_BYTES // 1024,
+                        )
+                        extras["always_on"] = False
                 out.append(
                     SkillMeta(
                         id=skill_dir.name,
@@ -1346,6 +1421,7 @@ class MemoryManager:
                         required_credential_files=required_creds,
                         requires=requires,
                         unmet_requirements=unmet,
+                        **extras,
                     )
                 )
                 # Hermes parity (P3.4 / P3.5): publish the skill's
