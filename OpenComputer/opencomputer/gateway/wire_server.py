@@ -51,7 +51,9 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_RENAME,
     METHOD_SESSION_RESUME,
+    METHOD_SESSION_USAGE,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
@@ -358,6 +360,8 @@ class WireServer:
                         METHOD_CONFIG_GET,
                         METHOD_MODEL_SET,
                         METHOD_CONFIG_SET,
+                        METHOD_SESSION_RENAME,
+                        METHOD_SESSION_USAGE,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -701,6 +705,64 @@ class WireServer:
                 await self._send_response(ws, req.id, False, error=result)
                 return
             await self._send_response(ws, req.id, True, payload=result)
+        elif req.method == METHOD_SESSION_RENAME:
+            # 2026-05-17 TUI-parity M1 batch 4 — set a session's title.
+            # SessionDB.set_session_title upserts, so renaming a not-yet-
+            # persisted session id still succeeds (idempotent).
+            session_id = str(req.params.get("session_id", "")).strip()
+            title = str(req.params.get("title", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.rename: session_id is required"
+                )
+                return
+            if not title:
+                await self._send_response(
+                    ws, req.id, False, error="session.rename: title must be non-empty"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                _loop.db.set_session_title(session_id, title)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.rename: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.rename: {exc}"
+                )
+                return
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={"session_id": session_id, "title": title, "ok": True},
+            )
+        elif req.method == METHOD_SESSION_USAGE:
+            # 2026-05-17 TUI-parity M1 batch 4 — per-session token/cost
+            # totals. Unknown id → found=False (a success, not an error).
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.usage: session_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_session_usage(_loop, session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.usage: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.usage: {exc}"
+                )
+                return
+            if payload is None:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    True,
+                    payload={"session_id": session_id, "found": False},
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -1228,6 +1290,42 @@ class WireServer:
             "info": dict(info),
             "messages": messages,
             "message_count": len(messages),
+        }
+
+    @staticmethod
+    def _collect_session_usage(
+        loop: Any, session_id: str
+    ) -> dict[str, Any] | None:
+        """Build the ``METHOD_SESSION_USAGE`` payload for one AgentLoop.
+
+        Wraps :meth:`opencomputer.agent.state.SessionDB.session_usage_summary`
+        — per-session token / cache / compaction / cost totals.
+
+        Returns ``None`` when ``loop.db`` is missing or the session id is
+        unknown / empty (the dispatch case turns ``None`` into a
+        ``found=False`` success response). Never raises.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("session.usage: loop has no db — None")
+            return None
+
+        row = db.session_usage_summary(session_id)
+        if row is None:
+            return None
+
+        return {
+            "session_id": session_id,
+            "found": True,
+            "model": getattr(row, "model", None),
+            "input_tokens": getattr(row, "input_tokens", 0),
+            "output_tokens": getattr(row, "output_tokens", 0),
+            "cache_read_tokens": getattr(row, "cache_read_tokens", 0),
+            "cache_write_tokens": getattr(row, "cache_write_tokens", 0),
+            "compactions_count": getattr(row, "compactions_count", 0),
+            "cost_usd": getattr(row, "cost_usd", None),
+            "started_at": getattr(row, "started_at", None),
+            "ended_at": getattr(row, "ended_at", None),
         }
 
     @staticmethod

@@ -100,6 +100,12 @@ METHOD_CONFIG_GET = "config.get"
 METHOD_MODEL_SET = "model.set"
 METHOD_CONFIG_SET = "config.set"
 
+# 2026-05-17 TUI-parity Milestone 1 batch 4 — session metadata.
+# session.rename sets a title (in-picker rename); session.usage returns
+# per-session token / cache / cost totals (usage panel + status bar).
+METHOD_SESSION_RENAME = "session.rename"
+METHOD_SESSION_USAGE = "session.usage"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -172,6 +178,8 @@ __all__ = [
     "METHOD_CONFIG_GET",
     "METHOD_MODEL_SET",
     "METHOD_CONFIG_SET",
+    "METHOD_SESSION_RENAME",
+    "METHOD_SESSION_USAGE",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

@@ -56,7 +56,9 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_RENAME,
     METHOD_SESSION_RESUME,
+    METHOD_SESSION_USAGE,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
@@ -477,6 +479,53 @@ class ConfigSetResult(_StrictModel):
     ok: bool
 
 
+# 2026-05-17 TUI-parity Milestone 1 batch 4 — session-metadata schemas.
+
+
+class SessionRenameParams(_StrictModel):
+    """Set a session's title."""
+
+    session_id: str
+    title: str
+
+
+class SessionRenameResult(_StrictModel):
+    """Rename outcome — echoes the title that landed."""
+
+    session_id: str
+    title: str
+    ok: bool
+
+
+class SessionUsageParams(_StrictModel):
+    """Fetch per-session token / cache / cost totals."""
+
+    session_id: str
+
+
+class SessionUsageResult(_StrictModel):
+    """Per-session usage snapshot.
+
+    Mirrors :class:`opencomputer.agent.state.SessionUsageRow`. ``found``
+    is False for an unknown / empty session id — a successful response,
+    not an error, so a usage panel can render "no data" vs. an RPC error.
+    ``cost_usd`` is ``None`` when the session has no priced ``llm_calls``
+    rows (surfacing 0.0 would be a lie — see CC visibility spec §4.2).
+    """
+
+    session_id: str
+    found: bool
+    model: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    compactions_count: int = 0
+    cost_usd: float | None = None
+    started_at: float | None = None
+    ended_at: float | None = None
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -497,6 +546,8 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_CONFIG_GET: (ConfigGetParams, ConfigGetResult),
     METHOD_MODEL_SET: (ModelSetParams, ModelSetResult),
     METHOD_CONFIG_SET: (ConfigSetParams, ConfigSetResult),
+    METHOD_SESSION_RENAME: (SessionRenameParams, SessionRenameResult),
+    METHOD_SESSION_USAGE: (SessionUsageParams, SessionUsageResult),
 }
 
 
@@ -670,6 +721,8 @@ __all__ = [
     "METHOD_CONFIG_GET",
     "METHOD_MODEL_SET",
     "METHOD_CONFIG_SET",
+    "METHOD_SESSION_RENAME",
+    "METHOD_SESSION_USAGE",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -723,6 +776,10 @@ __all__ = [
     "ModelSetResult",
     "ConfigSetParams",
     "ConfigSetResult",
+    "SessionRenameParams",
+    "SessionRenameResult",
+    "SessionUsageParams",
+    "SessionUsageResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",
