@@ -159,7 +159,35 @@ def schedule_followup(
     )
 
     cron_id = job["id"]
-    state.mark_surfaced(pattern_id, cron_id, surfaced_turn)
+
+    # Compensating action: if mark_surfaced fails AFTER create_job succeeded,
+    # the cron would be orphaned — and worse, the next turn's dedup check
+    # (which keys on a *recorded* cron_id in state) won't see it, so a SECOND
+    # duplicate cron gets scheduled on the next firing. To prevent both the
+    # orphan and the duplicate, we remove the just-created cron and re-raise
+    # so the caller (injection.py collect(), which wraps schedule_followup
+    # fail-open) can see and log the original error.
+    try:
+        state.mark_surfaced(pattern_id, cron_id, surfaced_turn)
+    except Exception:
+        try:
+            remove_job(cron_id)
+        except Exception:  # noqa: BLE001
+            _log.warning(
+                "life-event: mark_surfaced failed for %s and the compensating "
+                "remove_job(%s) also failed — cron may be orphaned",
+                pattern_id,
+                cron_id,
+                exc_info=True,
+            )
+        else:
+            _log.warning(
+                "life-event: mark_surfaced failed for %s; orphan cron %s removed",
+                pattern_id,
+                cron_id,
+            )
+        raise
+
     _log.info(
         "scheduled life-event check-in for %s in %dd (cron %s)",
         pattern_id,
