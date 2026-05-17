@@ -1,0 +1,20 @@
+{
+  "name": "opencomputer-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenComputer terminal UI — Ink/React client of the gateway wire server.",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.0"
+  }
+}
