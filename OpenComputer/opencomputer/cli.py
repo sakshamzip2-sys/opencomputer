@@ -5196,6 +5196,11 @@ app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
 app.add_typer(rules_app, name="rules")
 app.add_typer(routing_app, name="routing")
+
+# 2026-05-18 — best-of-three Recipe 4: `oc skin` list/set/preview.
+from opencomputer.cli_skin import skin_app  # noqa: E402
+
+app.add_typer(skin_app, name="skin")
 # 2026-05-11 — closed-loop threshold tuning surface. Distinct from the
 # existing ``oc evolution`` namespace (PR-1 trajectory/prompts/skills,
 # added in abbc1913) — this one specifically tunes skill-evolution +
