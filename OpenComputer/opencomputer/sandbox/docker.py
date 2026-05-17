@@ -168,30 +168,10 @@ class DockerStrategy(SandboxStrategy):
         for p in config.write_paths:
             flags.extend(["-v", f"{p}:{p}:rw"])
         # P3.5 Hermes-parity: bind-mount each ``required_credential_files``
-        # entry from the active profile read-only into
-        # ``/root/.opencomputer/<path>``. Skills that declare
-        # ``required_credential_files`` in SKILL.md frontmatter contribute
-        # via the global registry; missing files are skipped silently
-        # (logged at debug). All mounts ``:ro`` — the container can read
-        # but never overwrite.
-        try:
-            from opencomputer.profiles import (
-                profile_home_dir,
-                read_active_profile,
-            )
-            from opencomputer.security.env_passthrough import (
-                resolve_credential_file_paths,
-            )
-
-            active = read_active_profile()
-            if active:
-                profile_home = profile_home_dir(active)
-                for host, container in resolve_credential_file_paths(profile_home):
-                    flags.extend(["-v", f"{host}:{container}:ro"])
-        except Exception:  # noqa: BLE001 — credential-mount failure must
-            # never starve a sandbox launch; the skill that declared the
-            # missing file will surface its own runtime error.
-            _log.debug("credential file mount resolution failed", exc_info=True)
+        # entry read-only into the container (see _credential_mount_specs;
+        # all ``:ro`` — the container reads but never overwrites).
+        for host, container in self._credential_mount_specs():
+            flags.extend(["-v", f"{host}:{container}:ro"])
         return flags
 
     def _env_flags(self, config: SandboxConfig) -> list[str]:
@@ -251,6 +231,45 @@ class DockerStrategy(SandboxStrategy):
         cmd.extend(argv)
         return cmd
 
+    @staticmethod
+    def _credential_mount_specs() -> list[tuple[str, str]]:
+        """Resolve ``required_credential_files`` → ``(host, container)``
+        bind-mount pairs from the active profile.
+
+        Hermes-parity (P3.5): skills that declare ``required_credential_files``
+        in SKILL.md frontmatter contribute paths via the global registry;
+        each resolves to a host path + a container path under
+        ``/root/.opencomputer/``. Empty on any failure — fail-soft, a
+        credential-mount failure must never starve a sandbox launch; the
+        skill that declared the missing file surfaces its own runtime
+        error. Shared by :meth:`_containment_flags` (builds the ``-v``
+        flags) and :meth:`_pool_key` (digests the set — see there).
+        """
+        try:
+            from opencomputer.profiles import (
+                profile_home_dir,
+                read_active_profile,
+            )
+            from opencomputer.security.env_passthrough import (
+                resolve_credential_file_paths,
+            )
+
+            active = read_active_profile()
+            if not active:
+                return []
+            # ``resolve_credential_file_paths`` yields ``(Path, str)``;
+            # coerce the host Path to ``str`` so the result is a stable
+            # ``(str, str)`` for both the ``-v`` flag and the pool digest.
+            return [
+                (str(host), str(container))
+                for host, container in resolve_credential_file_paths(
+                    profile_home_dir(active)
+                )
+            ]
+        except Exception:  # noqa: BLE001 — fail-soft; see the docstring
+            _log.debug("credential file mount resolution failed", exc_info=True)
+            return []
+
     def _pool_key(self, config: SandboxConfig) -> str:
         """Pool key for a reuse-scoped call: the scope-derived
         ``container_key`` plus a digest of the containment-relevant config.
@@ -258,8 +277,11 @@ class DockerStrategy(SandboxStrategy):
         Two calls share a pooled container ONLY when both their scope AND
         their containment config match — a pooled container's ``docker
         run`` flags are fixed at creation, so a differing ``image`` /
-        ``network`` / memory / mounts must key a *distinct* container
-        (audit finding P6).
+        ``network`` / memory / mounts / credential-file set must key a
+        *distinct* container (audit findings P6 + #11). The credential
+        mounts are digested too: a pooled container is created with the
+        first caller's ``required_credential_files`` and frozen for its
+        life, so a differing set must not silently reuse it.
         """
         material = "|".join([
             config.image,
@@ -269,6 +291,10 @@ class DockerStrategy(SandboxStrategy):
             str(config.container_persistent),
             ",".join(config.read_paths),
             ",".join(config.write_paths),
+            ",".join(
+                f"{host}:{container}"
+                for host, container in self._credential_mount_specs()
+            ),
         ])
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
         return f"{config.container_key}-{digest}"

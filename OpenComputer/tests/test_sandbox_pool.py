@@ -191,6 +191,36 @@ def test_docker_pool_key_deterministic_and_config_sensitive() -> None:
     )
 
 
+def test_docker_pool_key_includes_credential_mounts() -> None:
+    """``_pool_key`` digests the credential mount set (audit #11).
+
+    A pooled container is created with the FIRST caller's
+    ``required_credential_files`` mounts and frozen for its life. Two
+    same-scope calls with a different credential set must therefore key
+    DISTINCT containers — else call B silently reuses call A's container
+    with the wrong credentials mounted (a cross-call credential leak).
+    """
+    from unittest.mock import patch
+
+    from opencomputer.sandbox.docker import DockerStrategy
+    from plugin_sdk.sandbox import SandboxConfig
+
+    strat = DockerStrategy()
+    config = SandboxConfig(container_key="session-x")
+    creds = [("/host/api.key", "/root/.opencomputer/api.key")]
+    with patch.object(
+        DockerStrategy, "_credential_mount_specs", staticmethod(lambda: [])
+    ):
+        key_no_creds = strat._pool_key(config)
+    with patch.object(
+        DockerStrategy, "_credential_mount_specs", staticmethod(lambda: creds)
+    ):
+        key_with_creds = strat._pool_key(config)
+        # Same credential set → same key (deterministic).
+        assert strat._pool_key(config) == key_with_creds
+    assert key_no_creds != key_with_creds
+
+
 def test_docker_run_pooled_execs_into_acquired_container() -> None:
     """``run`` with a ``container_key`` acquires a pooled container and
     ``docker exec``s the command into it (mocked — no real Docker)."""
