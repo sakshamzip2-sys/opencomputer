@@ -88,8 +88,8 @@ oc gateway diagnose --rollup --json
 |---|---|
 | **M1 — observability** (telemetry table, `ParityProbe`, dispatcher instrumentation, `oc gateway diagnose`, footer-on for fresh installs) | **Shipped** |
 | **M2 — telemetry** (synthetic-load run modelling the real config) | **Shipped** — see below |
-| **M3 — fix the mechanisms** (#1, #2, #3, #5, #6, #7, #8, #10-telemetry) | **Shipped — 9 of 10** |
-| **M4 — document the rest as deferred** | **Shipped** — `deferred-parity-work.md` |
+| **M3 — fix the mechanisms** (all ten — see table below) | **Shipped — 10 of 10** |
+| **M4 — document remaining work** | **Shipped** — `deferred-parity-work.md` |
 
 ### M2 — what the telemetry showed
 
@@ -114,10 +114,11 @@ routing is adopted later.
 | 6 / 8 | `profile_rebind` / `routing_decision_invisible` | A one-line `↪ routed: …` badge on the first routed reply of a session. |
 | 7 | `persona_casual_register` | `display.persona_override` — pin a persona id, or `none`/`off` to suppress the platform-driven casual register entirely. |
 | 9 | `runtime_footer_off` | Footer on for fresh installs (M1). |
-| 10 | `compaction_long_session` | Telemetry bug fixed — decided by a durable `compactions_count` delta, not the shared runtime. The compaction *context-loss* itself is deferred (`deferred-parity-work.md`). |
+| 10 | `compaction_long_session` | Telemetry bug fixed (durable `compactions_count` delta). **And** `CompactionConfig.preserve_anchor` (default on) keeps the session's first user message verbatim across every compaction — a long session never re-summarises away its origin context. |
 
-The only genuinely deferred item is the #10 compaction *context-loss*
-(an XL `CompactionEngine` change) — see `deferred-parity-work.md`.
+**All ten mechanisms are fixed.** The one item not built —
+async-consent non-serialization — is a latency *enhancement*, not a
+parity gap; see `deferred-parity-work.md`.
 
 ---
 
