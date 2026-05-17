@@ -190,6 +190,30 @@ export function RollbackOverlay({
   );
 }
 
+// ─── permission prompt ──────────────────────────────────────────────
+
+export function PermissionPrompt({
+  capabilityId,
+  context,
+  scope,
+}: {
+  capabilityId: string;
+  context: string;
+  scope?: string | null;
+}): React.ReactElement {
+  return (
+    <Box {...PANEL} flexDirection="column" borderColor="yellow">
+      <Text color="yellow"> Permission needed — the agent is paused</Text>
+      <Text>{`  capability: ${capabilityId}`}</Text>
+      {scope ? <Text color="gray">{`  scope: ${scope}`}</Text> : null}
+      {context ? <Text color="gray">{`  ${clip(context, 92)}`}</Text> : null}
+      <Text color="cyan">
+        {"  [a] allow once   [A] allow always   [d] deny"}
+      </Text>
+    </Box>
+  );
+}
+
 // ─── tools inspector ────────────────────────────────────────────────
 
 export function ToolsOverlay({

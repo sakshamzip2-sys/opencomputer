@@ -260,3 +260,33 @@ export interface SlashDispatchResult {
   output: string;
   side_effects?: Record<string, unknown>;
 }
+
+// ─── server-pushed event payloads the TUI acts on ───────────────────
+
+/** ``permission.request`` — a Tier-2 capability needs the user's call. */
+export interface PermissionRequestPayload {
+  request_id: string;
+  session_id: string;
+  capability_id: string;
+  scope?: string | null;
+  context?: string;
+  timeout_s?: number;
+}
+
+/** ``stream.retry`` — a pre-first-byte transient retry is in progress. */
+export interface StreamRetryPayload {
+  attempt?: number;
+  next_attempt?: number;
+  max_attempts?: number;
+  delay_seconds?: number;
+  error_kind?: string;
+  error_message?: string;
+  exhausted?: boolean;
+}
+
+/** ``tool.result`` — the outcome of a tool call. */
+export interface ToolResultPayload {
+  tool_call_id?: string;
+  content?: string;
+  is_error?: boolean;
+}

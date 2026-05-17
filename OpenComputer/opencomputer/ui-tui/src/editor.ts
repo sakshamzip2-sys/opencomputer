@@ -81,56 +81,67 @@ export function useEditor(): Editor {
     setBuf({ text: "", cursor: 0 });
   }, []);
 
-  // No deps: every read happens inside a functional updater, so the
-  // callback is stable and never sees a stale text/cursor.
-  const onKey = useCallback((input: string, key: Key): boolean => {
-    // Enter is the app's call (submit vs. nothing) — not an editing key.
-    if (key.return) return false;
+  // Mutations all run through functional `setBuf` updaters, so they never
+  // see a stale buffer. The ↑↓ EDGE decision (am I on the first/last
+  // line?) needs the current row, so onKey depends on `row`/`lineCount` —
+  // that only governs the boolean return, never an insert position, so it
+  // can't reintroduce the stale-cursor corruption.
+  const lineCount = lines.length;
+  const onKey = useCallback(
+    (input: string, key: Key): boolean => {
+      // Enter is the app's call (submit vs. nothing) — not an editing key.
+      if (key.return) return false;
 
-    if (key.ctrl && input === "n") {
-      setBuf((b) => ({
-        text: b.text.slice(0, b.cursor) + "\n" + b.text.slice(b.cursor),
-        cursor: b.cursor + 1,
-      }));
-      return true;
-    }
-    if (key.leftArrow) {
-      setBuf((b) => ({ ...b, cursor: Math.max(0, b.cursor - 1) }));
-      return true;
-    }
-    if (key.rightArrow) {
-      setBuf((b) => ({ ...b, cursor: Math.min(b.text.length, b.cursor + 1) }));
-      return true;
-    }
-    if (key.upArrow) {
-      setBuf((b) => moveVertical(b, -1));
-      return true;
-    }
-    if (key.downArrow) {
-      setBuf((b) => moveVertical(b, 1));
-      return true;
-    }
-    if (key.backspace || key.delete) {
-      setBuf((b) =>
-        b.cursor > 0
-          ? {
-              text: b.text.slice(0, b.cursor - 1) + b.text.slice(b.cursor),
-              cursor: b.cursor - 1,
-            }
-          : b,
-      );
-      return true;
-    }
-    // Printable input — insert at the cursor. Excludes control chords.
-    if (input && !key.ctrl && !key.meta && !key.escape) {
-      setBuf((b) => ({
-        text: b.text.slice(0, b.cursor) + input + b.text.slice(b.cursor),
-        cursor: b.cursor + input.length,
-      }));
-      return true;
-    }
-    return false;
-  }, []);
+      if (key.ctrl && input === "n") {
+        setBuf((b) => ({
+          text: b.text.slice(0, b.cursor) + "\n" + b.text.slice(b.cursor),
+          cursor: b.cursor + 1,
+        }));
+        return true;
+      }
+      if (key.leftArrow) {
+        setBuf((b) => ({ ...b, cursor: Math.max(0, b.cursor - 1) }));
+        return true;
+      }
+      if (key.rightArrow) {
+        setBuf((b) => ({ ...b, cursor: Math.min(b.text.length, b.cursor + 1) }));
+        return true;
+      }
+      if (key.upArrow) {
+        // On the first line ↑ isn't ours — decline it so the app can
+        // recall input history.
+        if (row === 0) return false;
+        setBuf((b) => moveVertical(b, -1));
+        return true;
+      }
+      if (key.downArrow) {
+        if (row >= lineCount - 1) return false; // last line — decline
+        setBuf((b) => moveVertical(b, 1));
+        return true;
+      }
+      if (key.backspace || key.delete) {
+        setBuf((b) =>
+          b.cursor > 0
+            ? {
+                text: b.text.slice(0, b.cursor - 1) + b.text.slice(b.cursor),
+                cursor: b.cursor - 1,
+              }
+            : b,
+        );
+        return true;
+      }
+      // Printable input — insert at the cursor. Excludes control chords.
+      if (input && !key.ctrl && !key.meta && !key.escape) {
+        setBuf((b) => ({
+          text: b.text.slice(0, b.cursor) + input + b.text.slice(b.cursor),
+          cursor: b.cursor + input.length,
+        }));
+        return true;
+      }
+      return false;
+    },
+    [row, lineCount],
+  );
 
   return {
     text: buf.text,

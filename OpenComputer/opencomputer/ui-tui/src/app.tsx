@@ -4,9 +4,9 @@
 // Original: MIT License (c) 2025 Nous Research — see THIRD_PARTY_LICENSE_HERMES.
 //
 // TUI-parity Milestone 2. The OC-native terminal UI: a markdown-rendered
-// streaming conversation, a multiline composer, a slash-command palette, a
-// session picker, and six overlays (model picker, skills hub, settings,
-// agents, rollback, tools) — all driven by OCWireClient (27 RPCs).
+// streaming conversation with tool results, retry banners and live
+// permission prompts; a multiline composer with input history; scrollable
+// history; a slash-command palette; a session picker and six overlays.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
@@ -16,6 +16,7 @@ import { Markdown } from "./markdown.js";
 import {
   AgentsOverlay,
   ModelPickerOverlay,
+  PermissionPrompt,
   RollbackOverlay,
   SettingsOverlay,
   SkillsHubOverlay,
@@ -26,10 +27,13 @@ import {
 } from "./overlays.js";
 import type {
   CheckpointInfo,
+  PermissionRequestPayload,
   SessionRow,
   SlashCommandInfo,
+  StreamRetryPayload,
   SubagentInfo,
   ToolInfo,
+  ToolResultPayload,
   WireServerEvent,
 } from "./protocol.js";
 import { EVENT } from "./protocol.js";
@@ -54,7 +58,11 @@ type Overlay =
   | "rollback"
   | "tools";
 
-/** Slash names handled client-side (open an overlay) — not sent to the server. */
+/** How many turns are visible at once; older ones scroll via PageUp. */
+const WINDOW = 25;
+/** Tool output longer than this is clipped in the transcript. */
+const TOOL_OUTPUT_CAP = 400;
+
 const OVERLAY_COMMANDS: Record<string, Overlay> = {
   model: "model",
   models: "model",
@@ -68,7 +76,6 @@ const OVERLAY_COMMANDS: Record<string, Overlay> = {
   tools: "tools",
 };
 
-/** Client-side slash commands surfaced in the palette alongside server ones. */
 const CLIENT_SLASH: SlashCommandInfo[] = [
   { name: "model", description: "open the model picker" },
   { name: "skills", description: "open the skills hub" },
@@ -79,11 +86,11 @@ const CLIENT_SLASH: SlashCommandInfo[] = [
   { name: "set", description: "/set <key> <value> — set a config value" },
   { name: "rename", description: "/rename <title> — rename this session" },
   { name: "fork", description: "/fork — branch this session" },
+  { name: "steer", description: "/steer <text> — nudge a running turn" },
 ];
 
 export interface AppProps {
   client: OCWireClient;
-  /** OC_TUI_RESUME value: "last", a session id/prefix, or "" for fresh. */
   resumeSpec?: string;
 }
 
@@ -99,10 +106,16 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
   const [helloInfo, setHelloInfo] = useState("");
   const [slashList, setSlashList] = useState<SlashCommandInfo[]>(CLIENT_SLASH);
   const [overlay, setOverlay] = useState<Overlay>("none");
-  const [oi, setOi] = useState(0); // shared overlay selection index
+  const [oi, setOi] = useState(0);
   const [usage, setUsage] = useState("");
+  // Functional-defect fixes (M2 batch 7):
+  const [retry, setRetry] = useState(""); // stream.retry banner ("" = none)
+  const [permReq, setPermReq] = useState<PermissionRequestPayload | null>(null);
+  const [scrollOffset, setScrollOffset] = useState(0); // 0 = pinned to bottom
+  const [history, setHistory] = useState<string[]>([]); // submitted inputs
+  const [histIdx, setHistIdx] = useState(-1); // -1 = not recalling
 
-  // Per-overlay data (only one overlay is open at a time).
+  // Per-overlay data.
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
   const [skills, setSkills] = useState<SkillRow[]>([]);
@@ -114,14 +127,16 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
 
   const sessionId = useRef<string | undefined>(undefined);
 
-  const push = useCallback((t: Turn) => setTurns((prev) => [...prev, t]), []);
+  // A new turn snaps the viewport back to the bottom.
+  const push = useCallback((t: Turn) => {
+    setTurns((prev) => [...prev, t]);
+    setScrollOffset(0);
+  }, []);
   const sys = useCallback(
     (text: string) => push({ role: "system", text }),
     [push],
   );
 
-  // The slash palette is pure derived state — shown whenever the composer
-  // holds a single "/word" with no overlay open.
   const showPalette = overlay === "none" && /^\/\S*$/.test(ed.text);
 
   // ── connection + event lifecycle ──────────────────────────────────
@@ -138,9 +153,6 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
         sys(`connected to ${client.serverUrl} — ${h.server}`);
         try {
           const s = await client.slashList();
-          // Dedup by name: a server command could collide with a
-          // client-side one, and the palette keys rows by name —
-          // duplicates there cause React key warnings. Client commands win.
           const seen = new Set<string>();
           const merged = [...CLIENT_SLASH, ...s.commands].filter((c) => {
             if (seen.has(c.name)) return false;
@@ -168,12 +180,40 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
           return "";
         });
         setBusy(false);
+        setRetry(""); // a finished turn clears any stale retry banner
         void refreshUsage();
       } else if (ev.event === EVENT.TOOL_CALL) {
-        push({ role: "tool", text: `tool: ${String(payload.name ?? "")}` });
+        push({ role: "tool", text: `⚙ ${String(payload.name ?? "tool")}` });
+      } else if (ev.event === EVENT.TOOL_RESULT) {
+        // Functional fix #1 — tool output was previously invisible.
+        const p = payload as ToolResultPayload;
+        let body = String(p.content ?? "");
+        if (body.length > TOOL_OUTPUT_CAP) {
+          body = `${body.slice(0, TOOL_OUTPUT_CAP)}… (${body.length} chars)`;
+        }
+        push({
+          role: "tool",
+          text: `${p.is_error ? "✗" : "→"} ${body || "(no output)"}`,
+        });
+      } else if (ev.event === EVENT.STREAM_RETRY) {
+        // Functional fix #3 — retries were a silent frozen spinner.
+        const p = payload as StreamRetryPayload;
+        if (p.exhausted) {
+          setRetry("");
+        } else {
+          setRetry(
+            `⟳ ${p.error_kind ?? "transient error"} — retry ` +
+              `${p.next_attempt ?? "?"}/${p.max_attempts ?? "?"} ` +
+              `in ${p.delay_seconds ?? 0}s`,
+          );
+        }
+      } else if (ev.event === EVENT.PERMISSION_REQUEST) {
+        // Functional fix #2 — the turn used to hang with no prompt.
+        setPermReq(payload as unknown as PermissionRequestPayload);
       } else if (ev.event === EVENT.ERROR) {
         push({ role: "system", text: `error: ${String(payload.error ?? "")}` });
         setBusy(false);
+        setRetry("");
       }
     });
 
@@ -221,11 +261,50 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
         setUsage(`↑${u.input_tokens ?? 0} ↓${u.output_tokens ?? 0}${cost}`);
       }
     } catch {
-      /* usage is best-effort — never break the turn over it */
+      /* usage is best-effort */
     }
   }
 
-  // ── overlay openers (each fetches, never throws past sys()) ────────
+  // ── permission resolution (functional fix #2) ─────────────────────
+  async function resolvePermission(
+    decision: "allow_once" | "allow_always" | "deny",
+  ): Promise<void> {
+    const req = permReq;
+    setPermReq(null);
+    if (!req) return;
+    try {
+      await client.permissionResponse(
+        req.request_id,
+        req.session_id,
+        req.capability_id,
+        decision,
+      );
+      sys(`permission ${decision.replace("_", " ")} — ${req.capability_id}`);
+    } catch (e) {
+      sys(`permission response failed: ${(e as Error).message}`);
+    }
+  }
+
+  // ── input history (functional fix #5) ─────────────────────────────
+  function recallPrev(): void {
+    if (history.length === 0) return;
+    const i = histIdx < 0 ? history.length - 1 : Math.max(0, histIdx - 1);
+    setHistIdx(i);
+    ed.setText(history[i] ?? "");
+  }
+  function recallNext(): void {
+    if (histIdx < 0) return;
+    const i = histIdx + 1;
+    if (i >= history.length) {
+      setHistIdx(-1);
+      ed.clear();
+    } else {
+      setHistIdx(i);
+      ed.setText(history[i] ?? "");
+    }
+  }
+
+  // ── overlay openers ────────────────────────────────────────────────
   const openOverlay = useCallback(
     async (kind: Overlay): Promise<void> => {
       setOi(0);
@@ -372,7 +451,27 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
 
   // ── keyboard ───────────────────────────────────────────────────────
   useInput((raw, key) => {
-    // Overlay-open state: navigation + per-overlay actions.
+    // A pending permission request preempts ALL other input — the agent
+    // is blocked until the user decides (functional fix #2).
+    if (permReq) {
+      if (raw === "a") void resolvePermission("allow_once");
+      else if (raw === "A") void resolvePermission("allow_always");
+      else if (raw === "d") void resolvePermission("deny");
+      return;
+    }
+
+    // Scrollback works in every state (functional fix #4).
+    if (key.pageUp) {
+      const maxOff = Math.max(0, turns.length - WINDOW);
+      setScrollOffset((o) => Math.min(maxOff, o + 10));
+      return;
+    }
+    if (key.pageDown) {
+      setScrollOffset((o) => Math.max(0, o - 10));
+      return;
+    }
+
+    // Overlay-open state.
     if (overlay !== "none") {
       if (key.escape) {
         setOverlay("none");
@@ -403,7 +502,7 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
         return;
       }
       if (ed.text) {
-        ed.clear(); // ESC clears the composer; ESC again exits.
+        ed.clear();
         return;
       }
       exit();
@@ -417,13 +516,16 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       void openOverlay("sessions");
       return;
     }
-    // Composer.
     if (busy) return;
     if (key.return) {
       void send();
       return;
     }
-    ed.onKey(raw, key); // multiline editing — see editor.ts
+    const consumed = ed.onKey(raw, key);
+    if (consumed) return;
+    // Editor declined the key — at the top/bottom line, ↑↓ recall history.
+    if (key.upArrow) recallPrev();
+    else if (key.downArrow) recallNext();
   });
 
   // ── submit ─────────────────────────────────────────────────────────
@@ -431,18 +533,18 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
     const msg = ed.text.trim();
     if (!msg || busy || !connected) return;
     ed.clear();
+    setHistory((h) => (h[h.length - 1] === msg ? h : [...h, msg]));
+    setHistIdx(-1);
 
     if (msg.startsWith("/")) {
       const parts = msg.slice(1).split(/\s+/);
       const name = (parts[0] ?? "").toLowerCase();
       const args = parts.slice(1).join(" ");
 
-      // Client-side overlay commands — open the overlay, don't hit the server.
       if (name in OVERLAY_COMMANDS) {
         void openOverlay(OVERLAY_COMMANDS[name]!);
         return;
       }
-      // Client-side action commands.
       if (name === "set") {
         const [k, ...rest] = args.split(/\s+/);
         if (!k || rest.length === 0) {
@@ -460,14 +562,8 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       }
       if (name === "rename") {
         const sid = sessionId.current;
-        if (!sid) {
-          sys("/rename: no active session yet");
-          return;
-        }
-        if (!args) {
-          sys("usage: /rename <title>");
-          return;
-        }
+        if (!sid) return void sys("/rename: no active session yet");
+        if (!args) return void sys("usage: /rename <title>");
         try {
           await client.sessionRename(sid, args);
           sys(`session renamed → ${args}`);
@@ -478,10 +574,7 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       }
       if (name === "fork") {
         const sid = sessionId.current;
-        if (!sid) {
-          sys("/fork: no active session yet");
-          return;
-        }
+        if (!sid) return void sys("/fork: no active session yet");
         try {
           const r = await client.sessionFork(sid, args);
           sys(`forked → ${r.new_session_id.slice(0, 12)}… (${r.messages_copied} msgs)`);
@@ -490,7 +583,18 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
         }
         return;
       }
-      // Anything else → server slash dispatch.
+      if (name === "steer") {
+        const sid = sessionId.current;
+        if (!sid) return void sys("/steer: no active session yet");
+        if (!args) return void sys("usage: /steer <text>");
+        try {
+          const r = await client.steerSubmit(sid, args);
+          sys(`steer queued (${(r as { queued_chars?: number }).queued_chars ?? 0} chars)`);
+        } catch (e) {
+          sys(`steer failed: ${(e as Error).message}`);
+        }
+        return;
+      }
       push({ role: "user", text: msg });
       try {
         const r = await client.slashDispatch(name, args);
@@ -513,6 +617,10 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
   }
 
   // ── render ─────────────────────────────────────────────────────────
+  const end = turns.length - scrollOffset;
+  const start = Math.max(0, end - WINDOW);
+  const visibleTurns = turns.slice(start, end);
+
   return (
     <Box flexDirection="column">
       <Box flexDirection="column" marginBottom={1}>
@@ -524,9 +632,22 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
             {connected ? "● connected" : "● disconnected"}
           </Text>
           {usage ? `   ${usage}` : ""}
-          {"   /model /skills /settings /agents /rollback /tools · Ctrl+N newline · ESC quit"}
+          {"   /-commands · Ctrl+N newline · PgUp/PgDn scroll · ESC quit"}
         </Text>
       </Box>
+
+      {permReq && (
+        <PermissionPrompt
+          capabilityId={permReq.capability_id}
+          context={permReq.context ?? ""}
+          scope={permReq.scope}
+        />
+      )}
+      {retry && (
+        <Box marginBottom={1}>
+          <Text color={theme.warn}>{retry}</Text>
+        </Box>
+      )}
 
       {showPalette && slashList.length > 0 && (
         <SlashPalette commands={slashList} filter={ed.text.slice(1)} />
@@ -544,9 +665,12 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       {overlay === "tools" && <ToolsOverlay tools={tools} index={oi} />}
 
       <Box flexDirection="column" marginBottom={1}>
-        {turns.slice(-25).map((t, i) => (
+        {start > 0 && (
+          <Text color={theme.muted}>{`  ↑ ${start} earlier — PgUp to scroll`}</Text>
+        )}
+        {visibleTurns.map((t, i) => (
           <Box
-            key={i}
+            key={start + i}
             marginBottom={t.role === "system" ? 0 : 1}
             flexDirection="column"
           >
@@ -560,7 +684,12 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
             )}
           </Box>
         ))}
-        {streamBuf && (
+        {scrollOffset > 0 && (
+          <Text color={theme.muted}>
+            {`  ↓ ${scrollOffset} newer — PgDn to scroll`}
+          </Text>
+        )}
+        {streamBuf && scrollOffset === 0 && (
           <Box flexDirection="column">
             <Markdown text={streamBuf} />
             <Text color={theme.muted}>▌</Text>
@@ -579,7 +708,6 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
 
 // ─── sub-components ─────────────────────────────────────────────────
 
-/** Multiline composer view — renders editor lines with the cursor. */
 function Composer({
   ed,
   connected,

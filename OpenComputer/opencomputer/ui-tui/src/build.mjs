@@ -68,6 +68,12 @@ await esbuild.build({
   outfile: "../dist/appHarness.js",
 });
 
+await esbuild.build({
+  ...common,
+  entryPoints: ["chatHarness.tsx"],
+  outfile: "../dist/chatHarness.js",
+});
+
 // `oc tui` runs the bundle as ESM — the dist/ marker makes Node treat
 // the .js files as modules without a per-file extension dance.
 writeFileSync("../dist/package.json", JSON.stringify({ type: "module" }));
