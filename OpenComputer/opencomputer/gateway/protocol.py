@@ -125,6 +125,13 @@ METHOD_SESSION_FORK = "session.fork"
 METHOD_SESSION_INTERRUPT = "session.interrupt"
 METHOD_TOOLS_LIST = "tools.list"
 
+# 2026-05-17 TUI-parity Milestone 1 batch 8 — prompt checkpoints.
+# checkpoints.list powers a rollback overlay (the message-history
+# snapshots behind /checkpoint + /restore); checkpoints.delete prunes
+# stale entries from it.
+METHOD_CHECKPOINTS_LIST = "checkpoints.list"
+METHOD_CHECKPOINTS_DELETE = "checkpoints.delete"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -205,6 +212,8 @@ __all__ = [
     "METHOD_SESSION_FORK",
     "METHOD_SESSION_INTERRUPT",
     "METHOD_TOOLS_LIST",
+    "METHOD_CHECKPOINTS_LIST",
+    "METHOD_CHECKPOINTS_DELETE",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

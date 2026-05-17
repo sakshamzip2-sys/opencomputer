@@ -45,6 +45,8 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_CHECKPOINTS_DELETE,
+    METHOD_CHECKPOINTS_LIST,
     METHOD_CONFIG_GET,
     METHOD_CONFIG_SET,
     METHOD_EVOLUTION_STATUS,
@@ -658,6 +660,51 @@ class ToolsListResult(_StrictModel):
     tools: tuple[ToolInfo, ...] = ()
 
 
+# 2026-05-17 TUI-parity Milestone 1 batch 8 — prompt-checkpoint schemas.
+
+
+class CheckpointInfo(_StrictModel):
+    """One prompt checkpoint, flattened wire-safe.
+
+    Projection of :class:`opencomputer.agent.state.PromptCheckpoint` — the
+    snapshotted ``messages`` list is replaced by ``message_count`` so a
+    rollback overlay can render the list without shipping every
+    transcript through the wire.
+    """
+
+    id: str
+    session_id: str
+    prompt_index: int
+    label: str
+    created_at: float
+    message_count: int
+
+
+class CheckpointsListParams(_StrictModel):
+    """List a session's prompt checkpoints, most-recent first."""
+
+    session_id: str
+    limit: int = 50
+
+
+class CheckpointsListResult(_StrictModel):
+    checkpoints: tuple[CheckpointInfo, ...] = ()
+
+
+class CheckpointsDeleteParams(_StrictModel):
+    """Delete one prompt checkpoint by id."""
+
+    checkpoint_id: str
+
+
+class CheckpointsDeleteResult(_StrictModel):
+    """Delete outcome — ``found`` is False when no checkpoint had that id
+    (idempotent: still an ``ok=True`` response)."""
+
+    checkpoint_id: str
+    found: bool
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -692,6 +739,11 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
         SessionInterruptResult,
     ),
     METHOD_TOOLS_LIST: (ToolsListParams, ToolsListResult),
+    METHOD_CHECKPOINTS_LIST: (CheckpointsListParams, CheckpointsListResult),
+    METHOD_CHECKPOINTS_DELETE: (
+        CheckpointsDeleteParams,
+        CheckpointsDeleteResult,
+    ),
 }
 
 
@@ -873,6 +925,8 @@ __all__ = [
     "METHOD_SESSION_FORK",
     "METHOD_SESSION_INTERRUPT",
     "METHOD_TOOLS_LIST",
+    "METHOD_CHECKPOINTS_LIST",
+    "METHOD_CHECKPOINTS_DELETE",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -944,6 +998,11 @@ __all__ = [
     "ToolInfo",
     "ToolsListParams",
     "ToolsListResult",
+    "CheckpointInfo",
+    "CheckpointsListParams",
+    "CheckpointsListResult",
+    "CheckpointsDeleteParams",
+    "CheckpointsDeleteResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",

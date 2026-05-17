@@ -40,6 +40,8 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_CHECKPOINTS_DELETE,
+    METHOD_CHECKPOINTS_LIST,
     METHOD_CONFIG_GET,
     METHOD_CONFIG_SET,
     METHOD_EVOLUTION_STATUS,
@@ -374,6 +376,8 @@ class WireServer:
                         METHOD_SESSION_FORK,
                         METHOD_SESSION_INTERRUPT,
                         METHOD_TOOLS_LIST,
+                        METHOD_CHECKPOINTS_LIST,
+                        METHOD_CHECKPOINTS_DELETE,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -912,6 +916,55 @@ class WireServer:
                 return
             await self._send_response(
                 ws, req.id, True, payload={"tools": tools}
+            )
+        elif req.method == METHOD_CHECKPOINTS_LIST:
+            # 2026-05-17 TUI-parity M1 batch 8 — a session's prompt
+            # checkpoints for a rollback overlay.
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="checkpoints.list: session_id is required"
+                )
+                return
+            limit = int(req.params.get("limit", 50))
+            try:
+                _loop = await self._router.get_or_load("default")
+                checkpoints = self._collect_checkpoints(_loop, session_id, limit)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("checkpoints.list: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"checkpoints.list: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"checkpoints": checkpoints}
+            )
+        elif req.method == METHOD_CHECKPOINTS_DELETE:
+            # 2026-05-17 TUI-parity M1 batch 8 — prune one checkpoint.
+            # Idempotent: unknown id → found=False (a success).
+            checkpoint_id = str(req.params.get("checkpoint_id", "")).strip()
+            if not checkpoint_id:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error="checkpoints.delete: checkpoint_id is required",
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                found = bool(_loop.db.delete_prompt_checkpoint(checkpoint_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("checkpoints.delete: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"checkpoints.delete: {exc}"
+                )
+                return
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={"checkpoint_id": checkpoint_id, "found": found},
             )
         else:
             await self._send_response(
@@ -1602,6 +1655,40 @@ class WireServer:
             "started_at": row.get("started_at"),
             "source": row.get("source"),
         }
+
+    @staticmethod
+    def _collect_checkpoints(
+        loop: Any, session_id: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Build the ``METHOD_CHECKPOINTS_LIST`` payload for one AgentLoop.
+
+        Wraps :meth:`opencomputer.agent.state.SessionDB.list_prompt_checkpoints`
+        and flattens each :class:`~opencomputer.agent.state.PromptCheckpoint`
+        — the snapshotted ``messages`` list becomes a ``message_count`` so
+        a rollback overlay renders without shipping every transcript.
+
+        Never raises: missing ``loop.db`` or unknown session → ``[]``.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("checkpoints.list: loop has no db — empty")
+            return []
+        try:
+            rows = db.list_prompt_checkpoints(session_id, limit=max(1, limit))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("checkpoints.list: read failed: %s — empty", exc)
+            return []
+        return [
+            {
+                "id": getattr(cp, "id", ""),
+                "session_id": getattr(cp, "session_id", session_id),
+                "prompt_index": getattr(cp, "prompt_index", 0),
+                "label": getattr(cp, "label", ""),
+                "created_at": getattr(cp, "created_at", 0.0),
+                "message_count": len(getattr(cp, "messages", None) or []),
+            }
+            for cp in rows
+        ]
 
     @staticmethod
     def _collect_tools() -> list[dict[str, str]]:
