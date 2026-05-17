@@ -93,6 +93,13 @@ METHOD_SESSION_DELETE = "session.delete"
 METHOD_MODEL_OPTIONS = "model.options"
 METHOD_CONFIG_GET = "config.get"
 
+# 2026-05-17 TUI-parity Milestone 1 batch 3 — settings write surface.
+# model.set / config.set persist to the profile config.yaml through a
+# write+validate+rollback harness. Persist-only for v1 (the running
+# session is unaffected until restart — matches the dashboard route).
+METHOD_MODEL_SET = "model.set"
+METHOD_CONFIG_SET = "config.set"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -163,6 +170,8 @@ __all__ = [
     "METHOD_SESSION_DELETE",
     "METHOD_MODEL_OPTIONS",
     "METHOD_CONFIG_GET",
+    "METHOD_MODEL_SET",
+    "METHOD_CONFIG_SET",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

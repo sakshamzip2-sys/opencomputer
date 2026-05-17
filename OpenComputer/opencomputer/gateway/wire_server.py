@@ -41,10 +41,12 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_END,
     METHOD_CHAT,
     METHOD_CONFIG_GET,
+    METHOD_CONFIG_SET,
     METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
     METHOD_MODEL_OPTIONS,
+    METHOD_MODEL_SET,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
@@ -354,6 +356,8 @@ class WireServer:
                         METHOD_SESSION_DELETE,
                         METHOD_MODEL_OPTIONS,
                         METHOD_CONFIG_GET,
+                        METHOD_MODEL_SET,
+                        METHOD_CONFIG_SET,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -664,6 +668,39 @@ class WireServer:
                 )
                 return
             await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_MODEL_SET:
+            # 2026-05-17 TUI-parity M1 batch 3 — persist a new default
+            # provider+model. Persist-only: the running session is
+            # unaffected until restart (matches the dashboard route).
+            provider = str(req.params.get("provider", "")).strip()
+            model = str(req.params.get("model", "")).strip()
+            if not provider or not model:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error="model.set: provider and model are both required",
+                )
+                return
+            result = self._apply_model_set(provider, model)
+            if isinstance(result, str):
+                await self._send_response(ws, req.id, False, error=result)
+                return
+            await self._send_response(ws, req.id, True, payload=result)
+        elif req.method == METHOD_CONFIG_SET:
+            # 2026-05-17 TUI-parity M1 batch 3 — persist one config value
+            # by dotted key. Validated by round-trip; rolled back on failure.
+            key = str(req.params.get("key", "")).strip()
+            if not key:
+                await self._send_response(
+                    ws, req.id, False, error="config.set: key is required"
+                )
+                return
+            result = self._apply_config_set(key, req.params.get("value"))
+            if isinstance(result, str):
+                await self._send_response(ws, req.id, False, error=result)
+                return
+            await self._send_response(ws, req.id, True, payload=result)
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -1277,6 +1314,98 @@ class WireServer:
         except (TypeError, ValueError):
             value = repr(raw)
         return {"key": key, "value": value, "found": True}
+
+    @staticmethod
+    def _persist_config_mutation(mutate: Any, *, label: str) -> str | None:
+        """Load the profile config, apply ``mutate``, persist + validate.
+
+        ``mutate`` is a callable ``Config -> Config`` (typically built on
+        :func:`opencomputer.agent.config_store.set_value`). The new config
+        is written, then re-loaded to validate it round-trips; if the
+        reload fails the previous ``config.yaml`` is restored from a
+        ``.bak`` copy. Mirrors the dashboard ``PUT /api/v1/config`` route's
+        write+validate+rollback discipline.
+
+        Returns ``None`` on success, or a human-readable error string on
+        failure (caller turns that into an ``ok=False`` wire response).
+        Never raises.
+        """
+        import shutil
+
+        from opencomputer.agent.config_store import (
+            config_file_path,
+            load_config,
+            save_config,
+        )
+
+        try:
+            path = config_file_path()
+        except Exception as exc:  # noqa: BLE001
+            return f"{label}: cannot resolve config path: {exc}"
+
+        try:
+            cfg = load_config()
+        except Exception as exc:  # noqa: BLE001
+            return f"{label}: cannot load current config: {exc}"
+
+        try:
+            new_cfg = mutate(cfg)
+        except KeyError as exc:
+            # set_value raises KeyError for an unknown/invalid key — the
+            # most common caller error. Surface its message verbatim.
+            return f"{label}: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return f"{label}: could not apply change: {exc}"
+
+        bak = path.with_suffix(".yaml.bak")
+        backed_up = False
+        if path.exists():
+            try:
+                shutil.copy2(path, bak)
+                backed_up = True
+            except OSError as exc:
+                return f"{label}: could not back up config before write: {exc}"
+
+        try:
+            save_config(new_cfg, path)
+            load_config(path)  # validate by round-trip
+        except Exception as exc:  # noqa: BLE001
+            if backed_up:
+                try:
+                    shutil.copy2(bak, path)
+                except OSError:
+                    logger.exception("%s: rollback of %s failed", label, path)
+            return f"{label}: write produced an invalid config (rolled back): {exc}"
+
+        return None
+
+    @staticmethod
+    def _apply_model_set(provider: str, model: str) -> dict[str, Any] | str:
+        """Persist a new default provider+model. dict on success, error str
+        on failure (caller maps str → ok=False response)."""
+        from opencomputer.agent.config_store import set_value
+
+        def mutate(cfg: Any) -> Any:
+            cfg = set_value(cfg, "model.provider", provider)
+            return set_value(cfg, "model.model", model)
+
+        err = WireServer._persist_config_mutation(mutate, label="model.set")
+        if err is not None:
+            return err
+        return {"provider": provider, "model": model, "ok": True}
+
+    @staticmethod
+    def _apply_config_set(key: str, value: Any) -> dict[str, Any] | str:
+        """Persist one config value by dotted key. dict on success, error
+        str on failure."""
+        from opencomputer.agent.config_store import set_value
+
+        err = WireServer._persist_config_mutation(
+            lambda cfg: set_value(cfg, key, value), label="config.set"
+        )
+        if err is not None:
+            return err
+        return {"key": key, "value": value, "ok": True}
 
     async def broadcast_permission_request(
         self,

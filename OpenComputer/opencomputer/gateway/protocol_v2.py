@@ -46,10 +46,12 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_END,
     METHOD_CHAT,
     METHOD_CONFIG_GET,
+    METHOD_CONFIG_SET,
     METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
     METHOD_MODEL_OPTIONS,
+    METHOD_MODEL_SET,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
@@ -432,6 +434,49 @@ class ConfigGetResult(_StrictModel):
     found: bool
 
 
+# 2026-05-17 TUI-parity Milestone 1 batch 3 — settings-write RPC schemas.
+
+
+class ModelSetParams(_StrictModel):
+    """Persist a new default provider+model to the profile config."""
+
+    provider: str
+    model: str
+
+
+class ModelSetResult(_StrictModel):
+    """Outcome of a model.set write.
+
+    ``ok`` is always True on a success response — a failed write returns
+    an ``ok=False`` :class:`~opencomputer.gateway.protocol.WireResponse`
+    with an error string, never this result. Persist-only: the running
+    session is unaffected until restart.
+    """
+
+    provider: str
+    model: str
+    ok: bool
+
+
+class ConfigSetParams(_StrictModel):
+    """Persist one config value by dotted key (``model.provider``, …).
+
+    ``value`` is whatever JSON the client sends; the server's
+    ``set_value`` applies the config schema's type coercion.
+    """
+
+    key: str
+    value: Any = None
+
+
+class ConfigSetResult(_StrictModel):
+    """Outcome of a config.set write — echoes the key+value that landed."""
+
+    key: str
+    value: Any = None
+    ok: bool
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -450,6 +495,8 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_SESSION_DELETE: (SessionDeleteParams, SessionDeleteResult),
     METHOD_MODEL_OPTIONS: (ModelOptionsParams, ModelOptionsResult),
     METHOD_CONFIG_GET: (ConfigGetParams, ConfigGetResult),
+    METHOD_MODEL_SET: (ModelSetParams, ModelSetResult),
+    METHOD_CONFIG_SET: (ConfigSetParams, ConfigSetResult),
 }
 
 
@@ -621,6 +668,8 @@ __all__ = [
     "METHOD_SESSION_DELETE",
     "METHOD_MODEL_OPTIONS",
     "METHOD_CONFIG_GET",
+    "METHOD_MODEL_SET",
+    "METHOD_CONFIG_SET",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -670,6 +719,10 @@ __all__ = [
     "ModelOptionsResult",
     "ConfigGetParams",
     "ConfigGetResult",
+    "ModelSetParams",
+    "ModelSetResult",
+    "ConfigSetParams",
+    "ConfigSetResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",
