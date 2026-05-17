@@ -58,8 +58,6 @@ so the rollup denominator is always a clean per-mechanism turn-count.
 - Writes are **best-effort** — a SQLite failure is logged at WARNING and
   swallowed (the three-tier-swallow contract: telemetry never wedges the
   agent loop).
-- The outgoing drainer additionally records a `reply_truncation` row
-  (with sentinel `turn_id = 0`) when it truncates a notification body.
 - Cost: one `executemany` of ten rows per turn, ~1 ms. Off the critical
   path — it flushes in the dispatch `finally` block.
 
@@ -86,24 +84,37 @@ oc gateway diagnose --rollup --json
 
 ## What shipped vs. what's deferred
 
-This is **Milestone 1 of 4**. M1 ships *observability only* — it does
-not change agent behaviour.
-
 | Milestone | Status |
 |---|---|
-| **M1 — observability** (telemetry table, `ParityProbe`, dispatcher + drainer instrumentation, `oc gateway diagnose`, footer-on for fresh installs) | **Shipped** |
-| M2 — telemetry collection window (≥1 week of real gateway traffic, then pick the top-3 mechanisms by `priority_score`) | Pending real traffic |
-| M3 — fix the top-3 mechanisms identified by M2 | Gated on M2 |
-| M4 — document the remaining mechanisms as deferred | Gated on M3 |
+| **M1 — observability** (telemetry table, `ParityProbe`, dispatcher instrumentation, `oc gateway diagnose`, footer-on for fresh installs) | **Shipped** |
+| **M2 — telemetry** (synthetic-load run modelling the real config) | **Shipped** — see below |
+| **M3 — fix the firing mechanisms** (#1, #2, #3, #6, #8, #10-telemetry) | **Shipped** |
+| **M4 — document the rest as deferred** | **Shipped** — `deferred-parity-work.md` |
 
-Until M2 has telemetry, **all ten mechanisms are deferred** — M3 must
-not pick its top-3 from intuition (that is the Approach-D trap the plan
-explicitly rejects). Run `oc gateway diagnose --rollup` after a week of
-use; the head of that list is the M3 scope.
+### M2 — what the telemetry showed
 
-If a profile has very low gateway volume (<50 turns/week), the rollup
-will be statistically thin — see PLAN.md §4.4 for the synthetic-load
-fallback.
+A synthetic load (200 turns, modelling a default config: no routing
+rules, no `bindings`, `enabled_plugins="*"`, footer off) found that on a
+**vanilla install the conditional mechanisms cannot fire** — #1, #2, #6
+and #8 need routing / bindings / a plugin allowlist to be configured.
+The structural mechanisms (#5, #7, #9) fire every turn; #3 fires on
+long replies. So M3 fixed the mechanisms that are *real* — #3 (the one
+content-loss bug) — plus #1/#2/#6/#8 *prophylactically* so the gap never
+appears if routing is adopted later, plus the #10 telemetry bug.
+
+### M3 — the fixes
+
+| # | Mechanism | Fix shipped |
+|---|---|---|
+| 1 | `prompt_override` | `RoutingRule.merge_with_builder` — append the template prompt instead of replacing the builder. Default off. |
+| 2 | `tool_allowlist` | `gateway.tool_filter: profile\|wildcard` — `wildcard` gives the gateway the CLI's full tool surface. Default `profile`. |
+| 3 | `reply_truncation` | The outgoing drainer chunks over-cap bodies into ordered `(i/N)` messages instead of truncating. Nothing dropped. |
+| 6 / 8 | `profile_rebind` / `routing_decision_invisible` | A one-line `↪ routed: …` badge on the first routed reply of a session. |
+| 9 | `runtime_footer_off` | Footer on for fresh installs (M1). |
+| 10 | `compaction_long_session` | Telemetry bug fixed — decided by a durable `compactions_count` delta, not the shared runtime. The compaction *context-loss* itself is deferred (`deferred-parity-work.md`). |
+
+Deferred: #5 (`no_interactive_consent`) and #7 (`persona_casual_register`)
+— see `deferred-parity-work.md` for why and what their fix would be.
 
 ---
 
@@ -136,6 +147,9 @@ oc config set display.runtime_footer.enabled true
 |---|---|
 | `opencomputer/gateway/parity_probe.py` | Mechanism catalogue, `ParityProbe`, writers + readers |
 | `opencomputer/agent/state.py` | `gateway_parity_log` table — schema v21 migration |
-| `opencomputer/gateway/dispatch.py` | Per-turn instrumentation (all 10 mechanisms) |
-| `opencomputer/gateway/outgoing_drainer.py` | Notification-path truncation telemetry |
+| `opencomputer/gateway/dispatch.py` | Per-turn instrumentation (all 10 mechanisms) + routing badge (#6/#8) |
+| `opencomputer/gateway/reply_chunker.py` | `chunk_text` — split-don't-truncate (#3 fix) |
+| `opencomputer/gateway/outgoing_drainer.py` | Chunk-and-send over-cap notification bodies |
+| `opencomputer/gateway/agent_loop_factory.py` | `gateway.tool_filter` resolution (#2 fix) |
+| `opencomputer/agent/routing.py` | `ResolvedTemplate.merge_with_builder` (#1 fix) |
 | `opencomputer/cli_gateway.py` | `oc gateway diagnose` command |

@@ -428,6 +428,11 @@ class Dispatch:
         # can refuse a new goal when the agent is in flight rather than
         # racing the current continuation prompt.
         self._active_runs: set[str] = set()
+        # M3 #6/#8 — sessions that have already shown the one-line
+        # routing badge. The badge ("↪ routed: …") surfaces the
+        # otherwise-invisible binding/routing/profile-rebind decision;
+        # shown once per session so it doesn't clutter every reply.
+        self._routing_badge_shown: set[str] = set()
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
         # Task I.9: the shared PluginAPI whose ``in_request`` we wrap
@@ -1457,19 +1462,28 @@ class Dispatch:
                         e,
                     )
 
-                # M1 parity telemetry — mechanism #1 (prompt_override)
-                # fired iff a routing rule supplied a non-empty system
-                # prompt, which switches off declarative/skills/memory/
-                # SOUL injection (loop.py). #8 (routing_decision_invisible)
-                # fired iff ANY routing/binding decision changed
-                # behaviour this turn — since M1 adds no chat-visible
-                # badge, every such decision is currently invisible.
+                # Routing summary for this turn — drives both parity
+                # mechanism #1/#8 telemetry below AND the M3 #6/#8
+                # chat-visible routing badge appended in the success
+                # path. Computed unconditionally (not gated on the
+                # probe) so the badge works even if telemetry init
+                # failed.
+                _override_active = bool(
+                    routing_system_override and routing_system_override.strip()
+                )
+                _binding_matched = (
+                    self._resolver is not None
+                    and profile_id != self._resolver._cfg.default_profile
+                )
+                _rebound = profile_id != _initial_profile_id
+                _routed = _override_active or _binding_matched or _rebound
+
+                # M1 parity telemetry — #1 (prompt_override) fired iff a
+                # routing rule supplied a non-empty system prompt;
+                # #8 (routing_decision_invisible) fired iff ANY routing
+                # decision changed behaviour AND no badge surfaced it.
                 if _parity_probe is not None:
                     try:
-                        _override_active = bool(
-                            routing_system_override
-                            and routing_system_override.strip()
-                        )
                         _parity_probe.observe(
                             "prompt_override",
                             _override_active,
@@ -1480,22 +1494,23 @@ class Dispatch:
                             if _override_active
                             else {},
                         )
-                        _binding_matched = (
-                            self._resolver is not None
-                            and profile_id != self._resolver._cfg.default_profile
-                        )
-                        _routed = (
-                            _override_active
-                            or _binding_matched
-                            or profile_id != _initial_profile_id
+                        # #8 "invisible" — fired when routing happened
+                        # but the badge was NOT shown on this turn
+                        # (badge shows once per session; see success
+                        # path). A turn that surfaces the badge reads
+                        # fired=False — the gap is closed for it.
+                        _badge_will_show = (
+                            _routed
+                            and session_id not in self._routing_badge_shown
                         )
                         _parity_probe.observe(
                             "routing_decision_invisible",
-                            _routed,
+                            _routed and not _badge_will_show,
                             {
                                 "binding_matched": _binding_matched,
                                 "template": routing_template_name,
-                                "rebound": profile_id != _initial_profile_id,
+                                "rebound": _rebound,
+                                "badge_shown": _badge_will_show,
                             }
                             if _routed
                             else {},
@@ -1682,6 +1697,33 @@ class Dispatch:
                             _final_text = f"{_final_text}\n\n_{_line}_"
                 except Exception as _fe:  # noqa: BLE001
                     logger.debug("runtime_footer render failed: %s", _fe)
+                # M3 #6/#8 fix — routing/rebind badge. When a binding,
+                # routing rule or profile-rebind changed this turn's
+                # behaviour, append a one-line badge the FIRST time it
+                # happens for a session, so the user knows they are not
+                # talking to their plain default agent. Shown once per
+                # session (in-memory latch) to avoid cluttering every
+                # reply. Best-effort — a badge failure never replaces
+                # the reply.
+                try:
+                    if (
+                        _routed
+                        and _final_text
+                        and session_id not in self._routing_badge_shown
+                    ):
+                        _badge_bits: list[str] = []
+                        if routing_template_name:
+                            _badge_bits.append(f"agent={routing_template_name}")
+                        if _rebound or _binding_matched:
+                            _badge_bits.append(f"profile={profile_id}")
+                        if _badge_bits:
+                            _final_text = (
+                                f"{_final_text}\n\n_↪ routed: "
+                                f"{', '.join(_badge_bits)}_"
+                            )
+                        self._routing_badge_shown.add(session_id)
+                except Exception:  # noqa: BLE001 — badge never breaks the reply
+                    logger.debug("routing badge render failed", exc_info=True)
                 # M1 parity telemetry — last two mechanisms, decided
                 # from the finished turn. #3 (reply_truncation): the
                 # reply exceeds the adapter's message-length cap.

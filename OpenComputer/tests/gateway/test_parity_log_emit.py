@@ -218,5 +218,44 @@ async def test_prompt_override_fires_with_routing(
     }
     assert fired["prompt_override"]["fired"] is True
     assert fired["prompt_override"]["detail"]["template"] == "stocks"
-    # A routing decision with no chat-visible badge → #8 also fires.
-    assert fired["routing_decision_invisible"]["fired"] is True
+    # M3 #8 fix — the routing badge surfaces the decision on the first
+    # turn, so routing_decision_invisible reads False (gap closed) and
+    # the detail records that the badge was shown.
+    assert fired["routing_decision_invisible"]["fired"] is False
+    assert fired["routing_decision_invisible"]["detail"]["badge_shown"] is True
+
+
+@pytest.mark.asyncio
+async def test_routing_badge_shows_once_per_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """M3 #6/#8 — the routing badge is appended to the FIRST routed
+    reply of a session, then suppressed on later turns."""
+    routing = RoutingConfig(
+        rules=(
+            RoutingRule(
+                match=RoutingMatch(platform="telegram", chat_id="123"),
+                agent="stocks",
+            ),
+        ),
+    )
+    loop = _fake_loop(tmp_path, routing=routing)
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "opencomputer.agent.agent_templates.discover_agents",
+        lambda: {
+            "stocks": SimpleNamespace(name="stocks", system_prompt="stock bot")
+        },
+    )
+    dispatch = Dispatch(
+        router=AgentRouter(
+            loop_factory=lambda pid, home: loop,
+            profile_home_resolver=lambda pid: tmp_path / pid,
+        )
+    )
+    first = await dispatch.handle_message(_event())
+    second = await dispatch.handle_message(_event())
+
+    assert "↪ routed: agent=stocks" in (first or "")
+    assert "↪ routed:" not in (second or "")  # suppressed on turn 2

@@ -1145,6 +1145,16 @@ class GatewayConfig:
 
     photo_burst_window: float = 0.8
 
+    #: M3 #2 fix (gateway-vs-CLI parity, 2026-05-17) — tool-allowlist
+    #: policy for gateway-spawned loops. ``"profile"`` (default) derives
+    #: the allowlist from the profile's ``enabled_plugins`` (``"*"`` →
+    #: no filter); ``"wildcard"`` forces no filter so the gateway sees
+    #: the full tool registry exactly like the CLI, which never sets an
+    #: allowlist. Set ``gateway.tool_filter: wildcard`` when a gateway
+    #: session should be as tool-capable as ``oc chat``. Unknown values
+    #: fall back to ``"profile"`` at the agent_loop_factory call site.
+    tool_filter: str = "profile"
+
     # ─── Startup ping (the OpenClaw "back online" magic message) ──────
     # Opt-in. When the gateway finishes connecting all adapters, send a
     # one-off message to each (platform, chat_id) in this tuple. Lets a
