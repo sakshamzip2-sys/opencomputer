@@ -38,6 +38,44 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
+def file_lock(lock_path: Path) -> Iterator[None]:
+    """Acquire an exclusive blocking advisory lock on ``lock_path``.
+
+    The lock file (and its parent dir) is created if absent; released on
+    exit/exception. A no-op when neither fcntl nor msvcrt is available.
+
+    Blocking — concurrent acquirers serialize cleanly. ``lock_path``
+    should be a dedicated lock file, distinct from any atomic-replaced
+    payload file (atomic-replace swaps the inode, invalidating an flock
+    held on the original).
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(lock_path, "w")  # noqa: SIM115 - released in finally
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            try:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError as exc:
+                logger.warning("file lock acquisition failed: %s", exc)
+        # else: no locking primitive — operate as no-op
+        yield
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except Exception:  # noqa: BLE001
+                pass
+        elif msvcrt is not None:  # pragma: no cover
+            try:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        fd.close()
+
+
+@contextmanager
 def profile_yaml_lock(profile_dir: Path) -> Iterator[None]:
     """Acquire an exclusive blocking lock around profile.yaml mutation.
 
@@ -53,28 +91,5 @@ def profile_yaml_lock(profile_dir: Path) -> Iterator[None]:
     AND msvcrt are both unavailable the lock is a no-op (rare,
     documented).
     """
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = profile_dir / ".profile.lock"
-    fd = open(lock_path, "w")  # noqa: SIM115 - released in finally
-    try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        elif msvcrt is not None:  # pragma: no cover - Windows
-            try:
-                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
-            except OSError as exc:
-                logger.warning("profile.yaml lock acquisition failed: %s", exc)
-        # else: no locking primitive — operate as no-op
+    with file_lock(profile_dir / ".profile.lock"):
         yield
-    finally:
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except Exception:  # noqa: BLE001
-                pass
-        elif msvcrt is not None:  # pragma: no cover
-            try:
-                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
-        fd.close()

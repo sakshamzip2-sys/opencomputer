@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 
 from opencomputer.awareness.life_events import state
@@ -158,3 +159,51 @@ def test_verdict_pending_patterns_empty_when_no_state(tmp_path, monkeypatch):
     """No state file → an empty list, never a raise."""
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     assert state.verdict_pending_patterns() == []
+
+
+def test_concurrent_mark_surfaced_keeps_every_entry(tmp_path, monkeypatch):
+    """N threads each ``mark_surfaced`` a distinct pattern — none lost.
+
+    The mutators do a load → mutate → save read-modify-write. Without a
+    lock around that whole sequence, two threads can both load the same
+    baseline and the slower writer clobbers the faster one's entry.
+
+    To make that race observable deterministically, ``save_state`` is
+    widened with a brief sleep BETWEEN load and save so the threads
+    interleave inside the unprotected window. With the file lock in place
+    only one thread is ever inside ``load → mutate → save`` at a time, so
+    all N entries survive; without it, entries are lost.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    real_save = state.save_state
+
+    def slow_save(payload: dict) -> None:
+        # Widen the load→save race window. The lock (if present) is held
+        # across this call, so the sleep does not itself cause a deadlock.
+        time.sleep(0.05)
+        real_save(payload)
+
+    monkeypatch.setattr(state, "save_state", slow_save)
+
+    n_threads = 8
+    pattern_ids = [f"pattern_{i}" for i in range(n_threads)]
+
+    def worker(pattern_id: str) -> None:
+        state.mark_surfaced(pattern_id, f"cron-{pattern_id}")
+
+    threads = [
+        threading.Thread(target=worker, args=(pid,)) for pid in pattern_ids
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = state.load_state()
+    missing = [pid for pid in pattern_ids if pid not in loaded]
+    assert not missing, (
+        f"lost {len(missing)}/{n_threads} concurrent mark_surfaced updates: "
+        f"{missing}"
+    )
+    assert len(loaded) == n_threads
