@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import dataclasses
 import logging
 import os
 import sys
@@ -3268,10 +3269,15 @@ def _run_oneshot_turn(
 
     _configure_logging_once()
     cfg = load_config()
-    if model:
-        cfg.model.model = model
-    if provider_name:
-        cfg.model.provider = provider_name
+    # ``cfg.model`` is a frozen+slots ModelConfig — attribute assignment
+    # raises FrozenInstanceError. Rebuild immutably via dataclasses.replace.
+    if model or provider_name:
+        model_cfg = cfg.model
+        if model:
+            model_cfg = dataclasses.replace(model_cfg, model=model)
+        if provider_name:
+            model_cfg = dataclasses.replace(model_cfg, provider=provider_name)
+        cfg = dataclasses.replace(cfg, model=model_cfg)
     _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
