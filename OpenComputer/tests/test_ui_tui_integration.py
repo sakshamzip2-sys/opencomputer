@@ -1,0 +1,149 @@
+"""Cross-language integration test — the TypeScript OCWireClient driven
+against a live Python WireServer.
+
+The contract test (test_ui_tui_wire_client.py) proves the TS client *names*
+every server method. This test proves the client actually *works*: it
+builds the client bundle, connects the real OCWireClient to a real
+opencomputer.gateway.wire_server, performs the hello handshake, and
+invokes RPCs — verifying both halves speak the same wire protocol on the
+actual socket.
+
+Skips gracefully when the Node toolchain is unavailable (a CI runner
+without Node) — the pure-Python contract test still guards method
+coverage there.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+import socket
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+_REPO = Path(__file__).resolve().parent.parent
+_TUI_SRC = _REPO / "opencomputer" / "ui-tui" / "src"
+_CLIENT_BUNDLE = _REPO / "opencomputer" / "ui-tui" / "dist" / "wireClient.js"
+
+
+def _find_node() -> str | None:
+    hit = shutil.which("node")
+    if hit:
+        return hit
+    # nvm installs aren't always on the pytest PATH.
+    for base in sorted((Path.home() / ".nvm" / "versions" / "node").glob("v*"), reverse=True):
+        cand = base / "bin" / "node"
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+_NODE = _find_node()
+
+
+def _ensure_client_bundle() -> bool:
+    """Build dist/wireClient.js if missing. Returns True when it exists."""
+    if _CLIENT_BUNDLE.is_file():
+        return True
+    if _NODE is None or not (_TUI_SRC / "node_modules").is_dir():
+        return False
+    npm = Path(_NODE).with_name("npm")
+    try:
+        subprocess.run(
+            [str(npm), "run", "build"],
+            cwd=_TUI_SRC,
+            capture_output=True,
+            timeout=120,
+            check=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return _CLIENT_BUNDLE.is_file()
+
+
+pytestmark = pytest.mark.skipif(
+    _NODE is None or not _ensure_client_bundle(),
+    reason="Node toolchain or built TUI client bundle unavailable",
+)
+
+# Node test driver: connect the bundled OCWireClient, handshake, call RPCs,
+# print a single JSON result line. argv: [wsUrl, bundleFileUri].
+_DRIVER = """
+const [wsUrl, bundleUri] = process.argv.slice(1);
+import(bundleUri).then(async (m) => {
+  const c = new m.OCWireClient(wsUrl);
+  await new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error('connect timeout')), 6000);
+    if (c.connected) { clearTimeout(t); return res(); }
+    c.onConnected((ok) => { if (ok) { clearTimeout(t); res(); } });
+  });
+  const hello = await c.hello();
+  const list = await c.sessionsList(5);
+  c.close();
+  console.log(JSON.stringify({
+    ok: true,
+    server: hello.server,
+    methods: hello.methods.length,
+    sessions: list.sessions.length,
+  }));
+}).catch((e) => {
+  console.log(JSON.stringify({ ok: false, error: String((e && e.message) || e) }));
+  process.exitCode = 1;
+});
+"""
+
+
+@pytest.mark.asyncio
+async def test_ts_client_round_trips_against_real_wire_server(
+    tmp_path: Path,
+) -> None:
+    from opencomputer.agent.loop import AgentLoop
+    from opencomputer.agent.state import SessionDB
+    from opencomputer.gateway.wire_server import WireServer
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    db = SessionDB(tmp_path / "sessions.db")
+    db.create_session(session_id="itest-session-1", platform="cli", model="m")
+    loop = MagicMock(spec=AgentLoop)
+    loop.db = db
+    server = WireServer(loop=loop, host="127.0.0.1", port=port)
+    await server.start()
+    assert _NODE is not None  # guaranteed by pytestmark skipif
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _NODE,
+            "--input-type=module",
+            "-e",
+            _DRIVER,
+            f"ws://127.0.0.1:{port}",
+            _CLIENT_BUNDLE.as_uri(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=20)
+    finally:
+        await server.stop()
+
+    out = out_b.decode().strip()
+    err = err_b.decode().strip()
+    # The driver prints exactly one JSON line; tolerate Node warnings on stderr.
+    json_line = next(
+        (ln for ln in reversed(out.splitlines()) if ln.startswith("{")), ""
+    )
+    assert json_line, f"no JSON from node driver.\nstdout={out!r}\nstderr={err!r}"
+    result = json.loads(json_line)
+
+    assert result["ok"], f"TS client failed against the wire server: {result}"
+    # The handshake genuinely round-tripped — server identity + method list.
+    assert result["server"] == "opencomputer"
+    assert result["methods"] >= 25, result
+    # sessions.list returned the row the test seeded.
+    assert result["sessions"] >= 1, result
