@@ -199,6 +199,7 @@ class PythonExec(BaseTool):
         # (defense in depth — sandboxing is *additional* containment). With
         # no ``sandbox.backend`` configured the key is absent, ``strategy``
         # is None, and the host path below runs byte-identically.
+        host_fallback_warning = ""
         strategy = self._runtime_custom().get(_SANDBOX_STRATEGY_KEY)
         if strategy is not None:
             sandboxed = await self._run_plain_in_sandbox(
@@ -207,7 +208,15 @@ class PythonExec(BaseTool):
             if sandboxed is not None:
                 return sandboxed
             # Backend unreachable + sandbox.fallback=local → fall through
-            # to the host path below.
+            # to the host path below, but SURFACE the lost containment on
+            # the result. ``_run_plain_in_sandbox`` already logged a
+            # WARNING; the resolver contract is "never silently
+            # downgrade", so the model + user must see it on the result.
+            host_fallback_warning = (
+                "[sandbox unavailable — ran on the HOST without "
+                "containment; set sandbox.fallback=error to refuse "
+                "instead]\n"
+            )
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False, encoding="utf-8",
@@ -239,7 +248,7 @@ class PythonExec(BaseTool):
                 await proc.wait()
                 return ToolResult(
                     tool_call_id=call.id,
-                    content=f"Timed out after {timeout}s",
+                    content=host_fallback_warning + f"Timed out after {timeout}s",
                     is_error=True,
                 )
 
@@ -250,12 +259,14 @@ class PythonExec(BaseTool):
             if proc.returncode != 0:
                 return ToolResult(
                     tool_call_id=call.id,
-                    content=combined or f"Exit code {proc.returncode}",
+                    content=host_fallback_warning
+                    + (combined or f"Exit code {proc.returncode}"),
                     is_error=True,
                 )
 
             return ToolResult(
-                tool_call_id=call.id, content=combined or "(no output)",
+                tool_call_id=call.id,
+                content=host_fallback_warning + (combined or "(no output)"),
             )
         finally:
             try:

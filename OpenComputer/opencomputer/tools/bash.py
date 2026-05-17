@@ -353,7 +353,17 @@ class BashTool(BaseTool):
             )
             if sandboxed is not None:
                 return sandboxed
-            # local-fallback on an unreachable backend — fall through.
+            # Backend unreachable + sandbox.fallback=local — fall through
+            # to the host path, but SURFACE the lost containment on the
+            # result. ``_execute_in_sandbox`` already logged a WARNING;
+            # the resolver contract is "never silently downgrade", so the
+            # model + user must see it on the result too (a log line is
+            # invisible at the surface that matters).
+            warn_prefix += (
+                "[sandbox unavailable — ran on the HOST without "
+                "containment; set sandbox.fallback=error to refuse "
+                "instead]\n"
+            )
 
         # Scope HOME / XDG_* to the active profile's home/ subdir so
         # spawned subprocesses (git, ssh, npm, etc.) get per-profile

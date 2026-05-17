@@ -13,7 +13,7 @@ import asyncio
 from opencomputer.tools.python_exec import PythonExec
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.runtime_context import RuntimeContext
-from plugin_sdk.sandbox import SandboxResult
+from plugin_sdk.sandbox import SandboxResult, SandboxUnavailable
 
 
 class _RecordingStrategy:
@@ -90,6 +90,38 @@ def test_plain_mode_nonzero_exit_is_error() -> None:
         PythonExec.set_runtime(RuntimeContext())
     assert result.is_error is True
     assert "boom" in result.content
+
+
+def test_plain_mode_host_fallback_surfaces_lost_containment(monkeypatch) -> None:
+    """fallback=local: an unreachable backend runs the script on the HOST,
+    but the result must SURFACE the lost containment.
+
+    A logged WARNING alone is invisible at the surface that matters — the
+    resolver contract is "never silently downgrade containment", so the
+    model/user-visible ToolResult itself says the run lost its sandbox.
+    """
+    from opencomputer.sandbox.resolver import SANDBOX_FALLBACK_LOCAL
+
+    class _UnreachableStrategy:
+        name = "unreachable"
+
+        async def run(self, argv, *, config, stdin=None, cwd=None):
+            del argv, config, stdin, cwd
+            raise SandboxUnavailable("backend down")
+
+    # Force the local-fallback branch of `_sandbox_unreachable`.
+    monkeypatch.setattr(
+        "opencomputer.sandbox.resolver.fallback_policy",
+        lambda _config: SANDBOX_FALLBACK_LOCAL,
+    )
+    PythonExec.set_runtime(_runtime_with(_UnreachableStrategy()))
+    try:
+        result = _run({"code": "print('host-fallback-ran')", "mode": "plain"})
+    finally:
+        PythonExec.set_runtime(RuntimeContext())
+    assert result.is_error is False
+    assert "host-fallback-ran" in result.content  # the script really ran
+    assert "without containment" in result.content  # ...and said so
 
 
 def test_ptc_mode_is_not_routed_to_sandbox() -> None:
