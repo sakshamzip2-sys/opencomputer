@@ -13,6 +13,7 @@ import pytest
 
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.awareness.life_events.pattern import PatternFiring
+from plugin_sdk.runtime_context import RuntimeContext
 from opencomputer.awareness.life_events.registry import (
     get_global_registry,
     reset_global_registry_for_test,
@@ -113,6 +114,10 @@ def test_loop_builds_overlay_with_anchor_under_companion():
 
     stand_in = MagicMock()
     stand_in._active_persona_id = ""
+    # _build_persona_overlay reads self._runtime.custom — give the
+    # stand-in a real RuntimeContext (empty custom) so a stray
+    # MagicMock attribute doesn't masquerade as a persona override.
+    stand_in._runtime = RuntimeContext()
     fake_msg = MagicMock(role="user", content="how are you?", tool_calls=None)
     stand_in.db.get_messages.return_value = [fake_msg]
 
@@ -141,6 +146,7 @@ def test_loop_omits_anchor_under_non_companion_personas():
 
     stand_in = MagicMock()
     stand_in._active_persona_id = ""
+    stand_in._runtime = RuntimeContext()  # real custom dict — see above
     fake_msg = MagicMock(role="user", content="explain this function", tool_calls=None)
     stand_in.db.get_messages.return_value = [fake_msg]
 
