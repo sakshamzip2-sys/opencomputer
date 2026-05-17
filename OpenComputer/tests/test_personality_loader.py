@@ -14,13 +14,13 @@ def test_builtin_helpful_resolves_to_nonempty_body():
     assert "helpful" in p.body.lower() or "user" in p.body.lower()
 
 
-def test_all_14_builtins_resolve():
-    expected = {
-        "helpful", "concise", "technical", "creative", "teacher",
-        "kawaii", "catgirl", "pirate", "shakespeare", "surfer",
-        "noir", "uwu", "philosopher", "hype",
-    }
-    for name in expected:
+def test_all_builtins_resolve():
+    # Iterate BUILTINS directly so this never goes stale when a register
+    # is added (e.g. explanatory / learning — best-of-three R9).
+    from opencomputer.agent.personality import BUILTINS
+
+    assert {"explanatory", "learning"} <= set(BUILTINS)
+    for name in BUILTINS:
         p = resolve(name, custom={})
         assert p.name == name
         assert p.body.strip(), f"{name} has empty body"
