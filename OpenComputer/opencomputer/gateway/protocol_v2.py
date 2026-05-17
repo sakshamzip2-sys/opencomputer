@@ -45,9 +45,11 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_CONFIG_GET,
     METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
+    METHOD_MODEL_OPTIONS,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
@@ -381,6 +383,55 @@ class SessionDeleteResult(_StrictModel):
     found: bool
 
 
+# 2026-05-17 TUI-parity Milestone 1 batch 2 — settings-read RPC schemas.
+
+
+class ModelOptionsParams(_StrictModel):
+    """No params — enumerates the whole registry for the active profile."""
+
+
+class ModelProviderOption(_StrictModel):
+    """One provider's available models, with a current-selection flag."""
+
+    name: str               # provider id, e.g. "anthropic"
+    models: tuple[str, ...]  # model ids, sorted
+    is_current: bool         # True if the bound default model is this provider's
+
+
+class ModelOptionsResult(_StrictModel):
+    """Registry snapshot for a model-picker overlay.
+
+    ``model`` / ``provider`` are the currently-bound default (either may
+    be ``None`` if the profile config has no model section). ``providers``
+    is sorted by provider name for stable client-side rendering.
+    """
+
+    model: str | None = None
+    provider: str | None = None
+    providers: tuple[ModelProviderOption, ...] = ()
+
+
+class ConfigGetParams(_StrictModel):
+    """Fetch one config value by dotted key (``model.provider``, …)."""
+
+    key: str
+
+
+class ConfigGetResult(_StrictModel):
+    """A single config value.
+
+    ``found`` is False for an unknown key — that is a successful response,
+    not an error, so a settings panel can distinguish "unset" from "the
+    RPC failed". ``value`` is coerced JSON-safe by the server (dataclass
+    config sections become their ``repr``) so the typed schema can carry
+    it; ``None`` whenever ``found`` is False.
+    """
+
+    key: str
+    value: Any = None
+    found: bool
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -397,6 +448,8 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_EVOLUTION_STATUS: (EvolutionStatusParams, EvolutionStatusResult),
     METHOD_SESSION_RESUME: (SessionResumeParams, SessionResumeResult),
     METHOD_SESSION_DELETE: (SessionDeleteParams, SessionDeleteResult),
+    METHOD_MODEL_OPTIONS: (ModelOptionsParams, ModelOptionsResult),
+    METHOD_CONFIG_GET: (ConfigGetParams, ConfigGetResult),
 }
 
 
@@ -566,6 +619,8 @@ __all__ = [
     "METHOD_EVOLUTION_STATUS",
     "METHOD_SESSION_RESUME",
     "METHOD_SESSION_DELETE",
+    "METHOD_MODEL_OPTIONS",
+    "METHOD_CONFIG_GET",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -610,6 +665,11 @@ __all__ = [
     "SessionResumeResult",
     "SessionDeleteParams",
     "SessionDeleteResult",
+    "ModelOptionsParams",
+    "ModelProviderOption",
+    "ModelOptionsResult",
+    "ConfigGetParams",
+    "ConfigGetResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",

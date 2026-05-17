@@ -86,6 +86,13 @@ METHOD_MEMORY_STATUS = "memory.status"
 METHOD_SESSION_RESUME = "session.resume"
 METHOD_SESSION_DELETE = "session.delete"
 
+# 2026-05-17 TUI-parity Milestone 1 batch 2 — settings read surface.
+# model.options powers a model-picker overlay; config.get powers a
+# settings panel. The write counterparts (model.set / config.set) land
+# in batch 3 with their own profile-write isolation.
+METHOD_MODEL_OPTIONS = "model.options"
+METHOD_CONFIG_GET = "config.get"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -154,6 +161,8 @@ __all__ = [
     "METHOD_EVOLUTION_STATUS",
     "METHOD_SESSION_RESUME",
     "METHOD_SESSION_DELETE",
+    "METHOD_MODEL_OPTIONS",
+    "METHOD_CONFIG_GET",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

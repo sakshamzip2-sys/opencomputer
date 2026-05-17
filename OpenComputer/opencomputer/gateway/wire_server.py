@@ -40,9 +40,11 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_CONFIG_GET,
     METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
+    METHOD_MODEL_OPTIONS,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
@@ -350,6 +352,8 @@ class WireServer:
                         METHOD_EVOLUTION_STATUS,
                         METHOD_SESSION_RESUME,
                         METHOD_SESSION_DELETE,
+                        METHOD_MODEL_OPTIONS,
+                        METHOD_CONFIG_GET,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -628,6 +632,38 @@ class WireServer:
             await self._send_response(
                 ws, req.id, True, payload={"deleted": session_id, "found": found}
             )
+        elif req.method == METHOD_MODEL_OPTIONS:
+            # 2026-05-17 TUI-parity M1 batch 2 — registry snapshot for a
+            # model-picker overlay. No params; reads the process-global
+            # model registry + the active profile's bound default.
+            try:
+                payload = self._collect_model_options()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("model.options: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"model.options: {exc}"
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_CONFIG_GET:
+            # 2026-05-17 TUI-parity M1 batch 2 — fetch one config value by
+            # dotted key for a settings panel. Unknown key → found=False
+            # (a success, not an error).
+            key = str(req.params.get("key", "")).strip()
+            if not key:
+                await self._send_response(
+                    ws, req.id, False, error="config.get: key is required"
+                )
+                return
+            try:
+                payload = self._collect_config_value(key)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("config.get: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"config.get: {exc}"
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -1156,6 +1192,91 @@ class WireServer:
             "messages": messages,
             "message_count": len(messages),
         }
+
+    @staticmethod
+    def _collect_model_options() -> dict[str, Any]:
+        """Build the ``METHOD_MODEL_OPTIONS`` payload — registry snapshot.
+
+        Enumerates every provider→model pairing from the process-global
+        model registry (via ``cli_model_picker._grouped_models``) and marks
+        the provider whose model is the currently-bound default.
+
+        Failure modes (helper never raises — mirrors ``_collect_memory_status``):
+
+        * The model registry raising → ``providers`` is ``[]`` (the picker
+          renders an empty list rather than the RPC erroring).
+        * ``default_config()`` raising → ``model``/``provider`` are ``None``.
+        """
+        current_model: str | None = None
+        current_provider: str | None = None
+        try:
+            from opencomputer.agent.config import default_config
+
+            cfg = default_config()
+            model_section = getattr(cfg, "model", None)
+            current_model = getattr(model_section, "model", None)
+            current_provider = getattr(model_section, "provider", None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("model.options: default_config failed: %s", exc)
+
+        providers: list[dict[str, Any]] = []
+        try:
+            from opencomputer import cli_model_picker
+
+            grouped = cli_model_picker._grouped_models()  # noqa: SLF001
+            for name in sorted(grouped):
+                providers.append(
+                    {
+                        "name": name,
+                        "models": sorted(grouped[name]),
+                        "is_current": name == current_provider,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "model.options: model registry unavailable (%s) — empty list",
+                exc,
+            )
+            providers = []
+
+        return {
+            "model": current_model,
+            "provider": current_provider,
+            "providers": providers,
+        }
+
+    @staticmethod
+    def _collect_config_value(key: str) -> dict[str, Any]:
+        """Build the ``METHOD_CONFIG_GET`` payload for one dotted key.
+
+        Resolves ``key`` against the active profile config via
+        :func:`opencomputer.agent.config_store.get_value`. An unknown key
+        is reported as ``found=False`` (not an error). The value is coerced
+        JSON-safe — config sections are dataclasses, so a section-level key
+        (``model``) returns its ``repr`` string rather than failing the
+        typed result's JSON serialization.
+
+        Never raises: a config-load failure also degrades to ``found=False``.
+        """
+        try:
+            from opencomputer.agent.config import default_config
+            from opencomputer.agent.config_store import get_value
+
+            cfg = default_config()
+            raw = get_value(cfg, key)
+        except KeyError:
+            return {"key": key, "value": None, "found": False}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("config.get: resolve failed for %r: %s", key, exc)
+            return {"key": key, "value": None, "found": False}
+
+        # Coerce JSON-safe — dataclass config sections aren't serializable.
+        try:
+            json.dumps(raw)
+            value: Any = raw
+        except (TypeError, ValueError):
+            value = repr(raw)
+        return {"key": key, "value": value, "found": True}
 
     async def broadcast_permission_request(
         self,
