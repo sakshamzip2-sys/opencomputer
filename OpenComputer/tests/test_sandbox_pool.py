@@ -12,6 +12,7 @@ import pytest
 
 from opencomputer.sandbox.pool import ContainerPool
 from plugin_sdk.sandbox import SandboxUnavailable
+from tests.sandbox_conformance import docker_probe_ready
 
 
 class _FakeDocker:
@@ -250,3 +251,59 @@ def test_bash_threads_resolved_container_key_into_sandbox_config() -> None:
         BashTool.set_runtime(RuntimeContext())  # reset the class-level runtime
     assert result is not None and result.is_error is False
     assert captured["container_key"] == "session-abc"
+
+
+# --- T3.4: real-Docker integration — container reuse end to end ------------
+
+
+@pytest.mark.skipif(
+    not docker_probe_ready(),
+    reason="docker daemon or alpine:latest image unavailable",
+)
+def test_docker_pool_reuses_one_container_across_calls() -> None:
+    """Integration (real Docker): two calls with the same ``container_key``
+    share ONE pooled container — proven by a marker written into the
+    container's tmpfs in call 1 and read back in call 2 — with exactly
+    one ``oc-pool-`` container left running for the key.
+    """
+    import subprocess
+    import uuid as _uuid
+
+    from opencomputer.sandbox.docker import DockerStrategy
+    from plugin_sdk.sandbox import SandboxConfig
+
+    key = f"itest-{_uuid.uuid4().hex[:8]}"  # unique per run — no stale collisions
+    config = SandboxConfig(container_key=key)
+    strat = DockerStrategy()
+    pooled = ContainerPool.container_name(strat._pool_key(config))
+    try:
+        r1 = asyncio.run(
+            strat.run(
+                ["/bin/sh", "-c", "echo reuse-proof > /tmp/oc-marker"],
+                config=config,
+            )
+        )
+        assert r1.exit_code == 0, r1.stderr
+        r2 = asyncio.run(
+            strat.run(["/bin/sh", "-c", "cat /tmp/oc-marker"], config=config)
+        )
+        # Same container_key → same pooled container → the marker persists.
+        assert r2.exit_code == 0, r2.stderr
+        assert "reuse-proof" in r2.stdout
+        running = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"name={pooled}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert len(running.stdout.split()) == 1, (
+            f"expected exactly one pooled container, got {running.stdout!r}"
+        )
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", pooled],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
