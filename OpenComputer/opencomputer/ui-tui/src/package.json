@@ -1,0 +1,26 @@
+{
+  "name": "opencomputer-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenComputer terminal UI — Ink/React client of the gateway wire server.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ink": "^5.0.1",
+    "react": "^18.3.1",
+    "react-devtools-core": "^4.28.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.3",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.23.0",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

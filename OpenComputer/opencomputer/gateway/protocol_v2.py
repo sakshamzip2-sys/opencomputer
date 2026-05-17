@@ -45,16 +45,32 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_CHECKPOINTS_DELETE,
+    METHOD_CHECKPOINTS_LIST,
+    METHOD_CONFIG_GET,
+    METHOD_CONFIG_SET,
     METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
+    METHOD_MODEL_OPTIONS,
+    METHOD_MODEL_SET,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
+    METHOD_SESSION_DELETE,
+    METHOD_SESSION_FORK,
+    METHOD_SESSION_INTERRUPT,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_MOST_RECENT,
+    METHOD_SESSION_RENAME,
+    METHOD_SESSION_RESUME,
+    METHOD_SESSION_USAGE,
+    METHOD_SKILL_SHOW,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
+    METHOD_SUBAGENTS_LIST,
+    METHOD_TOOLS_LIST,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -324,6 +340,371 @@ class EvolutionStatusResult(_StrictModel):
     defaults: EvolutionStatusDefaults
 
 
+# 2026-05-17 TUI-parity Milestone 1 — session-lifecycle RPC schemas.
+
+
+class TranscriptMessage(_StrictModel):
+    """One conversation message in a resumed transcript.
+
+    A flattened, wire-safe projection of :class:`plugin_sdk.core.Message`:
+    only the fields a TUI/IDE client needs to re-render past turns. The
+    reasoning / tool-call / attachment fields of the full ``Message`` are
+    deliberately dropped — a resume picker shows text, not raw tool JSON.
+    """
+
+    role: str            # "user" | "assistant" | "system" | "tool"
+    text: str = ""       # the message ``content``
+    name: str | None = None  # tool name, for tool-role messages
+
+
+class SessionResumeParams(_StrictModel):
+    """Load a stored session's transcript for the resume picker."""
+
+    session_id: str
+
+
+class SessionResumeResult(_StrictModel):
+    """A session's metadata + full transcript.
+
+    ``info`` is the raw ``sessions`` row dict (id, title, started_at,
+    platform, model, cwd, …) — passed through untyped because the column
+    set evolves with the schema and clients only index known keys.
+    """
+
+    session_id: str
+    info: dict[str, Any] = Field(default_factory=dict)
+    messages: tuple[TranscriptMessage, ...] = ()
+    message_count: int = 0
+
+
+class SessionDeleteParams(_StrictModel):
+    """Delete a stored session and its cascaded rows."""
+
+    session_id: str
+
+
+class SessionDeleteResult(_StrictModel):
+    """Delete outcome.
+
+    ``found`` is False when no row had that id — deletion is idempotent,
+    so this is a successful response (``ok=True``), not an error; the
+    flag just tells the client whether anything actually changed.
+    """
+
+    deleted: str  # echoes the requested session_id
+    found: bool
+
+
+# 2026-05-17 TUI-parity Milestone 1 batch 2 — settings-read RPC schemas.
+
+
+class ModelOptionsParams(_StrictModel):
+    """No params — enumerates the whole registry for the active profile."""
+
+
+class ModelProviderOption(_StrictModel):
+    """One provider's available models, with a current-selection flag."""
+
+    name: str               # provider id, e.g. "anthropic"
+    models: tuple[str, ...]  # model ids, sorted
+    is_current: bool         # True if the bound default model is this provider's
+
+
+class ModelOptionsResult(_StrictModel):
+    """Registry snapshot for a model-picker overlay.
+
+    ``model`` / ``provider`` are the currently-bound default (either may
+    be ``None`` if the profile config has no model section). ``providers``
+    is sorted by provider name for stable client-side rendering.
+    """
+
+    model: str | None = None
+    provider: str | None = None
+    providers: tuple[ModelProviderOption, ...] = ()
+
+
+class ConfigGetParams(_StrictModel):
+    """Fetch one config value by dotted key (``model.provider``, …)."""
+
+    key: str
+
+
+class ConfigGetResult(_StrictModel):
+    """A single config value.
+
+    ``found`` is False for an unknown key — that is a successful response,
+    not an error, so a settings panel can distinguish "unset" from "the
+    RPC failed". ``value`` is coerced JSON-safe by the server (dataclass
+    config sections become their ``repr``) so the typed schema can carry
+    it; ``None`` whenever ``found`` is False.
+    """
+
+    key: str
+    value: Any = None
+    found: bool
+
+
+# 2026-05-17 TUI-parity Milestone 1 batch 3 — settings-write RPC schemas.
+
+
+class ModelSetParams(_StrictModel):
+    """Persist a new default provider+model to the profile config."""
+
+    provider: str
+    model: str
+
+
+class ModelSetResult(_StrictModel):
+    """Outcome of a model.set write.
+
+    ``ok`` is always True on a success response — a failed write returns
+    an ``ok=False`` :class:`~opencomputer.gateway.protocol.WireResponse`
+    with an error string, never this result. Persist-only: the running
+    session is unaffected until restart.
+    """
+
+    provider: str
+    model: str
+    ok: bool
+
+
+class ConfigSetParams(_StrictModel):
+    """Persist one config value by dotted key (``model.provider``, …).
+
+    ``value`` is whatever JSON the client sends; the server's
+    ``set_value`` applies the config schema's type coercion.
+    """
+
+    key: str
+    value: Any = None
+
+
+class ConfigSetResult(_StrictModel):
+    """Outcome of a config.set write — echoes the key+value that landed."""
+
+    key: str
+    value: Any = None
+    ok: bool
+
+
+# 2026-05-17 TUI-parity Milestone 1 batch 4 — session-metadata schemas.
+
+
+class SessionRenameParams(_StrictModel):
+    """Set a session's title."""
+
+    session_id: str
+    title: str
+
+
+class SessionRenameResult(_StrictModel):
+    """Rename outcome — echoes the title that landed."""
+
+    session_id: str
+    title: str
+    ok: bool
+
+
+class SessionUsageParams(_StrictModel):
+    """Fetch per-session token / cache / cost totals."""
+
+    session_id: str
+
+
+class SessionUsageResult(_StrictModel):
+    """Per-session usage snapshot.
+
+    Mirrors :class:`opencomputer.agent.state.SessionUsageRow`. ``found``
+    is False for an unknown / empty session id — a successful response,
+    not an error, so a usage panel can render "no data" vs. an RPC error.
+    ``cost_usd`` is ``None`` when the session has no priced ``llm_calls``
+    rows (surfacing 0.0 would be a lie — see CC visibility spec §4.2).
+    """
+
+    session_id: str
+    found: bool
+    model: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    compactions_count: int = 0
+    cost_usd: float | None = None
+    started_at: float | None = None
+    ended_at: float | None = None
+
+
+# 2026-05-17 TUI-parity Milestone 1 batch 5 — subagents + recent session.
+
+
+class SubagentsListParams(_StrictModel):
+    """List spawned subagents. ``running_only`` filters to live records."""
+
+    limit: int = 50
+    running_only: bool = False
+
+
+class SubagentInfo(_StrictModel):
+    """One spawned-subagent record, flattened wire-safe.
+
+    Projection of :class:`opencomputer.agent.subagent_store.StoredSubagent`:
+    ``datetime`` fields become ISO-8601 strings; ``display_state`` is the
+    derived state (``orphaned`` for a running record whose host died).
+    """
+
+    agent_id: str
+    goal: str
+    state: str
+    display_state: str
+    role: str
+    depth: int
+    started_at: str
+    parent_session_id: str | None = None
+    child_session_id: str | None = None
+    ended_at: str | None = None
+    error: str | None = None
+
+
+class SubagentsListResult(_StrictModel):
+    subagents: tuple[SubagentInfo, ...] = ()
+
+
+class SessionMostRecentParams(_StrictModel):
+    """No params — the single newest session for the active profile."""
+
+
+class SessionMostRecentResult(_StrictModel):
+    """The latest session, or ``found=False`` when there are no sessions."""
+
+    found: bool
+    session_id: str | None = None
+    title: str | None = None
+    started_at: float | None = None
+    source: str | None = None
+
+
+# 2026-05-17 TUI-parity Milestone 1 batch 6 — skill preview + session fork.
+
+
+class SkillShowParams(_StrictModel):
+    """Fetch one skill's full SKILL.md body for preview."""
+
+    skill_id: str
+
+
+class SkillShowResult(_StrictModel):
+    """A skill's body text. ``found`` is False for an unknown skill id
+    (a success, not an error); ``body`` is then empty."""
+
+    skill_id: str
+    body: str = ""
+    found: bool
+
+
+class SessionForkParams(_StrictModel):
+    """Clone a session's history into a new session id.
+
+    ``record_parent`` records fork lineage so the fork groups under the
+    source in ``oc sessions tree`` (off by default — the fork is
+    functionally independent either way).
+    """
+
+    session_id: str
+    title: str = ""
+    record_parent: bool = False
+
+
+class SessionForkResult(_StrictModel):
+    """Fork outcome — the new session id + how many messages were copied."""
+
+    source_session_id: str
+    new_session_id: str
+    messages_copied: int
+    ok: bool
+
+
+# 2026-05-17 TUI-parity Milestone 1 batch 7 — interrupt + tool inventory.
+
+
+class SessionInterruptParams(_StrictModel):
+    """Signal a mid-run turn to cancel."""
+
+    session_id: str
+
+
+class SessionInterruptResult(_StrictModel):
+    """Interrupt outcome.
+
+    ``ok`` is always True on a success response — the cancel signal is
+    fire-and-forget (the agent loop picks it up between/within turns).
+    Interrupting an idle session is harmless: the loop clears a stale
+    cancel Event on its next dispatch.
+    """
+
+    session_id: str
+    ok: bool
+
+
+class ToolInfo(_StrictModel):
+    """One registered tool — name + (truncated) description."""
+
+    name: str
+    description: str = ""
+
+
+class ToolsListParams(_StrictModel):
+    """No params — the full registered-tool inventory."""
+
+
+class ToolsListResult(_StrictModel):
+    tools: tuple[ToolInfo, ...] = ()
+
+
+# 2026-05-17 TUI-parity Milestone 1 batch 8 — prompt-checkpoint schemas.
+
+
+class CheckpointInfo(_StrictModel):
+    """One prompt checkpoint, flattened wire-safe.
+
+    Projection of :class:`opencomputer.agent.state.PromptCheckpoint` — the
+    snapshotted ``messages`` list is replaced by ``message_count`` so a
+    rollback overlay can render the list without shipping every
+    transcript through the wire.
+    """
+
+    id: str
+    session_id: str
+    prompt_index: int
+    label: str
+    created_at: float
+    message_count: int
+
+
+class CheckpointsListParams(_StrictModel):
+    """List a session's prompt checkpoints, most-recent first."""
+
+    session_id: str
+    limit: int = 50
+
+
+class CheckpointsListResult(_StrictModel):
+    checkpoints: tuple[CheckpointInfo, ...] = ()
+
+
+class CheckpointsDeleteParams(_StrictModel):
+    """Delete one prompt checkpoint by id."""
+
+    checkpoint_id: str
+
+
+class CheckpointsDeleteResult(_StrictModel):
+    """Delete outcome — ``found`` is False when no checkpoint had that id
+    (idempotent: still an ``ok=True`` response)."""
+
+    checkpoint_id: str
+    found: bool
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -338,6 +719,31 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_PERMISSION_RESPONSE: (PermissionResponseParams, PermissionResponseResult),
     METHOD_MEMORY_STATUS: (MemoryStatusParams, MemoryStatusResult),
     METHOD_EVOLUTION_STATUS: (EvolutionStatusParams, EvolutionStatusResult),
+    METHOD_SESSION_RESUME: (SessionResumeParams, SessionResumeResult),
+    METHOD_SESSION_DELETE: (SessionDeleteParams, SessionDeleteResult),
+    METHOD_MODEL_OPTIONS: (ModelOptionsParams, ModelOptionsResult),
+    METHOD_CONFIG_GET: (ConfigGetParams, ConfigGetResult),
+    METHOD_MODEL_SET: (ModelSetParams, ModelSetResult),
+    METHOD_CONFIG_SET: (ConfigSetParams, ConfigSetResult),
+    METHOD_SESSION_RENAME: (SessionRenameParams, SessionRenameResult),
+    METHOD_SESSION_USAGE: (SessionUsageParams, SessionUsageResult),
+    METHOD_SUBAGENTS_LIST: (SubagentsListParams, SubagentsListResult),
+    METHOD_SESSION_MOST_RECENT: (
+        SessionMostRecentParams,
+        SessionMostRecentResult,
+    ),
+    METHOD_SKILL_SHOW: (SkillShowParams, SkillShowResult),
+    METHOD_SESSION_FORK: (SessionForkParams, SessionForkResult),
+    METHOD_SESSION_INTERRUPT: (
+        SessionInterruptParams,
+        SessionInterruptResult,
+    ),
+    METHOD_TOOLS_LIST: (ToolsListParams, ToolsListResult),
+    METHOD_CHECKPOINTS_LIST: (CheckpointsListParams, CheckpointsListResult),
+    METHOD_CHECKPOINTS_DELETE: (
+        CheckpointsDeleteParams,
+        CheckpointsDeleteResult,
+    ),
 }
 
 
@@ -505,6 +911,22 @@ __all__ = [
     "METHOD_PERMISSION_RESPONSE",
     "METHOD_MEMORY_STATUS",
     "METHOD_EVOLUTION_STATUS",
+    "METHOD_SESSION_RESUME",
+    "METHOD_SESSION_DELETE",
+    "METHOD_MODEL_OPTIONS",
+    "METHOD_CONFIG_GET",
+    "METHOD_MODEL_SET",
+    "METHOD_CONFIG_SET",
+    "METHOD_SESSION_RENAME",
+    "METHOD_SESSION_USAGE",
+    "METHOD_SUBAGENTS_LIST",
+    "METHOD_SESSION_MOST_RECENT",
+    "METHOD_SKILL_SHOW",
+    "METHOD_SESSION_FORK",
+    "METHOD_SESSION_INTERRUPT",
+    "METHOD_TOOLS_LIST",
+    "METHOD_CHECKPOINTS_LIST",
+    "METHOD_CHECKPOINTS_DELETE",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -544,6 +966,43 @@ __all__ = [
     "EvolutionStatusParams",
     "EvolutionStatusResult",
     "EvolutionStatusDefaults",
+    "TranscriptMessage",
+    "SessionResumeParams",
+    "SessionResumeResult",
+    "SessionDeleteParams",
+    "SessionDeleteResult",
+    "ModelOptionsParams",
+    "ModelProviderOption",
+    "ModelOptionsResult",
+    "ConfigGetParams",
+    "ConfigGetResult",
+    "ModelSetParams",
+    "ModelSetResult",
+    "ConfigSetParams",
+    "ConfigSetResult",
+    "SessionRenameParams",
+    "SessionRenameResult",
+    "SessionUsageParams",
+    "SessionUsageResult",
+    "SubagentsListParams",
+    "SubagentInfo",
+    "SubagentsListResult",
+    "SessionMostRecentParams",
+    "SessionMostRecentResult",
+    "SkillShowParams",
+    "SkillShowResult",
+    "SessionForkParams",
+    "SessionForkResult",
+    "SessionInterruptParams",
+    "SessionInterruptResult",
+    "ToolInfo",
+    "ToolsListParams",
+    "ToolsListResult",
+    "CheckpointInfo",
+    "CheckpointsListParams",
+    "CheckpointsListResult",
+    "CheckpointsDeleteParams",
+    "CheckpointsDeleteResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",

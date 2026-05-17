@@ -78,6 +78,60 @@ METHOD_PERMISSION_RESPONSE = "permission.response"
 # the live state from the first frame.
 METHOD_MEMORY_STATUS = "memory.status"
 
+# 2026-05-17 TUI-parity Milestone 1 — session-lifecycle RPCs. The M1
+# protocol-mapping spike (docs/refs/hermes-tui-protocol-vs-oc-wire.md)
+# found a Hermes-parity TUI needs ~57 RPC methods vs OC's 11. These two
+# are batch 1: a resume picker cannot render a session without a method
+# that returns its transcript, and cannot prune stale rows without delete.
+METHOD_SESSION_RESUME = "session.resume"
+METHOD_SESSION_DELETE = "session.delete"
+
+# 2026-05-17 TUI-parity Milestone 1 batch 2 — settings read surface.
+# model.options powers a model-picker overlay; config.get powers a
+# settings panel. The write counterparts (model.set / config.set) land
+# in batch 3 with their own profile-write isolation.
+METHOD_MODEL_OPTIONS = "model.options"
+METHOD_CONFIG_GET = "config.get"
+
+# 2026-05-17 TUI-parity Milestone 1 batch 3 — settings write surface.
+# model.set / config.set persist to the profile config.yaml through a
+# write+validate+rollback harness. Persist-only for v1 (the running
+# session is unaffected until restart — matches the dashboard route).
+METHOD_MODEL_SET = "model.set"
+METHOD_CONFIG_SET = "config.set"
+
+# 2026-05-17 TUI-parity Milestone 1 batch 4 — session metadata.
+# session.rename sets a title (in-picker rename); session.usage returns
+# per-session token / cache / cost totals (usage panel + status bar).
+METHOD_SESSION_RENAME = "session.rename"
+METHOD_SESSION_USAGE = "session.usage"
+
+# 2026-05-17 TUI-parity Milestone 1 batch 5 — subagents + recent session.
+# subagents.list powers an agents overlay; session.most_recent powers the
+# TUI's "resume last session" affordance.
+METHOD_SUBAGENTS_LIST = "subagents.list"
+METHOD_SESSION_MOST_RECENT = "session.most_recent"
+
+# 2026-05-17 TUI-parity Milestone 1 batch 6 — skill preview + session fork.
+# skill.show powers the skills-hub overlay's preview; session.fork powers
+# the fork-tree / branch affordance.
+METHOD_SKILL_SHOW = "skill.show"
+METHOD_SESSION_FORK = "session.fork"
+
+# 2026-05-17 TUI-parity Milestone 1 batch 7 — interrupt + tool inventory.
+# session.interrupt signals a mid-run turn to cancel (the agent loop
+# watches the steer registry's per-session cancel Event); tools.list
+# enumerates registered tools for a capability-inspector overlay.
+METHOD_SESSION_INTERRUPT = "session.interrupt"
+METHOD_TOOLS_LIST = "tools.list"
+
+# 2026-05-17 TUI-parity Milestone 1 batch 8 — prompt checkpoints.
+# checkpoints.list powers a rollback overlay (the message-history
+# snapshots behind /checkpoint + /restore); checkpoints.delete prunes
+# stale entries from it.
+METHOD_CHECKPOINTS_LIST = "checkpoints.list"
+METHOD_CHECKPOINTS_DELETE = "checkpoints.delete"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -144,6 +198,22 @@ __all__ = [
     "METHOD_PERMISSION_RESPONSE",
     "METHOD_MEMORY_STATUS",
     "METHOD_EVOLUTION_STATUS",
+    "METHOD_SESSION_RESUME",
+    "METHOD_SESSION_DELETE",
+    "METHOD_MODEL_OPTIONS",
+    "METHOD_CONFIG_GET",
+    "METHOD_MODEL_SET",
+    "METHOD_CONFIG_SET",
+    "METHOD_SESSION_RENAME",
+    "METHOD_SESSION_USAGE",
+    "METHOD_SUBAGENTS_LIST",
+    "METHOD_SESSION_MOST_RECENT",
+    "METHOD_SKILL_SHOW",
+    "METHOD_SESSION_FORK",
+    "METHOD_SESSION_INTERRUPT",
+    "METHOD_TOOLS_LIST",
+    "METHOD_CHECKPOINTS_LIST",
+    "METHOD_CHECKPOINTS_DELETE",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

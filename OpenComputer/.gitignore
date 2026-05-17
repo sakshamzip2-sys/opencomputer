@@ -40,7 +40,6 @@ opencomputer/dashboard/static/spa/
 opencomputer/dashboard/static/spa
 opencomputer/ui-tui/dist/
 opencomputer/ui-tui/dist
-opencomputer/ui-tui
 ui-tui/dist/
 ui-tui/packages/*/dist/
 

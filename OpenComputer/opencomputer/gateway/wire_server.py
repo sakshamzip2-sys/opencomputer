@@ -40,16 +40,32 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
+    METHOD_CHECKPOINTS_DELETE,
+    METHOD_CHECKPOINTS_LIST,
+    METHOD_CONFIG_GET,
+    METHOD_CONFIG_SET,
     METHOD_EVOLUTION_STATUS,
     METHOD_HELLO,
     METHOD_MEMORY_STATUS,
+    METHOD_MODEL_OPTIONS,
+    METHOD_MODEL_SET,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
+    METHOD_SESSION_DELETE,
+    METHOD_SESSION_FORK,
+    METHOD_SESSION_INTERRUPT,
     METHOD_SESSION_LIST,
+    METHOD_SESSION_MOST_RECENT,
+    METHOD_SESSION_RENAME,
+    METHOD_SESSION_RESUME,
+    METHOD_SESSION_USAGE,
+    METHOD_SKILL_SHOW,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
+    METHOD_SUBAGENTS_LIST,
+    METHOD_TOOLS_LIST,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -346,6 +362,22 @@ class WireServer:
                         METHOD_PERMISSION_RESPONSE,
                         METHOD_MEMORY_STATUS,
                         METHOD_EVOLUTION_STATUS,
+                        METHOD_SESSION_RESUME,
+                        METHOD_SESSION_DELETE,
+                        METHOD_MODEL_OPTIONS,
+                        METHOD_CONFIG_GET,
+                        METHOD_MODEL_SET,
+                        METHOD_CONFIG_SET,
+                        METHOD_SESSION_RENAME,
+                        METHOD_SESSION_USAGE,
+                        METHOD_SUBAGENTS_LIST,
+                        METHOD_SESSION_MOST_RECENT,
+                        METHOD_SKILL_SHOW,
+                        METHOD_SESSION_FORK,
+                        METHOD_SESSION_INTERRUPT,
+                        METHOD_TOOLS_LIST,
+                        METHOD_CHECKPOINTS_LIST,
+                        METHOD_CHECKPOINTS_DELETE,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -432,29 +464,15 @@ class WireServer:
             )
         elif req.method == METHOD_SLASH_LIST:
             # 2026-05-07 (PR6): enumerate registered slash commands so
-            # the dashboard ChatPage and the (future) Ink TUI share a
-            # single source of truth for the slash palette.
-            try:
-                from opencomputer.agent.slash_commands import (
-                    get_registered_commands,
-                )
-
-                cmds = get_registered_commands()
-                payload = {
-                    "commands": [
-                        {
-                            "name": getattr(c, "name", str(c)),
-                            "description": getattr(c, "description", ""),
-                            "aliases": list(getattr(c, "aliases", [])),
-                        }
-                        for c in cmds
-                    ]
-                }
-                await self._send_response(ws, req.id, True, payload=payload)
-            except Exception as exc:  # noqa: BLE001
-                await self._send_response(
-                    ws, req.id, False, error=f"slash.list: {exc}"
-                )
+            # the dashboard ChatPage and the Ink TUI share a single
+            # source of truth for the slash palette. Deduped per command
+            # — see _collect_slash_commands.
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={"commands": self._collect_slash_commands()},
+            )
         elif req.method == METHOD_PERMISSION_RESPONSE:
             # M3.1 (2026-05-09) — wire client posts the user's
             # allow_once / allow_always / deny verdict in response to
@@ -574,6 +592,366 @@ class WireServer:
                 await self._send_response(
                     ws, req.id, False, error=f"evolution.status: {exc}"
                 )
+        elif req.method == METHOD_SESSION_RESUME:
+            # 2026-05-17 TUI-parity M1 — load a stored session's transcript
+            # so a resume picker can render past turns. v1: always default
+            # profile (matches the rest of the wire surface).
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.resume: session_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_session_resume(_loop, session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.resume: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.resume: {exc}"
+                )
+                return
+            if payload is None:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error=f"session.resume: no session {session_id}",
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SESSION_DELETE:
+            # 2026-05-17 TUI-parity M1 — delete a stored session + its
+            # cascaded rows. Idempotent: deleting an unknown id is a
+            # success with found=False, not an error.
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.delete: session_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                found = bool(_loop.db.delete_session(session_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.delete: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.delete: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"deleted": session_id, "found": found}
+            )
+        elif req.method == METHOD_MODEL_OPTIONS:
+            # 2026-05-17 TUI-parity M1 batch 2 — registry snapshot for a
+            # model-picker overlay. No params; reads the process-global
+            # model registry + the active profile's bound default.
+            try:
+                payload = self._collect_model_options()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("model.options: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"model.options: {exc}"
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_CONFIG_GET:
+            # 2026-05-17 TUI-parity M1 batch 2 — fetch one config value by
+            # dotted key for a settings panel. Unknown key → found=False
+            # (a success, not an error).
+            key = str(req.params.get("key", "")).strip()
+            if not key:
+                await self._send_response(
+                    ws, req.id, False, error="config.get: key is required"
+                )
+                return
+            try:
+                payload = self._collect_config_value(key)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("config.get: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"config.get: {exc}"
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_MODEL_SET:
+            # 2026-05-17 TUI-parity M1 batch 3 — persist a new default
+            # provider+model. Persist-only: the running session is
+            # unaffected until restart (matches the dashboard route).
+            provider = str(req.params.get("provider", "")).strip()
+            model = str(req.params.get("model", "")).strip()
+            if not provider or not model:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error="model.set: provider and model are both required",
+                )
+                return
+            result = self._apply_model_set(provider, model)
+            if isinstance(result, str):
+                await self._send_response(ws, req.id, False, error=result)
+                return
+            await self._send_response(ws, req.id, True, payload=result)
+        elif req.method == METHOD_CONFIG_SET:
+            # 2026-05-17 TUI-parity M1 batch 3 — persist one config value
+            # by dotted key. Validated by round-trip; rolled back on failure.
+            key = str(req.params.get("key", "")).strip()
+            if not key:
+                await self._send_response(
+                    ws, req.id, False, error="config.set: key is required"
+                )
+                return
+            result = self._apply_config_set(key, req.params.get("value"))
+            if isinstance(result, str):
+                await self._send_response(ws, req.id, False, error=result)
+                return
+            await self._send_response(ws, req.id, True, payload=result)
+        elif req.method == METHOD_SESSION_RENAME:
+            # 2026-05-17 TUI-parity M1 batch 4 — set a session's title.
+            # SessionDB.set_session_title upserts, so renaming a not-yet-
+            # persisted session id still succeeds (idempotent).
+            session_id = str(req.params.get("session_id", "")).strip()
+            title = str(req.params.get("title", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.rename: session_id is required"
+                )
+                return
+            if not title:
+                await self._send_response(
+                    ws, req.id, False, error="session.rename: title must be non-empty"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                _loop.db.set_session_title(session_id, title)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.rename: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.rename: {exc}"
+                )
+                return
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={"session_id": session_id, "title": title, "ok": True},
+            )
+        elif req.method == METHOD_SESSION_USAGE:
+            # 2026-05-17 TUI-parity M1 batch 4 — per-session token/cost
+            # totals. Unknown id → found=False (a success, not an error).
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.usage: session_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_session_usage(_loop, session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.usage: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.usage: {exc}"
+                )
+                return
+            if payload is None:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    True,
+                    payload={"session_id": session_id, "found": False},
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SUBAGENTS_LIST:
+            # 2026-05-17 TUI-parity M1 batch 5 — spawned-subagent history
+            # for an agents overlay. Old DBs without a subagents table
+            # degrade to an empty list (helper swallows the error).
+            limit = int(req.params.get("limit", 50))
+            running_only = bool(req.params.get("running_only", False))
+            try:
+                _loop = await self._router.get_or_load("default")
+                subs = self._collect_subagents(
+                    _loop, limit=limit, running_only=running_only
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("subagents.list: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"subagents.list: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"subagents": subs}
+            )
+        elif req.method == METHOD_SESSION_MOST_RECENT:
+            # 2026-05-17 TUI-parity M1 batch 5 — the newest session, for
+            # the TUI's "resume last" affordance. Empty profile → found=False.
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_most_recent(_loop)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.most_recent: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.most_recent: {exc}"
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SKILL_SHOW:
+            # 2026-05-17 TUI-parity M1 batch 6 — a skill's SKILL.md body
+            # for the skills-hub preview. Unknown id → found=False.
+            skill_id = str(req.params.get("skill_id", "")).strip()
+            if not skill_id:
+                await self._send_response(
+                    ws, req.id, False, error="skill.show: skill_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_skill_body(_loop, skill_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("skill.show: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"skill.show: {exc}"
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SESSION_FORK:
+            # 2026-05-17 TUI-parity M1 batch 6 — clone a session's history
+            # into a new session id (fork-tree / branch affordance).
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.fork: session_id is required"
+                )
+                return
+            title = str(req.params.get("title", "")).strip()
+            record_parent = bool(req.params.get("record_parent", False))
+            try:
+                from opencomputer.agent.session_fork import (
+                    SourceSessionNotFoundError,
+                    fork_session,
+                )
+
+                _loop = await self._router.get_or_load("default")
+                result = fork_session(
+                    _loop.db,
+                    session_id,
+                    title=title or None,
+                    record_parent=record_parent,
+                )
+            except SourceSessionNotFoundError:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error=f"session.fork: source session {session_id} not found",
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.fork: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.fork: {exc}"
+                )
+                return
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={
+                    "source_session_id": session_id,
+                    "new_session_id": result.new_session_id,
+                    "messages_copied": result.messages_copied,
+                    "ok": True,
+                },
+            )
+        elif req.method == METHOD_SESSION_INTERRUPT:
+            # 2026-05-17 TUI-parity M1 batch 7 — signal a mid-run turn to
+            # cancel. Sets the steer registry's per-session cancel Event,
+            # which the agent loop watches between/within turns. Setting
+            # it for an idle session is harmless — the loop clears a stale
+            # event on its next dispatch.
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.interrupt: session_id is required"
+                )
+                return
+            try:
+                _steer_registry.cancel_event(session_id).set()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.interrupt: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.interrupt: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"session_id": session_id, "ok": True}
+            )
+        elif req.method == METHOD_TOOLS_LIST:
+            # 2026-05-17 TUI-parity M1 batch 7 — registered-tool inventory
+            # for a capability-inspector overlay.
+            try:
+                tools = self._collect_tools()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("tools.list: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"tools.list: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"tools": tools}
+            )
+        elif req.method == METHOD_CHECKPOINTS_LIST:
+            # 2026-05-17 TUI-parity M1 batch 8 — a session's prompt
+            # checkpoints for a rollback overlay.
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="checkpoints.list: session_id is required"
+                )
+                return
+            limit = int(req.params.get("limit", 50))
+            try:
+                _loop = await self._router.get_or_load("default")
+                checkpoints = self._collect_checkpoints(_loop, session_id, limit)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("checkpoints.list: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"checkpoints.list: {exc}"
+                )
+                return
+            await self._send_response(
+                ws, req.id, True, payload={"checkpoints": checkpoints}
+            )
+        elif req.method == METHOD_CHECKPOINTS_DELETE:
+            # 2026-05-17 TUI-parity M1 batch 8 — prune one checkpoint.
+            # Idempotent: unknown id → found=False (a success).
+            checkpoint_id = str(req.params.get("checkpoint_id", "")).strip()
+            if not checkpoint_id:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error="checkpoints.delete: checkpoint_id is required",
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                found = bool(_loop.db.delete_prompt_checkpoint(checkpoint_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("checkpoints.delete: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"checkpoints.delete: {exc}"
+                )
+                return
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={"checkpoint_id": checkpoint_id, "found": found},
+            )
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -1043,6 +1421,489 @@ class WireServer:
             )
         entries.sort(key=lambda e: e["target"])
         return entries
+
+    @staticmethod
+    def _collect_session_resume(
+        loop: Any, session_id: str
+    ) -> dict[str, Any] | None:
+        """Build the ``METHOD_SESSION_RESUME`` payload for one AgentLoop.
+
+        Reads the ``sessions`` row + every stored message for ``session_id``
+        via :class:`opencomputer.agent.state.SessionDB`, flattening each
+        :class:`plugin_sdk.core.Message` into the wire-safe
+        :class:`~opencomputer.gateway.protocol_v2.TranscriptMessage` shape
+        (role + text + optional tool name — reasoning / tool-call JSON is
+        dropped; a resume picker renders text, not raw tool payloads).
+
+        Failure modes (helper never raises — mirrors ``_collect_memory_status``):
+
+        * ``loop.db`` missing (minimal test harness) → returns ``None``.
+        * No session row with that id → returns ``None``. The dispatch
+          case turns ``None`` into an ``ok=False`` "no session" response.
+        * ``get_messages`` raising → logged at WARN, transcript returns
+          empty but the session ``info`` is still delivered.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("session.resume: loop has no db — None")
+            return None
+
+        info = db.get_session(session_id)
+        if info is None:
+            return None
+
+        messages: list[dict[str, Any]] = []
+        try:
+            for msg in db.get_messages(session_id):
+                role = getattr(msg, "role", "")
+                # Role may be a str enum (plugin_sdk.core.Role) — normalise.
+                role_str = str(getattr(role, "value", role) or "")
+                messages.append(
+                    {
+                        "role": role_str,
+                        "text": str(getattr(msg, "content", "") or ""),
+                        "name": getattr(msg, "name", None),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "session.resume: failed to load messages for %s: %s — "
+                "returning metadata with empty transcript",
+                session_id,
+                exc,
+            )
+            messages = []
+
+        return {
+            "session_id": session_id,
+            "info": dict(info),
+            "messages": messages,
+            "message_count": len(messages),
+        }
+
+    @staticmethod
+    def _collect_session_usage(
+        loop: Any, session_id: str
+    ) -> dict[str, Any] | None:
+        """Build the ``METHOD_SESSION_USAGE`` payload for one AgentLoop.
+
+        Wraps :meth:`opencomputer.agent.state.SessionDB.session_usage_summary`
+        — per-session token / cache / compaction / cost totals.
+
+        Returns ``None`` when ``loop.db`` is missing or the session id is
+        unknown / empty (the dispatch case turns ``None`` into a
+        ``found=False`` success response). Never raises.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("session.usage: loop has no db — None")
+            return None
+
+        row = db.session_usage_summary(session_id)
+        if row is None:
+            return None
+
+        return {
+            "session_id": session_id,
+            "found": True,
+            "model": getattr(row, "model", None),
+            "input_tokens": getattr(row, "input_tokens", 0),
+            "output_tokens": getattr(row, "output_tokens", 0),
+            "cache_read_tokens": getattr(row, "cache_read_tokens", 0),
+            "cache_write_tokens": getattr(row, "cache_write_tokens", 0),
+            "compactions_count": getattr(row, "compactions_count", 0),
+            "cost_usd": getattr(row, "cost_usd", None),
+            "started_at": getattr(row, "started_at", None),
+            "ended_at": getattr(row, "ended_at", None),
+        }
+
+    @staticmethod
+    def _collect_subagents(
+        loop: Any, *, limit: int, running_only: bool
+    ) -> list[dict[str, Any]]:
+        """Build the ``METHOD_SUBAGENTS_LIST`` payload for one AgentLoop.
+
+        Opens a :class:`opencomputer.agent.subagent_store.SubagentStore`
+        over the same DB file as the loop's SessionDB (the ``subagents``
+        table lives in ``sessions.db``) and flattens each record into a
+        wire-safe dict — ``datetime`` fields become ISO-8601 strings.
+
+        Failure modes (helper never raises):
+
+        * ``loop.db`` missing → ``[]``.
+        * DB predates the ``subagents`` table (``SubagentStoreUnavailable``)
+          → ``[]`` logged at debug. The overlay renders empty.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("subagents.list: loop has no db — empty")
+            return []
+
+        try:
+            # Single broad except: SubagentStoreUnavailable (DB predating
+            # the subagents table) is a RuntimeError subclass and is
+            # caught here too. Catching it by name would risk an unbound
+            # reference if the import itself failed — so catch broadly.
+            from opencomputer.agent.subagent_store import SubagentStore
+
+            store = SubagentStore(db.db_path, allow_create=False)
+            # history() excludes running records by design (they live in
+            # list_running()). For an "all" view the overlay needs both —
+            # running first, then the most-recent terminal history. The
+            # two sets are disjoint (state is exclusive) so no dedup.
+            if running_only:
+                records = list(store.list_running())
+            else:
+                records = list(store.list_running()) + list(
+                    store.history(limit=max(1, limit))
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "subagents.list: store unavailable / read failed (%s) — empty",
+                exc,
+            )
+            return []
+
+        out: list[dict[str, Any]] = []
+        for r in records:
+            started = getattr(r, "started_at", None)
+            ended = getattr(r, "ended_at", None)
+            out.append(
+                {
+                    "agent_id": getattr(r, "agent_id", ""),
+                    "goal": getattr(r, "goal", ""),
+                    "state": getattr(r, "state", ""),
+                    "display_state": getattr(r, "display_state", "")
+                    or getattr(r, "state", ""),
+                    "role": getattr(r, "role", ""),
+                    "depth": getattr(r, "depth", 0),
+                    "started_at": started.isoformat() if started else "",
+                    "parent_session_id": getattr(r, "parent_session_id", None),
+                    "child_session_id": getattr(r, "child_session_id", None),
+                    "ended_at": ended.isoformat() if ended else None,
+                    "error": getattr(r, "error", None),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _collect_skill_body(loop: Any, skill_id: str) -> dict[str, Any]:
+        """Build the ``METHOD_SKILL_SHOW`` payload — one skill's body text.
+
+        Cross-checks ``list_skills()`` for an authoritative existence test
+        (``load_skill_body`` alone can't tell "missing" from "empty body"),
+        then loads the SKILL.md content minus frontmatter.
+
+        Returns ``{skill_id, body, found}``; ``found=False`` (empty body)
+        when ``loop.memory`` is missing or no skill has that id. Never raises.
+        """
+        memory = getattr(loop, "memory", None)
+        if memory is None:
+            logger.debug("skill.show: loop has no memory manager — not found")
+            return {"skill_id": skill_id, "body": "", "found": False}
+
+        try:
+            known = {
+                getattr(s, "id", None) for s in memory.list_skills()
+            }
+            if skill_id not in known:
+                return {"skill_id": skill_id, "body": "", "found": False}
+            body = memory.load_skill_body(skill_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skill.show: failed for %r: %s", skill_id, exc)
+            return {"skill_id": skill_id, "body": "", "found": False}
+
+        return {"skill_id": skill_id, "body": body, "found": True}
+
+    @staticmethod
+    def _collect_most_recent(loop: Any) -> dict[str, Any]:
+        """Build the ``METHOD_SESSION_MOST_RECENT`` payload.
+
+        Returns the newest session row's id/title/timestamp, or
+        ``{"found": False}`` when ``loop.db`` is missing or the profile
+        has no sessions. Never raises.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            return {"found": False}
+        try:
+            rows = db.list_sessions(limit=1)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("session.most_recent: list failed: %s", exc)
+            return {"found": False}
+        if not rows:
+            return {"found": False}
+        row = rows[0]
+        return {
+            "found": True,
+            "session_id": row.get("id"),
+            "title": row.get("title"),
+            "started_at": row.get("started_at"),
+            "source": row.get("source"),
+        }
+
+    @staticmethod
+    def _collect_checkpoints(
+        loop: Any, session_id: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Build the ``METHOD_CHECKPOINTS_LIST`` payload for one AgentLoop.
+
+        Wraps :meth:`opencomputer.agent.state.SessionDB.list_prompt_checkpoints`
+        and flattens each :class:`~opencomputer.agent.state.PromptCheckpoint`
+        — the snapshotted ``messages`` list becomes a ``message_count`` so
+        a rollback overlay renders without shipping every transcript.
+
+        Never raises: missing ``loop.db`` or unknown session → ``[]``.
+        """
+        db = getattr(loop, "db", None)
+        if db is None:
+            logger.debug("checkpoints.list: loop has no db — empty")
+            return []
+        try:
+            rows = db.list_prompt_checkpoints(session_id, limit=max(1, limit))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("checkpoints.list: read failed: %s — empty", exc)
+            return []
+        return [
+            {
+                "id": getattr(cp, "id", ""),
+                "session_id": getattr(cp, "session_id", session_id),
+                "prompt_index": getattr(cp, "prompt_index", 0),
+                "label": getattr(cp, "label", ""),
+                "created_at": getattr(cp, "created_at", 0.0),
+                "message_count": len(getattr(cp, "messages", None) or []),
+            }
+            for cp in rows
+        ]
+
+    @staticmethod
+    def _collect_slash_commands() -> list[dict[str, Any]]:
+        """Build the ``METHOD_SLASH_LIST`` payload — one entry per command.
+
+        The slash registry maps the canonical name AND every alias to the
+        *same* command instance, so ``get_registered_commands()`` yields
+        that instance once per alias — every copy carrying the canonical
+        ``.name``. Emitting them all put duplicate names on the wire,
+        which broke any client keying the palette by name (React
+        duplicate-key warnings corrupted the Ink TUI). Dedup by canonical
+        name; the aliases are preserved in each entry's ``aliases`` field.
+
+        Never raises — a registry failure degrades to ``[]``.
+        """
+        try:
+            from opencomputer.agent.slash_commands import get_registered_commands
+
+            cmds = get_registered_commands()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("slash.list: registry unavailable (%s) — empty", exc)
+            return []
+
+        seen: dict[str, dict[str, Any]] = {}
+        for c in cmds:
+            name = getattr(c, "name", None)
+            if not name or name in seen:
+                continue
+            seen[name] = {
+                "name": name,
+                "description": getattr(c, "description", ""),
+                "aliases": list(getattr(c, "aliases", [])),
+            }
+        return list(seen.values())
+
+    @staticmethod
+    def _collect_tools() -> list[dict[str, str]]:
+        """Build the ``METHOD_TOOLS_LIST`` payload — every registered
+        tool's ``{name, description}``.
+
+        Reads the process-global tool registry via
+        :meth:`opencomputer.tools.registry.ToolRegistry.tool_summaries`
+        (descriptions truncated by the registry). Never raises — a
+        registry failure degrades to ``[]``.
+        """
+        try:
+            from opencomputer.tools.registry import registry
+
+            return list(registry.tool_summaries())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tools.list: registry unavailable (%s) — empty", exc)
+            return []
+
+    @staticmethod
+    def _collect_model_options() -> dict[str, Any]:
+        """Build the ``METHOD_MODEL_OPTIONS`` payload — registry snapshot.
+
+        Enumerates every provider→model pairing from the process-global
+        model registry (via ``cli_model_picker._grouped_models``) and marks
+        the provider whose model is the currently-bound default.
+
+        Failure modes (helper never raises — mirrors ``_collect_memory_status``):
+
+        * The model registry raising → ``providers`` is ``[]`` (the picker
+          renders an empty list rather than the RPC erroring).
+        * ``default_config()`` raising → ``model``/``provider`` are ``None``.
+        """
+        current_model: str | None = None
+        current_provider: str | None = None
+        try:
+            from opencomputer.agent.config import default_config
+
+            cfg = default_config()
+            model_section = getattr(cfg, "model", None)
+            current_model = getattr(model_section, "model", None)
+            current_provider = getattr(model_section, "provider", None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("model.options: default_config failed: %s", exc)
+
+        providers: list[dict[str, Any]] = []
+        try:
+            from opencomputer import cli_model_picker
+
+            grouped = cli_model_picker._grouped_models()  # noqa: SLF001
+            for name in sorted(grouped):
+                providers.append(
+                    {
+                        "name": name,
+                        "models": sorted(grouped[name]),
+                        "is_current": name == current_provider,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "model.options: model registry unavailable (%s) — empty list",
+                exc,
+            )
+            providers = []
+
+        return {
+            "model": current_model,
+            "provider": current_provider,
+            "providers": providers,
+        }
+
+    @staticmethod
+    def _collect_config_value(key: str) -> dict[str, Any]:
+        """Build the ``METHOD_CONFIG_GET`` payload for one dotted key.
+
+        Resolves ``key`` against the active profile config via
+        :func:`opencomputer.agent.config_store.get_value`. An unknown key
+        is reported as ``found=False`` (not an error). The value is coerced
+        JSON-safe — config sections are dataclasses, so a section-level key
+        (``model``) returns its ``repr`` string rather than failing the
+        typed result's JSON serialization.
+
+        Never raises: a config-load failure also degrades to ``found=False``.
+        """
+        try:
+            from opencomputer.agent.config import default_config
+            from opencomputer.agent.config_store import get_value
+
+            cfg = default_config()
+            raw = get_value(cfg, key)
+        except KeyError:
+            return {"key": key, "value": None, "found": False}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("config.get: resolve failed for %r: %s", key, exc)
+            return {"key": key, "value": None, "found": False}
+
+        # Coerce JSON-safe — dataclass config sections aren't serializable.
+        try:
+            json.dumps(raw)
+            value: Any = raw
+        except (TypeError, ValueError):
+            value = repr(raw)
+        return {"key": key, "value": value, "found": True}
+
+    @staticmethod
+    def _persist_config_mutation(mutate: Any, *, label: str) -> str | None:
+        """Load the profile config, apply ``mutate``, persist + validate.
+
+        ``mutate`` is a callable ``Config -> Config`` (typically built on
+        :func:`opencomputer.agent.config_store.set_value`). The new config
+        is written, then re-loaded to validate it round-trips; if the
+        reload fails the previous ``config.yaml`` is restored from a
+        ``.bak`` copy. Mirrors the dashboard ``PUT /api/v1/config`` route's
+        write+validate+rollback discipline.
+
+        Returns ``None`` on success, or a human-readable error string on
+        failure (caller turns that into an ``ok=False`` wire response).
+        Never raises.
+        """
+        import shutil
+
+        from opencomputer.agent.config_store import (
+            config_file_path,
+            load_config,
+            save_config,
+        )
+
+        try:
+            path = config_file_path()
+        except Exception as exc:  # noqa: BLE001
+            return f"{label}: cannot resolve config path: {exc}"
+
+        try:
+            cfg = load_config()
+        except Exception as exc:  # noqa: BLE001
+            return f"{label}: cannot load current config: {exc}"
+
+        try:
+            new_cfg = mutate(cfg)
+        except KeyError as exc:
+            # set_value raises KeyError for an unknown/invalid key — the
+            # most common caller error. Surface its message verbatim.
+            return f"{label}: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return f"{label}: could not apply change: {exc}"
+
+        bak = path.with_suffix(".yaml.bak")
+        backed_up = False
+        if path.exists():
+            try:
+                shutil.copy2(path, bak)
+                backed_up = True
+            except OSError as exc:
+                return f"{label}: could not back up config before write: {exc}"
+
+        try:
+            save_config(new_cfg, path)
+            load_config(path)  # validate by round-trip
+        except Exception as exc:  # noqa: BLE001
+            if backed_up:
+                try:
+                    shutil.copy2(bak, path)
+                except OSError:
+                    logger.exception("%s: rollback of %s failed", label, path)
+            return f"{label}: write produced an invalid config (rolled back): {exc}"
+
+        return None
+
+    @staticmethod
+    def _apply_model_set(provider: str, model: str) -> dict[str, Any] | str:
+        """Persist a new default provider+model. dict on success, error str
+        on failure (caller maps str → ok=False response)."""
+        from opencomputer.agent.config_store import set_value
+
+        def mutate(cfg: Any) -> Any:
+            cfg = set_value(cfg, "model.provider", provider)
+            return set_value(cfg, "model.model", model)
+
+        err = WireServer._persist_config_mutation(mutate, label="model.set")
+        if err is not None:
+            return err
+        return {"provider": provider, "model": model, "ok": True}
+
+    @staticmethod
+    def _apply_config_set(key: str, value: Any) -> dict[str, Any] | str:
+        """Persist one config value by dotted key. dict on success, error
+        str on failure."""
+        from opencomputer.agent.config_store import set_value
+
+        err = WireServer._persist_config_mutation(
+            lambda cfg: set_value(cfg, key, value), label="config.set"
+        )
+        if err is not None:
+            return err
+        return {"key": key, "value": value, "ok": True}
 
     async def broadcast_permission_request(
         self,
