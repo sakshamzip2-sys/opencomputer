@@ -10,6 +10,8 @@ cloud backend gets exactly the same probe semantics as
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -64,6 +66,21 @@ def _make_mock_modal_app():
     return app_cls, sentinel_app
 
 
+def _install_fake_modal(monkeypatch):
+    """Inject a bare synthetic ``modal`` module into ``sys.modules``.
+
+    CI does not install the optional ``[modal]`` extra (same posture as
+    e2b / daytona — see ``test_e2b_backend.py``). With a placeholder
+    ``modal`` module present, the strategy's ``from modal import App,
+    Sandbox`` resolves AND ``patch("modal.Sandbox" / "modal.App", …)``
+    works — each test then patches in its own fakes.
+    """
+    modal_mod = types.ModuleType("modal")
+    modal_mod.Sandbox = object  # type: ignore[attr-defined]
+    modal_mod.App = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "modal", modal_mod)
+
+
 # --- is_available -----------------------------------------------------------
 
 
@@ -72,6 +89,8 @@ def test_modal_unavailable_without_any_creds(monkeypatch):
     monkeypatch.setattr(
         "opencomputer.sandbox.modal._modal_toml_exists", lambda: False
     )
+    # Package present so this genuinely exercises the no-credentials path.
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     assert ModalSandboxStrategy().is_available() is False
 
 
@@ -79,6 +98,11 @@ def test_modal_available_with_token_env(monkeypatch):
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-token")
     monkeypatch.setattr(
         "opencomputer.sandbox.modal._modal_toml_exists", lambda: False
+    )
+    # CI does not install the optional ``[modal]`` extra — stub find_spec.
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if name == "modal" else None,
     )
     assert ModalSandboxStrategy().is_available() is True
 
@@ -88,6 +112,10 @@ def test_modal_available_with_modal_toml_fallback(monkeypatch):
     monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
     monkeypatch.setattr(
         "opencomputer.sandbox.modal._modal_toml_exists", lambda: True
+    )
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if name == "modal" else None,
     )
     assert ModalSandboxStrategy().is_available() is True
 
@@ -100,6 +128,7 @@ def test_modal_run_happy_path(monkeypatch):
     sandbox = _make_fake_sandbox(returncode=0, stdout="hi\n", stderr="")
     cls = _make_mock_modal_class(create_return=sandbox)
     app_cls, sentinel_app = _make_mock_modal_app()
+    _install_fake_modal(monkeypatch)
     with patch("modal.Sandbox", cls), patch("modal.App", app_cls):
         result = asyncio.run(
             ModalSandboxStrategy().run(["echo", "hi"], config=SandboxConfig())
@@ -132,6 +161,7 @@ def test_modal_non_zero_exit_returns_code(monkeypatch):
     sandbox = _make_fake_sandbox(returncode=7, stdout="", stderr="boom")
     cls = _make_mock_modal_class(create_return=sandbox)
     app_cls, _ = _make_mock_modal_app()
+    _install_fake_modal(monkeypatch)
     with patch("modal.Sandbox", cls), patch("modal.App", app_cls):
         result = asyncio.run(
             ModalSandboxStrategy().run(["false"], config=SandboxConfig())
@@ -150,6 +180,7 @@ def test_modal_wait_raises_still_terminates(monkeypatch):
     sandbox.wait.aio = AsyncMock(side_effect=RuntimeError("net down"))
     cls = _make_mock_modal_class(create_return=sandbox)
     app_cls, _ = _make_mock_modal_app()
+    _install_fake_modal(monkeypatch)
     with (
         patch("modal.Sandbox", cls),
         patch("modal.App", app_cls),
@@ -171,6 +202,9 @@ def test_modal_run_raises_sandbox_unavailable_without_creds(monkeypatch):
     )
     backend = ModalSandboxStrategy()  # caches available=True
     monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+    # Fake package present so ``run()`` gets PAST the lazy import and
+    # genuinely reaches the missing-credentials check.
+    _install_fake_modal(monkeypatch)
     with pytest.raises(SandboxUnavailable, match="MODAL"):
         asyncio.run(backend.run(["echo", "x"], config=SandboxConfig()))
 
@@ -202,6 +236,7 @@ def test_modal_conforms_against_mocked_sdk(monkeypatch):
     cls.create = MagicMock()
     cls.create.aio = AsyncMock(side_effect=fake_create)
     app_cls, _ = _make_mock_modal_app()
+    _install_fake_modal(monkeypatch)
     with patch("modal.Sandbox", cls), patch("modal.App", app_cls):
         assert_conforms(ModalSandboxStrategy())
 
@@ -225,6 +260,10 @@ def test_modal_resolvable_via_named_strategy(monkeypatch):
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-token")
     monkeypatch.setattr(
         "opencomputer.sandbox.modal._modal_toml_exists", lambda: False
+    )
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if name == "modal" else None,
     )
     backend = _named_strategy("modal")
     assert isinstance(backend, ModalSandboxStrategy)

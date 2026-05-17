@@ -102,6 +102,13 @@ finding (a "garbled docstring" that did not exist).
    "sandbox" in the filename), which unit-tested the helper directly.
    CI caught the collection `ImportError` post-push. Before removing any
    symbol, `grep -rn` the whole repo for callers — filename globs lie.
+8. **Optional-dependency backends: tests must fake the SDK, never assume
+   it is pip-installed.** CI installs no cloud-SDK extras
+   (`[e2b]`/`[daytona]`/`[modal]`). The M2 daytona/modal tests assumed
+   the extras were present — true in the dev venv, false on CI — and 15
+   failed on first push. The local venv is not the CI environment;
+   `test_e2b_backend.py`'s `sys.modules` fake-injection is the pattern
+   every optional-backend test must follow.
 
 ## 5. Known limitations / honest follow-ups
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import sys
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -48,17 +50,39 @@ def _make_mock_daytona(*, exec_return=None, exec_side_effect=None):
     return cls, instance, sandbox
 
 
+def _install_fake_daytona(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inject a bare synthetic ``daytona`` module into ``sys.modules``.
+
+    CI does not install the optional ``[daytona]`` extra (same posture as
+    e2b / modal — see ``test_e2b_backend.py``). With a placeholder
+    ``daytona`` module present, the strategy's lazy ``from daytona import
+    AsyncDaytona`` resolves AND ``patch("daytona.AsyncDaytona", …)`` works
+    — each test then patches in its own fake ``AsyncDaytona``.
+    """
+    daytona_mod = types.ModuleType("daytona")
+    daytona_mod.AsyncDaytona = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "daytona", daytona_mod)
+
+
 # --- is_available -----------------------------------------------------------
 
 
 def test_daytona_unavailable_without_api_key(monkeypatch):
     monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
+    # Package present (find_spec succeeds) so this genuinely exercises the
+    # missing-key path, not the missing-package path.
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     assert DaytonaSandboxStrategy().is_available() is False
 
 
 def test_daytona_available_with_key_and_pkg(monkeypatch):
     monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
-    # ``daytona`` is installed in the venv (M2 setup) → find_spec succeeds.
+    # CI does not install the optional ``[daytona]`` extra — stub
+    # find_spec so availability does not depend on the package's presence.
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if name == "daytona" else None,
+    )
     assert DaytonaSandboxStrategy().is_available() is True
 
 
@@ -70,6 +94,7 @@ def test_daytona_run_happy_path(monkeypatch):
     cls, instance, sandbox = _make_mock_daytona(
         exec_return=_FakeExecuteResponse(exit_code=0, result="hi\n"),
     )
+    _install_fake_daytona(monkeypatch)
     with patch("daytona.AsyncDaytona", cls):
         result = asyncio.run(
             DaytonaSandboxStrategy().run(["echo", "hi"], config=SandboxConfig())
@@ -98,6 +123,7 @@ def test_daytona_non_zero_exit_returns_code(monkeypatch):
     cls, instance, _ = _make_mock_daytona(
         exec_return=_FakeExecuteResponse(exit_code=7, result="boom"),
     )
+    _install_fake_daytona(monkeypatch)
     with patch("daytona.AsyncDaytona", cls):
         result = asyncio.run(
             DaytonaSandboxStrategy().run(["false"], config=SandboxConfig())
@@ -115,6 +141,7 @@ def test_daytona_exec_raises_still_deletes_sandbox(monkeypatch):
     cls, instance, _ = _make_mock_daytona(
         exec_side_effect=RuntimeError("net down"),
     )
+    _install_fake_daytona(monkeypatch)
     with patch("daytona.AsyncDaytona", cls), pytest.raises(RuntimeError):
         asyncio.run(
             DaytonaSandboxStrategy().run(["echo", "x"], config=SandboxConfig())
@@ -129,6 +156,9 @@ def test_daytona_run_raises_sandbox_unavailable_without_key(monkeypatch):
     monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
     backend = DaytonaSandboxStrategy()  # caches available=True
     monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
+    # Fake package present so ``run()`` gets PAST the lazy import and
+    # genuinely reaches the missing-key check (not missing-package).
+    _install_fake_daytona(monkeypatch)
     with pytest.raises(SandboxUnavailable, match="DAYTONA_API_KEY"):
         asyncio.run(backend.run(["echo", "x"], config=SandboxConfig()))
 
@@ -158,6 +188,7 @@ def test_daytona_conforms_against_mocked_sdk(monkeypatch):
 
     cls, _, sandbox = _make_mock_daytona()
     sandbox.process.exec = AsyncMock(side_effect=fake_exec)
+    _install_fake_daytona(monkeypatch)
     with patch("daytona.AsyncDaytona", cls):
         assert_conforms(DaytonaSandboxStrategy())
 
@@ -179,6 +210,10 @@ def test_daytona_resolvable_via_named_strategy(monkeypatch):
     from opencomputer.sandbox.runner import _named_strategy
 
     monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if name == "daytona" else None,
+    )
     backend = _named_strategy("daytona")
     assert isinstance(backend, DaytonaSandboxStrategy)
     assert backend.name == "daytona"
