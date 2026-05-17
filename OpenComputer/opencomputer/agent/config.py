@@ -1738,6 +1738,23 @@ class Config:
         compare=False,
         hash=False,
     )
+    #: Gateway display config (2026-05-17, M1 gateway-vs-CLI parity).
+    #: The top-level ``display:`` YAML section — a free-form subtree
+    #: read by :func:`opencomputer.gateway.runtime_footer.resolve_footer_config`
+    #: and :func:`opencomputer.gateway.display_config.resolve_display_setting`
+    #: (``display.runtime_footer.*``, ``display.platforms.*``,
+    #: ``display.busy_ack_enabled``, …). Kept as a plain dict — same
+    #: pattern as ``GatewayConfig.reset_by_platform`` — because the
+    #: subtree is per-platform/free-form and the gateway resolvers
+    #: already consume it dict-shaped. Before this field existed the
+    #: ``display:`` section was silently dropped by ``load_config`` and
+    #: the gateway runtime-footer knob was dead. ``Dispatch`` receives
+    #: this dict via ``Gateway`` so the footer can be resolved per turn.
+    display: dict = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
     #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
     #: applies when the active provider is OpenRouter; ignored otherwise.
     provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)

@@ -1046,6 +1046,25 @@ class Dispatch:
         loop = await self._router.get_or_load(profile_id)
         profile_home = self._router._profile_home_resolver(profile_id)
 
+        # M1 gateway-vs-CLI parity telemetry: one ParityProbe per turn.
+        # The probe accumulates which of the 10 parity-affecting
+        # mechanisms fire and is flushed once at turn-end (10 rows to
+        # ``audit.db``). ``_initial_profile_id`` is captured BEFORE the
+        # M10.3 rebind block so mechanism #6 (profile_rebind) can detect
+        # a swap. All telemetry is best-effort — never breaks dispatch.
+        _initial_profile_id = profile_id
+        _parity_probe = None
+        try:
+            from opencomputer.gateway.parity_probe import ParityProbe
+
+            _parity_probe = ParityProbe(
+                session_id=session_id,
+                turn_id=_compute_turn_index(loop.db, session_id),
+                platform=event.platform.value if event.platform else "unknown",
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break dispatch
+            logger.debug("parity probe init failed", exc_info=True)
+
         # v1.1 plan-3 M10.3 — per-rule profile rebind. After the
         # BindingResolver picks the source profile and we load its loop,
         # consult the source profile's routing.rules for THIS event. If
@@ -1120,6 +1139,30 @@ class Dispatch:
                 "continuing on source profile",
                 e,
             )
+
+        # M1 parity telemetry — mechanism #6 (profile_rebind) and #2
+        # (tool_allowlist) are both decidable now that ``loop`` is
+        # final. #6 fired iff the M10.3 block above swapped profiles;
+        # #2 fired iff the gateway loop carries a non-wildcard tool
+        # allowlist (the CLI never sets one).
+        if _parity_probe is not None:
+            try:
+                _rebound = profile_id != _initial_profile_id
+                _parity_probe.observe(
+                    "profile_rebind",
+                    _rebound,
+                    {"from": _initial_profile_id, "to": profile_id}
+                    if _rebound
+                    else {},
+                )
+                _allowed = getattr(loop, "allowed_tools", None)
+                _parity_probe.observe(
+                    "tool_allowlist",
+                    _allowed is not None,
+                    {"tool_count": len(_allowed)} if _allowed is not None else {},
+                )
+            except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                logger.debug("parity probe observe (rebind/tools) failed", exc_info=True)
 
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
@@ -1262,6 +1305,43 @@ class Dispatch:
             # composed system prompt — staying out of the FROZEN base
             # so prefix-cache hits on turn 2+ remain valid.
             runtime = self._build_channel_runtime(event, adapter, loop)
+            # M1 parity telemetry — mechanisms decidable from the
+            # per-turn runtime: #4 (channel_prompt_overlay) fired iff
+            # _build_channel_runtime stuffed a channel-scoped prompt or
+            # skill bodies into custom; #7 (persona_casual_register) is
+            # structural — a gateway turn carries the chat agent_context;
+            # #5 (no_interactive_consent) is structural — the gateway
+            # cannot prompt for tool approval synchronously.
+            if _parity_probe is not None:
+                try:
+                    _custom = getattr(runtime, "custom", {}) or {}
+                    _overlay = bool(
+                        _custom.get("channel_prompt")
+                        or _custom.get("channel_skill_bodies")
+                    )
+                    _parity_probe.observe(
+                        "channel_prompt_overlay",
+                        _overlay,
+                        {
+                            "has_prompt": bool(_custom.get("channel_prompt")),
+                            "has_skills": bool(_custom.get("channel_skill_bodies")),
+                        }
+                        if _overlay
+                        else {},
+                    )
+                    _agent_ctx = getattr(runtime, "agent_context", "chat") or "chat"
+                    _parity_probe.observe(
+                        "persona_casual_register",
+                        _agent_ctx == "chat",
+                        {"agent_context": _agent_ctx},
+                    )
+                    _parity_probe.observe(
+                        "no_interactive_consent",
+                        True,
+                        {"mode": "async_round_trip"},
+                    )
+                except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                    logger.debug("parity probe observe (runtime) failed", exc_info=True)
             # Phase 2 audit G1: bind the per-task ``current_profile_home``
             # ContextVar around ``run_conversation`` so ``_home()`` and
             # any PluginAPI lazy paths resolve to the right profile for
@@ -1323,6 +1403,7 @@ class Dispatch:
                 # and falls through to the default behavior — a stale
                 # routing rule must NEVER break message dispatch.
                 routing_system_override: str | None = None
+                routing_template_name: str | None = None
                 try:
                     cfg_obj = getattr(loop, "config", None)
                     routing_cfg = getattr(cfg_obj, "routing", None)
@@ -1338,6 +1419,7 @@ class Dispatch:
                         resolved = _rs_template(routing_cfg, event, templates)
                         if resolved is not None:
                             routing_system_override = resolved.system_prompt
+                            routing_template_name = resolved.template_name
                             logger.info(
                                 "M10.2 routing: %s:%s → agent=%r",
                                 event.platform.value if event.platform else "?",
@@ -1350,6 +1432,54 @@ class Dispatch:
                         "to default dispatch): %s",
                         e,
                     )
+
+                # M1 parity telemetry — mechanism #1 (prompt_override)
+                # fired iff a routing rule supplied a non-empty system
+                # prompt, which switches off declarative/skills/memory/
+                # SOUL injection (loop.py). #8 (routing_decision_invisible)
+                # fired iff ANY routing/binding decision changed
+                # behaviour this turn — since M1 adds no chat-visible
+                # badge, every such decision is currently invisible.
+                if _parity_probe is not None:
+                    try:
+                        _override_active = bool(
+                            routing_system_override
+                            and routing_system_override.strip()
+                        )
+                        _parity_probe.observe(
+                            "prompt_override",
+                            _override_active,
+                            {
+                                "template": routing_template_name,
+                                "override_len": len(routing_system_override or ""),
+                            }
+                            if _override_active
+                            else {},
+                        )
+                        _binding_matched = (
+                            self._resolver is not None
+                            and profile_id != self._resolver._cfg.default_profile
+                        )
+                        _routed = (
+                            _override_active
+                            or _binding_matched
+                            or profile_id != _initial_profile_id
+                        )
+                        _parity_probe.observe(
+                            "routing_decision_invisible",
+                            _routed,
+                            {
+                                "binding_matched": _binding_matched,
+                                "template": routing_template_name,
+                                "rebound": profile_id != _initial_profile_id,
+                            }
+                            if _routed
+                            else {},
+                        )
+                    except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                        logger.debug(
+                            "parity probe observe (routing) failed", exc_info=True
+                        )
 
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
@@ -1450,6 +1580,23 @@ class Dispatch:
                     _fc = resolve_footer_config(
                         self._display_cfg, platform=_platform_name,
                     )
+                    # M1 parity telemetry — mechanism #9: the runtime
+                    # footer is "fired" (as a gap) when it is OFF, since
+                    # an off footer is what hides the model/context from
+                    # the user. An empty fields list counts as off too.
+                    if _parity_probe is not None:
+                        try:
+                            _footer_off = not (_fc.enabled and _fc.fields)
+                            _parity_probe.observe(
+                                "runtime_footer_off",
+                                _footer_off,
+                                {} if _footer_off else {"enabled": True},
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "parity probe observe (footer) failed",
+                                exc_info=True,
+                            )
                     if _fc.enabled and _final_text:
                         _model_name = (
                             getattr(getattr(loop, "config", None), "model", None)
@@ -1498,6 +1645,44 @@ class Dispatch:
                             _final_text = f"{_final_text}\n\n_{_line}_"
                 except Exception as _fe:  # noqa: BLE001
                     logger.debug("runtime_footer render failed: %s", _fe)
+                # M1 parity telemetry — last two mechanisms, decided
+                # from the finished turn. #3 (reply_truncation): the
+                # reply will be cut iff it exceeds the adapter's
+                # message-length cap (the outgoing drainer / platform
+                # enforces this). #10 (compaction_long_session):
+                # ``loop._record_compaction`` mirrors a fresh
+                # ``session_compactions`` key onto this turn's runtime
+                # only when CompactionEngine actually ran this turn.
+                if _parity_probe is not None:
+                    try:
+                        _cap = getattr(adapter, "max_message_length", 0) or 0
+                        _reply_len = len(_final_text or "")
+                        _truncated = bool(_cap and _reply_len > _cap)
+                        _parity_probe.observe(
+                            "reply_truncation",
+                            _truncated,
+                            {"reply_len": _reply_len, "cap": _cap}
+                            if _truncated
+                            else {},
+                        )
+                        _compacted = "session_compactions" in (
+                            getattr(runtime, "custom", {}) or {}
+                        )
+                        _parity_probe.observe(
+                            "compaction_long_session",
+                            _compacted,
+                            {
+                                "count": (runtime.custom or {}).get(
+                                    "session_compactions"
+                                )
+                            }
+                            if _compacted
+                            else {},
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "parity probe observe (reply) failed", exc_info=True
+                        )
                 return _final_text
             except Exception as e:  # noqa: BLE001
                 # Always log full traceback for debugging; user only
@@ -1510,6 +1695,21 @@ class Dispatch:
                 outcome = ProcessingOutcome.FAILURE
                 return _format_user_facing_error(e)
             finally:
+                # M1 parity telemetry — flush the per-turn probe (10
+                # rows) to the profile's ``audit.db``. Runs in the
+                # ``finally`` so it fires on the error path too (a
+                # failed turn still emits, mostly fired=0). Best-effort:
+                # ``flush`` swallows SQLite errors internally; the outer
+                # guard catches a missing config.home etc.
+                if _parity_probe is not None:
+                    try:
+                        _cfg_home = getattr(
+                            getattr(loop, "config", None), "home", None
+                        )
+                        if _cfg_home is not None:
+                            _parity_probe.flush(_cfg_home / "audit.db")
+                    except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                        logger.debug("parity probe flush failed", exc_info=True)
                 # Kanban-Goals v2 (2026-05-08) — release the active-run
                 # marker so /goal <text> dispatched in the next moment
                 # is no longer refused.

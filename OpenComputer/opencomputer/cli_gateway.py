@@ -455,6 +455,182 @@ def cmd_logs(
         typer.echo(line)
 
 
+# ── diagnose — gateway-vs-CLI intelligence-parity telemetry (M1) ────────────
+
+
+def _parse_since(spec: str | None) -> float | None:
+    """Parse ``7d`` / ``12h`` / ``30m`` / ``90s`` / ``120`` → unix-ts floor.
+
+    A bare number is seconds. Returns ``None`` for an empty spec.
+    Raises ``typer.BadParameter`` on a malformed value.
+    """
+    if not spec:
+        return None
+    import time as _t
+
+    s = spec.strip().lower()
+    units = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+    mult = 1
+    if s and s[-1] in units:
+        mult = units[s[-1]]
+        s = s[:-1]
+    try:
+        n = float(s)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"bad --since value {spec!r}; use e.g. 7d, 12h, 90m, 3600"
+        ) from exc
+    if n < 0:
+        raise typer.BadParameter("--since must not be negative")
+    return _t.time() - n * mult
+
+
+@gateway_app.command(
+    "diagnose",
+    help="Show which CLI-vs-gateway parity mechanisms fired on recent turns.",
+)
+def cmd_diagnose(
+    session: str | None = typer.Option(
+        None, "--session", help="Filter to one session id."
+    ),
+    rollup: bool = typer.Option(
+        False, "--rollup", help="Aggregate fire-rate + priority per mechanism."
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Time window, e.g. 7d / 12h / 90m / 3600."
+    ),
+    limit: int = typer.Option(
+        20, "--limit", help="Max turns to show in per-turn mode."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of a table."
+    ),
+) -> None:
+    """Diagnose the gateway-vs-CLI intelligence gap from telemetry.
+
+    Every gateway turn records which of the 10 parity-affecting
+    mechanisms fired into ``audit.db`` (schema v21). This command reads
+    that ``gateway_parity_log`` table two ways:
+
+    * default — a per-turn table of the last N turns;
+    * ``--rollup`` — fire-rate + priority per mechanism, the input the
+      M2 milestone uses to lock the top-3 mechanisms to fix.
+
+    See ``docs/gateway/intelligence-parity.md``.
+    """
+    import time as _t
+
+    from opencomputer.gateway.parity_probe import (
+        NON_TURN_ID,
+        mechanism_label,
+        query_parity_log,
+        rollup_parity_log,
+    )
+
+    audit_db = _profile_home() / "audit.db"
+    since_ts = _parse_since(since)
+
+    if rollup:
+        data = rollup_parity_log(audit_db, since=since_ts)
+        total_turns = max((r["turns"] for r in data), default=0)
+        if as_json:
+            typer.echo(json.dumps({"rollup": data, "total_turns": total_turns}))
+            return
+        if total_turns == 0:
+            console.print(
+                "[yellow]No gateway parity telemetry yet.[/yellow] "
+                "The table fills as messages flow through the gateway.\n"
+                f"[dim]audit.db: {audit_db}[/dim]"
+            )
+            return
+        table = Table(
+            title=f"Gateway parity mechanisms — rollup ({total_turns} turns)"
+        )
+        table.add_column("Mechanism", style="cyan", no_wrap=False)
+        table.add_column("Sev", justify="right")
+        table.add_column("Fired", justify="right")
+        table.add_column("Fire-rate", justify="right")
+        table.add_column("Priority", justify="right", style="bold")
+        for i, r in enumerate(data):
+            mark = "→ " if i < 3 and r["priority_score"] > 0 else "  "
+            table.add_row(
+                mark + r["label"],
+                str(r["severity"]),
+                f"{r['fired_count']}/{r['turns']}",
+                f"{r['fire_rate'] * 100:.0f}%",
+                f"{r['priority_score']:.2f}",
+            )
+        console.print(table)
+        console.print(
+            "[dim]Priority = fire-rate × severity. The top-3 (→) are the "
+            "candidates the M2/M3 work fixes first.[/dim]"
+        )
+        return
+
+    # ── per-turn mode ──
+    rows = query_parity_log(
+        audit_db, session_id=session, since=since_ts, limit=limit * 10
+    )
+    if as_json:
+        typer.echo(json.dumps({"rows": rows}))
+        return
+    if not rows:
+        console.print(
+            "[yellow]No gateway parity telemetry yet.[/yellow] "
+            "Turns appear here once the gateway has handled messages.\n"
+            f"[dim]audit.db: {audit_db}[/dim]"
+        )
+        return
+
+    # Group flat rows back into turns, keyed by (session_id, turn_id),
+    # newest-first. query_parity_log already returns id-descending, so
+    # first-seen order is newest-first.
+    turns: dict[tuple[str, int], dict] = {}
+    for r in rows:
+        key = (r["session_id"], r["turn_id"])
+        t = turns.setdefault(
+            key,
+            {
+                "session_id": r["session_id"],
+                "turn_id": r["turn_id"],
+                "platform": r["platform"],
+                "ts": r["ts"],
+                "fired": [],
+            },
+        )
+        if r["fired"]:
+            t["fired"].append(r["mechanism_id"])
+    ordered = list(turns.values())[:limit]
+
+    table = Table(title="Gateway parity diagnostics — recent turns")
+    table.add_column("When", style="dim")
+    table.add_column("Platform", style="cyan")
+    table.add_column("Session", style="dim")
+    table.add_column("Turn", justify="right")
+    table.add_column("Mechanisms fired")
+    for t in ordered:
+        when = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(t["ts"]))
+        turn_label = (
+            "[dim]drainer[/dim]" if t["turn_id"] == NON_TURN_ID else str(t["turn_id"])
+        )
+        if t["fired"]:
+            fired = ", ".join(mechanism_label(m) for m in t["fired"])
+        else:
+            fired = "[green]none — full parity[/green]"
+        table.add_row(
+            when,
+            t["platform"],
+            (t["session_id"] or "")[:8],
+            turn_label,
+            fired,
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(ordered)} turn(s). Run with --rollup for fire-rate "
+        f"aggregates, --session <id> to filter.[/dim]"
+    )
+
+
 # ── /sethome ────────────────────────────────────────────────────────────────
 
 

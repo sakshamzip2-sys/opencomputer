@@ -207,6 +207,18 @@ class Gateway:
         # silently falls back to the no-scope path.
         from opencomputer.plugins.registry import registry as plugin_registry
 
+        # M1 gateway-vs-CLI parity (2026-05-17): forward the top-level
+        # ``display:`` config section into the dispatcher. Before this,
+        # only photo_burst_window + lifecycle_reactions were threaded,
+        # so ``display.runtime_footer.enabled`` never reached the footer
+        # resolver — the knob was dead. The full Config rides on
+        # ``loop.config``; fall back to {} for the router-only path.
+        _display_cfg = {}
+        try:
+            _loop_cfg = getattr(loop, "config", None)
+            _display_cfg = dict(getattr(_loop_cfg, "display", None) or {})
+        except Exception:  # noqa: BLE001 — never block gateway construction
+            _display_cfg = {}
         self.dispatch = Dispatch(
             router=router,
             plugin_api=plugin_registry.shared_api,
@@ -216,6 +228,11 @@ class Gateway:
                 # invariant is enforced at the dispatcher (see
                 # GatewayConfig.lifecycle_reactions docstring).
                 "lifecycle_reactions": self._config.lifecycle_reactions,
+                # M1 — the runtime-footer + busy-ack resolvers read
+                # ``cfg["display"]``; nest the section here so the dict
+                # Dispatch stores as ``_display_cfg`` has the expected
+                # shape (``{"display": {...}}``).
+                "display": _display_cfg,
             },
             resolver=self._resolver,
             allowlist_gate=self._allowlist_gate,
@@ -703,7 +720,11 @@ class Gateway:
         plugin_registry.outgoing_queue = queue
         if plugin_registry.shared_api is not None:
             plugin_registry.shared_api._bind_outgoing_queue(queue)
-        self._drainer = OutgoingDrainer(queue, adapters_by_platform)
+        self._drainer = OutgoingDrainer(
+            queue,
+            adapters_by_platform,
+            audit_db_path=_home() / "audit.db",
+        )
         await self._drainer.expire_stale_on_boot()
         self._drainer_task = asyncio.create_task(
             self._drainer.run_forever(),

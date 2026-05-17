@@ -74,6 +74,22 @@ existing wire callers still work via the generic v1 types.
   except `BaseChannelAdapter` from `plugin_sdk.channel_contract`. Use
   the message handler the gateway sets on you, not the gateway directly.
 
+## Gateway-vs-CLI intelligence-parity telemetry (M1, 2026-05-17)
+
+The CLI and the gateway build the *same* `AgentLoop`, but ten
+mechanisms (routing prompt-override, tool allowlist, reply truncation,
+profile rebind, …) make a gateway turn behave differently. Every turn,
+`Dispatch.__do_dispatch_inner` builds a `ParityProbe`
+(`gateway/parity_probe.py`), records which mechanisms fired, and flushes
+ten rows to `gateway_parity_log` in the profile's `audit.db` (schema
+v21). Inspect with `oc gateway diagnose [--rollup]`.
+
+The catalogue of mechanisms lives **only** in
+`parity_probe.py::MECHANISMS`. Adding a mechanism: append to that tuple
+(its `id` is the stable DB enum) and add one `_parity_probe.observe(...)`
+call in `dispatch.py`. Telemetry writes are best-effort — never let one
+break dispatch. Full design: `docs/gateway/intelligence-parity.md`.
+
 ## Bus → Wire bridge (Tier-C of 2026-05-10 memory-observability design)
 
 `WireServer` bridges select in-process bus events to all connected WS
