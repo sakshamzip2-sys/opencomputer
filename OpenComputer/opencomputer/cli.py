@@ -2362,6 +2362,36 @@ def _run_chat_session(
 
     profile_home = _profile_home_fn()
 
+    # Best-of-three Recipe 1 — fold user-authored ``*.md`` slash commands
+    # into the registry at boot so they show in /help + autocomplete and
+    # dispatch like built-ins. Project-dir commands are opt-in via
+    # OPENCOMPUTER_PROJECT_COMMANDS=1 (a cwd .md file is more trust-
+    # sensitive than the user's own profile dir).
+    try:
+        from opencomputer.cli_ui.slash_handlers import (
+            install_markdown_commands,
+        )
+
+        _project_cwd = (
+            Path.cwd()
+            if os.environ.get("OPENCOMPUTER_PROJECT_COMMANDS") == "1"
+            else None
+        )
+        _md_cmds = install_markdown_commands(
+            profile_home, project_cwd=_project_cwd
+        )
+        if _md_cmds:
+            console.print(
+                f"[dim]loaded {len(_md_cmds)} markdown command"
+                f"{'s' if len(_md_cmds) != 1 else ''} "
+                f"({', '.join('/' + c.name for c in _md_cmds)})[/dim]"
+            )
+    except Exception as _md_exc:  # noqa: BLE001
+        # A broken commands dir must never block chat startup.
+        logging.getLogger(__name__).warning(
+            "markdown command load failed: %s", _md_exc
+        )
+
     # Per-session paste-fold storage. Pastes >5 lines get folded to
     # ``[Pasted text #N +M lines]`` placeholders in the input buffer;
     # full content stored here for submit-time expansion. Reset on /clear.

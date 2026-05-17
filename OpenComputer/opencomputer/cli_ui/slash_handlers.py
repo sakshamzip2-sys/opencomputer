@@ -26,6 +26,7 @@ from opencomputer.cli_ui.slash import (
     CommandDef,
     SlashResult,
     is_slash_command,
+    register_extra_commands,
     resolve_command,
 )
 from plugin_sdk.runtime_context import RuntimeContext
@@ -1820,3 +1821,73 @@ def dispatch_agent_slash_to_console(
     elif result.output:
         console.print(result.output, markup=False)
     return SlashResult(handled=True)
+
+
+# ── user markdown commands (best-of-three Recipe 1) ──────────────────
+
+
+def _make_markdown_handler(
+    md: Any,
+) -> Callable[[SlashContext, list[str]], SlashResult]:
+    """Build the handler for one discovered markdown command.
+
+    The handler renders the command body (substituting ``{{args}}``) and
+    pushes it onto the per-session next-turn queue — the chat outer loop
+    drains that queue ahead of stdin, so the rendered prompt runs as the
+    very next turn with no extra keypress.
+    """
+    from opencomputer.agent.markdown_commands import render_command_body
+
+    def _handler(ctx: SlashContext, args: list[str]) -> SlashResult:
+        body = render_command_body(md, " ".join(args))
+        if not body.strip():
+            ctx.console.print(
+                f"[yellow]/{md.name}: command body is empty[/yellow]"
+            )
+            return SlashResult(handled=True)
+        if ctx.on_queue_add(body):
+            ctx.console.print(f"[dim](/{md.name})[/dim]")
+        else:
+            ctx.console.print(
+                f"[red]/{md.name}: next-turn queue is full[/red]"
+            )
+        return SlashResult(handled=True)
+
+    return _handler
+
+
+def install_markdown_commands(
+    profile_home: Path,
+    *,
+    project_cwd: Path | None = None,
+) -> list[Any]:
+    """Discover user markdown commands and fold them into the registry.
+
+    Called once at chat-session boot. Returns the discovered
+    :class:`~opencomputer.agent.markdown_commands.MarkdownCommand` list
+    (empty when there are none) so the caller can report a count.
+    Idempotent — re-running replaces prior markdown registrations.
+    """
+    from opencomputer.agent.markdown_commands import (
+        discover_markdown_commands,
+    )
+
+    cmds = discover_markdown_commands(profile_home, project_cwd=project_cwd)
+    if not cmds:
+        return []
+    defs: list[CommandDef] = []
+    for md in cmds:
+        defs.append(
+            CommandDef(
+                name=md.name,
+                description=(
+                    md.description
+                    or f"User markdown command ({md.source_path.name})"
+                ),
+                category=md.category or "custom",
+                args_hint=md.args_hint,
+            )
+        )
+        _HANDLERS[md.name] = _make_markdown_handler(md)
+    register_extra_commands(defs)
+    return cmds
