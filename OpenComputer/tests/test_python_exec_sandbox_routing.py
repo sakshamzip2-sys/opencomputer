@@ -103,3 +103,21 @@ def test_ptc_mode_is_not_routed_to_sandbox() -> None:
         PythonExec.set_runtime(RuntimeContext())
     assert isinstance(result, ToolResult)
     assert strat.calls == []  # the sandbox backend was NOT invoked
+
+
+def test_python_exec_is_never_parallel() -> None:
+    """PythonExec must NOT dispatch concurrently with other tool calls.
+
+    M5 routes plain mode through a per-call sandbox backend that
+    ``AgentLoop._resolve_sandbox_backend`` publishes on the SHARED
+    ``runtime.custom`` immediately before dispatch. Two concurrent
+    PythonExec dispatches would clobber each other's resolved backend —
+    in the worst case dropping a sandbox-required call onto the bare host
+    (a containment-escape race). Sequential dispatch makes the
+    publish-then-consume atomic; this guards both layers that enforce it
+    — the ``parallel_safe`` class flag and the loop's hardcoded set.
+    """
+    from opencomputer.agent.loop import HARDCODED_NEVER_PARALLEL
+
+    assert PythonExec().parallel_safe is False
+    assert "PythonExec" in HARDCODED_NEVER_PARALLEL

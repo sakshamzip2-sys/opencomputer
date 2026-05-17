@@ -531,8 +531,12 @@ DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
 #: II.2 — Tool names that MUST NEVER run in parallel, regardless of their
 #: per-tool ``parallel_safe`` flag. These are tools whose side-effects can
 #: race even when two invocations look independent: arbitrary shell
-#: commands (``Bash``), user-facing prompts (``AskUserQuestion``), plan-mode
-#: state transitions (``ExitPlanMode``), and mutable-state TODO writes.
+#: commands (``Bash``); arbitrary Python execution whose plain mode routes
+#: through a per-call sandbox backend published on the shared
+#: ``runtime.custom`` (``PythonExec`` — concurrent dispatch would clobber
+#: that per-call backend key); user-facing prompts (``AskUserQuestion``);
+#: plan-mode state transitions (``ExitPlanMode``); and mutable-state TODO
+#: writes.
 #:
 #: This is the first of two layers stacked on top of the existing
 #: ``parallel_safe`` flag. The flag is a hint from the plugin author; this
@@ -543,6 +547,7 @@ DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
 #: ``sources/hermes-agent/run_agent.py`` line 217.
 HARDCODED_NEVER_PARALLEL: frozenset[str] = frozenset({
     "Bash",
+    "PythonExec",
     "AskUserQuestion",
     "ExitPlanMode",
     "TodoWrite",

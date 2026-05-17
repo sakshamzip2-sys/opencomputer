@@ -70,7 +70,15 @@ class PythonExec(BaseTool):
     """
 
     consent_tier: int = 2
-    parallel_safe: bool = True
+    #: NEVER parallel — also pinned in ``HARDCODED_NEVER_PARALLEL``
+    #: (``agent.loop``). M5 routes plain mode through a per-call sandbox
+    #: backend published on the SHARED ``runtime.custom`` by
+    #: ``AgentLoop._resolve_sandbox_backend``; two concurrent PythonExec
+    #: dispatches would clobber each other's resolved backend — in the
+    #: worst case dropping a sandbox-required call onto the bare host (a
+    #: containment-escape race). Sequential dispatch makes the
+    #: publish-then-consume atomic, exactly as for ``BashTool``.
+    parallel_safe: bool = False
     capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
         CapabilityClaim(
             capability_id="python_exec.run",
