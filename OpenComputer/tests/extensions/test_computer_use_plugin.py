@@ -464,6 +464,21 @@ class TestSchemaContractTruth:
         desc = COMPUTER_USE_SCHEMA["description"].lower()
         assert "overlay" not in desc
 
+    def test_plugin_json_does_not_claim_drawn_overlays(self):
+        """The plugin.json discovery metadata (what `oc plugins` shows) must
+        not claim numbered element overlays — cua-driver 0.1.9 returns a
+        plain screenshot and the plugin draws nothing onto it. This is the
+        same truth the schema/README/SKILL all carry; plugin.json drifted
+        from it once (loop 12) with no test covering this surface."""
+        import json
+        from pathlib import Path
+        plugin_json = (Path(__file__).resolve().parents[2]
+                       / "extensions" / "computer-use" / "plugin.json")
+        meta = json.loads(plugin_json.read_text())
+        desc = meta["description"].lower()
+        assert "numbered element overlay" not in desc
+        assert "numbered overlay" not in desc
+
 
 # ---------------------------------------------------------------------------
 # Capture → screenshot persistence
@@ -1322,6 +1337,29 @@ class TestCuaBackend0_1_9CallSites:
         assert b._active_window_id == 88
         # only list_windows was called — no (nonexistent) focus_app tool
         assert {c[0] for c in b._session.calls} == {"list_windows"}
+
+    def test_focus_app_filter_miss_is_flagged(self):
+        """``_select_windows`` falls back to all windows when the app filter
+        misses — ``focus_app(app=X)`` must NOT report a clean ``ok=True``
+        when it actually targeted a different app. A false success would
+        silently point every later click/type at the wrong process. Mirrors
+        ``test_capture_app_filter_miss_is_surfaced``."""
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW})
+        res = b.focus_app("ZZNoSuchApp")
+        # the sticky target is still set (graceful degradation) ...
+        assert b._active_pid == 4242
+        # ... but the result is flagged so the tool layer sets is_error.
+        assert res.ok is False
+        assert "ZZNoSuchApp" in res.message
+        assert "Safari" in res.message  # tells the agent what it got instead
+
+    def test_focus_app_bundle_id_form_matches_leniently(self):
+        """A bundle-ID form ('com.apple.Safari') matches the 'Safari'
+        app_name via the trailing-segment rule — no false miss flag."""
+        b = _backend_with_session({"list_windows": _LW_ONE_WINDOW})
+        res = b.focus_app("com.apple.Safari")
+        assert res.ok is True
+        assert b._active_pid == 4242
 
     def test_list_apps_prefers_structured_content(self):
         """0.1.9 ships the app array as structuredContent alongside a text

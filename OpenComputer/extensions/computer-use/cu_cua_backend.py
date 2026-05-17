@@ -1166,6 +1166,30 @@ class CuaDriverBackend(ComputerUseBackend):
             if raise_window:
                 note = (" (raise_window ignored — cua-driver 0.1.9 has no "
                         "window-raise primitive; targeting without raising)")
+            # ``_select_windows`` falls back to ALL on-screen windows when the
+            # ``app`` filter matches nothing — so ``target`` here may be a
+            # DIFFERENT app than the caller asked for. Returning a clean
+            # ``ok=True`` "Targeted Terminal" for a ``focus_app('Safari')``
+            # call would silently point every later click/type at the wrong
+            # process. ``capture(app=...)`` already surfaces this exact miss;
+            # ``focus_app`` must too. Flag it ``ok=False`` (the tool layer
+            # then sets ``is_error``) while still setting the sticky target,
+            # so the agent gets a clear signal — same lenient bundle-ID-aware
+            # match used by ``_capture_target``.
+            app_l = app.lower()
+            name_l = str(target["app_name"]).lower()
+            tail = app_l.rsplit(".", 1)[-1]
+            if app_l not in name_l and name_l not in app_l and tail not in name_l:
+                return ActionResult(
+                    ok=False, action="focus_app",
+                    message=f"no on-screen window matched app {app!r}; targeted "
+                            f"frontmost window ({target['app_name']!r}, pid "
+                            f"{self._active_pid}) instead — re-check the app name."
+                            + note,
+                    meta={"pid": self._active_pid,
+                          "window_id": self._active_window_id,
+                          "app_name": target["app_name"]},
+                )
             return ActionResult(
                 ok=True, action="focus_app",
                 message=f"Targeted {target['app_name']} (pid {self._active_pid}, "
