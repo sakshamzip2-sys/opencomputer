@@ -218,6 +218,8 @@ def test_all_overlays_render() -> None:
         assert title in frame, f"overlay {title!r} missing from frame:\n{frame}"
     # Sample data rows rendered, not just the panel chrome.
     assert "claude-opus-4-7" in frame and "demo-skill" in frame, frame
+    # The Spinner widget renders (its label; the braille frame char cycles).
+    assert "busychk" in frame, f"Spinner widget did not render:\n{frame}"
 
 
 @pytest.mark.skipif(
@@ -286,6 +288,8 @@ def test_multiline_editor() -> None:
     assert "[hello]" in frame, f"typed line 1 missing:\n{frame}"
     assert "[worl]" in frame, f"line 2 (post-backspace) wrong:\n{frame}"
     assert "rows=2" in frame, f"Ctrl+N newline did not split the buffer:\n{frame}"
+    # After "worl" (col 4) the smoke sends two left-arrows → col 2.
+    assert "col=2" in frame, f"arrow-key cursor movement broken:\n{frame}"
 
 
 @pytest.mark.skipif(

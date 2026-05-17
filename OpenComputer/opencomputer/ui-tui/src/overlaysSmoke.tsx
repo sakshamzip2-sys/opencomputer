@@ -18,6 +18,7 @@ import {
   SkillsHubOverlay,
   ToolsOverlay,
 } from "./overlays.js";
+import { Spinner } from "./widgets.js";
 
 const tree = (
   <Box flexDirection="column">
@@ -68,6 +69,7 @@ const tree = (
       tools={[{ name: "Edit", description: "edit a file" }]}
       index={0}
     />
+    <Spinner label="busychk" />
   </Box>
 );
 

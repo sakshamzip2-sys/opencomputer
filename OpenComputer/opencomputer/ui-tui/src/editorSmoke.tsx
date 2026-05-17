@@ -41,7 +41,11 @@ async function run(): Promise<void> {
   await pause(40);
   stdin.write("world");
   await pause(40);
-  stdin.write("\x7f"); // backspace → drops the trailing 'd'
+  stdin.write("\x7f"); // backspace → drops the trailing 'd' (line 2: "worl", col 4)
+  await pause(60);
+  stdin.write("\x1b[D"); // left arrow
+  await pause(40);
+  stdin.write("\x1b[D"); // left arrow again → col 4 → 2
   await pause(60);
 
   const frame = lastFrame() ?? "";
