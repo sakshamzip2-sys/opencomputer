@@ -304,6 +304,12 @@ class DockerStrategy(SandboxStrategy):
         # set) goes through the pooled `docker exec` path; everything else
         # is a transient `docker run --rm`.
         if config.container_key:
+            # NB: this is a dry-run preview. The pooled container is
+            # created lazily on the first real `run()`, so the named
+            # `oc-pool-…` container in this `docker exec` line does NOT
+            # exist yet if nothing has run under this scope — running the
+            # printed command verbatim would fail with "No such
+            # container" until the pool has minted it.
             container = ContainerPool.container_name(self._pool_key(config))
             return [
                 "docker", "exec", "-i",
@@ -448,9 +454,14 @@ class DockerStrategy(SandboxStrategy):
             )
         except TimeoutError:
             # Kill the ``docker exec`` CLI. We do NOT ``docker kill`` the
-            # container — it is pooled / shared. The timed-out command's
-            # in-container process may linger until the pooled container
-            # is pruned or recreated (``oc sandbox prune``, M4).
+            # container — it is pooled / shared. KNOWN LIMITATION: the
+            # timed-out command's in-container process is not reaped and
+            # lingers (holding CPU / memory / a PID slot against
+            # ``--pids-limit 256``) until the pooled container is pruned
+            # or recreated. Repeated timeouts in one long-lived pooled
+            # container can exhaust the PID cap; ``oc sandbox prune`` (M4)
+            # is the remedy — it drops the container and the next call
+            # recreates it clean.
             try:
                 proc.kill()
             except ProcessLookupError:
