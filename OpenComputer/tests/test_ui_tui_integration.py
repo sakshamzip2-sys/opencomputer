@@ -32,6 +32,7 @@ _CLIENT_BUNDLE = _DIST / "wireClient.js"
 _RENDER_BUNDLE = _DIST / "renderSmoke.js"
 _OVERLAYS_BUNDLE = _DIST / "overlaysSmoke.js"
 _MARKDOWN_BUNDLE = _DIST / "markdownSmoke.js"
+_EDITOR_BUNDLE = _DIST / "editorSmoke.js"
 
 
 def _find_node() -> str | None:
@@ -253,3 +254,34 @@ def test_markdown_renderer() -> None:
     # Markdown syntax must be consumed, not shown raw.
     assert "```" not in frame, f"raw code fence leaked to screen:\n{frame}"
     assert "**" not in frame, f"raw bold markers leaked to screen:\n{frame}"
+
+
+@pytest.mark.skipif(
+    _NODE is None or not _EDITOR_BUNDLE.is_file(),
+    reason="Node toolchain or built editor-smoke bundle unavailable",
+)
+def test_multiline_editor() -> None:
+    """The multiline editor handles real keystrokes — typed text, a
+    Ctrl+N newline, and backspace.
+
+    editorSmoke.js drives the useEditor hook via ink-testing-library's
+    stdin: types "hello", Ctrl+N, "world", backspace. The buffer must end
+    as two lines ["hello", "worl"].
+    """
+    assert _NODE is not None  # guaranteed by skipif
+    proc = subprocess.run(
+        [_NODE, str(_EDITOR_BUNDLE)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    out = proc.stdout
+    assert "FRAME_START" in out and "FRAME_END" in out, (
+        f"editor-smoke produced no frame.\nstdout={out!r}\nstderr={proc.stderr!r}"
+    )
+    frame = out.split("FRAME_START", 1)[1].split("FRAME_END", 1)[0]
+    # Typed text landed, the Ctrl+N split it into two lines, backspace
+    # dropped the trailing 'd'.
+    assert "[hello]" in frame, f"typed line 1 missing:\n{frame}"
+    assert "[worl]" in frame, f"line 2 (post-backspace) wrong:\n{frame}"
+    assert "rows=2" in frame, f"Ctrl+N newline did not split the buffer:\n{frame}"

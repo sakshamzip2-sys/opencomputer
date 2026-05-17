@@ -56,6 +56,12 @@ await esbuild.build({
   outfile: "../dist/markdownSmoke.js",
 });
 
+await esbuild.build({
+  ...common,
+  entryPoints: ["editorSmoke.tsx"],
+  outfile: "../dist/editorSmoke.js",
+});
+
 // `oc tui` runs the bundle as ESM — the dist/ marker makes Node treat
 // the .js files as modules without a per-file extension dance.
 writeFileSync("../dist/package.json", JSON.stringify({ type: "module" }));

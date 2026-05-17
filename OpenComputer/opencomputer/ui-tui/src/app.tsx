@@ -3,14 +3,16 @@
 // Adapted for OpenComputer from hermes-agent/ui-tui.
 // Original: MIT License (c) 2025 Nous Research — see THIRD_PARTY_LICENSE_HERMES.
 //
-// TUI-parity Milestone 2. The OC-native terminal UI: a streaming
-// conversation, a slash-command palette, a session picker, and six
-// overlays (model picker, skills hub, settings, agents, rollback, tools)
-// — all driven by OCWireClient (opencomputer.gateway.wire_server, 27 RPCs).
+// TUI-parity Milestone 2. The OC-native terminal UI: a markdown-rendered
+// streaming conversation, a multiline composer, a slash-command palette, a
+// session picker, and six overlays (model picker, skills hub, settings,
+// agents, rollback, tools) — all driven by OCWireClient (27 RPCs).
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 
+import { useEditor } from "./editor.js";
+import { Markdown } from "./markdown.js";
 import {
   AgentsOverlay,
   ModelPickerOverlay,
@@ -31,7 +33,6 @@ import type {
   WireServerEvent,
 } from "./protocol.js";
 import { EVENT } from "./protocol.js";
-import { Markdown } from "./markdown.js";
 import { theme } from "./theme.js";
 import { Spinner } from "./widgets.js";
 import { OCWireClient } from "./wireClient.js";
@@ -45,7 +46,6 @@ interface Turn {
 }
 type Overlay =
   | "none"
-  | "slash"
   | "sessions"
   | "model"
   | "skills"
@@ -91,8 +91,8 @@ export interface AppProps {
 
 export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
   const { exit } = useApp();
+  const ed = useEditor();
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(client.connected);
   const [streamBuf, setStreamBuf] = useState("");
@@ -119,6 +119,10 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
     (text: string) => push({ role: "system", text }),
     [push],
   );
+
+  // The slash palette is pure derived state — shown whenever the composer
+  // holds a single "/word" with no overlay open.
+  const showPalette = overlay === "none" && /^\/\S*$/.test(ed.text);
 
   // ── connection + event lifecycle ──────────────────────────────────
   useEffect(() => {
@@ -360,7 +364,7 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
   // ── keyboard ───────────────────────────────────────────────────────
   useInput((raw, key) => {
     // Overlay-open state: navigation + per-overlay actions.
-    if (overlay !== "none" && overlay !== "slash") {
+    if (overlay !== "none") {
       if (key.escape) {
         setOverlay("none");
       } else if (key.upArrow) {
@@ -371,27 +375,28 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
         if (overlay === "sessions" && sessions[oi]) void resumeSession(sessions[oi]);
         else if (overlay === "model" && models[oi]) void selectModel(models[oi]);
         else if (overlay === "skills" && skills[oi]) void previewSkill(skills[oi]);
-      } else if ((key.delete || key.backspace)) {
+      } else if (key.delete || key.backspace) {
         if (overlay === "sessions" && sessions[oi]) void deleteSession(sessions[oi]);
         else if (overlay === "rollback" && checkpoints[oi])
           void deleteCheckpoint(checkpoints[oi]);
       }
       return;
     }
-    if (overlay === "slash" && key.escape) {
-      setOverlay("none");
-      return;
-    }
-    // ESC while a turn is running → interrupt (not quit).
-    if (key.escape && busy) {
-      const sid = sessionId.current;
-      if (sid) {
-        void client.sessionInterrupt(sid).catch(() => {});
-        sys("interrupt sent");
-      }
-      return;
-    }
+
+    // No overlay open.
     if (key.escape) {
+      if (busy) {
+        const sid = sessionId.current;
+        if (sid) {
+          void client.sessionInterrupt(sid).catch(() => {});
+          sys("interrupt sent");
+        }
+        return;
+      }
+      if (ed.text) {
+        ed.clear(); // ESC clears the composer; ESC again exits.
+        return;
+      }
       exit();
       return;
     }
@@ -399,7 +404,6 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       exit();
       return;
     }
-    // Ctrl+R → session picker (kept as a hotkey; also /sessions-less).
     if (key.ctrl && raw === "r") {
       void openOverlay("sessions");
       return;
@@ -410,24 +414,14 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       void send();
       return;
     }
-    if (key.backspace || key.delete) {
-      setInput((v) => v.slice(0, -1));
-      setOverlay("none");
-      return;
-    }
-    if (raw && !key.ctrl && !key.meta) {
-      const next = input + raw;
-      setInput(next);
-      setOverlay(next.startsWith("/") ? "slash" : "none");
-    }
+    ed.onKey(raw, key); // multiline editing — see editor.ts
   });
 
   // ── submit ─────────────────────────────────────────────────────────
   async function send(): Promise<void> {
-    const msg = input.trim();
+    const msg = ed.text.trim();
     if (!msg || busy || !connected) return;
-    setInput("");
-    setOverlay("none");
+    ed.clear();
 
     if (msg.startsWith("/")) {
       const parts = msg.slice(1).split(/\s+/);
@@ -521,12 +515,12 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
             {connected ? "● connected" : "● disconnected"}
           </Text>
           {usage ? `   ${usage}` : ""}
-          {"   /model /skills /settings /agents /rollback /tools · ESC quit"}
+          {"   /model /skills /settings /agents /rollback /tools · Ctrl+N newline · ESC quit"}
         </Text>
       </Box>
 
-      {overlay === "slash" && slashList.length > 0 && (
-        <SlashPalette commands={slashList} filter={input.slice(1)} />
+      {showPalette && slashList.length > 0 && (
+        <SlashPalette commands={slashList} filter={ed.text.slice(1)} />
       )}
       {overlay === "sessions" && <SessionPicker sessions={sessions} index={oi} />}
       {overlay === "model" && <ModelPickerOverlay rows={models} index={oi} />}
@@ -548,8 +542,6 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
             flexDirection="column"
           >
             {t.role === "assistant" ? (
-              // Assistant text is rendered as markdown (headings, code
-              // blocks, bold, lists) — see markdown.tsx.
               <Markdown text={t.text} />
             ) : (
               <Text color={colorFor(t.role)}>
@@ -560,8 +552,6 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
           </Box>
         ))}
         {streamBuf && (
-          // Live stream — markdown-rendered incrementally; the line-based
-          // renderer tolerates the half-finished document mid-stream.
           <Box flexDirection="column">
             <Markdown text={streamBuf} />
             <Text color={theme.muted}>▌</Text>
@@ -569,22 +559,62 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
         )}
       </Box>
 
-      <Box>
-        {busy ? (
-          <Spinner label="thinking… (ESC interrupts)" />
-        ) : (
-          <>
-            <Text color={theme.accent}>{"> "}</Text>
-            <Text>{input || (connected ? "" : "waiting for wire…")}</Text>
-            <Text color={theme.muted}>▌</Text>
-          </>
-        )}
-      </Box>
+      {busy ? (
+        <Spinner label="thinking… (ESC interrupts)" />
+      ) : (
+        <Composer ed={ed} connected={connected} />
+      )}
     </Box>
   );
 }
 
 // ─── sub-components ─────────────────────────────────────────────────
+
+/** Multiline composer view — renders editor lines with the cursor. */
+function Composer({
+  ed,
+  connected,
+}: {
+  ed: ReturnType<typeof useEditor>;
+  connected: boolean;
+}): React.ReactElement {
+  if (ed.text === "") {
+    return (
+      <Box>
+        <Text color={theme.accent}>{"> "}</Text>
+        <Text color={theme.muted}>
+          {connected ? "type a message or /command" : "waiting for wire…"}
+        </Text>
+        <Text color={theme.muted}>▌</Text>
+      </Box>
+    );
+  }
+  return (
+    <Box flexDirection="column">
+      {ed.lines.map((line, r) => {
+        const prefix = r === 0 ? "> " : "  ";
+        if (r !== ed.cursorRow) {
+          return (
+            <Text key={r}>
+              <Text color={theme.accent}>{prefix}</Text>
+              {line}
+            </Text>
+          );
+        }
+        const before = line.slice(0, ed.cursorCol);
+        const after = line.slice(ed.cursorCol);
+        return (
+          <Text key={r}>
+            <Text color={theme.accent}>{prefix}</Text>
+            {before}
+            <Text color={theme.muted}>▌</Text>
+            {after}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
 
 function SlashPalette({
   commands,
