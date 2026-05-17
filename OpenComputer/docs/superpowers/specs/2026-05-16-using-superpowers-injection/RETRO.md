@@ -6,7 +6,7 @@ Status: [`STATUS.md`](./STATUS.md)
 
 ## Built (one paragraph)
 
-A new `always_on: true` skill-frontmatter flag now causes a skill's body to be rendered into every system prompt via Slot 4b of `opencomputer/agent/prompts/base.j2`. The bundled `using-superpowers` skill opts in, so the model sees the 1%-rule, `<SUBAGENT-STOP>` guard, and Instruction-Priority body unconditionally instead of having to first invoke the Skill tool. The schema lives on `SkillMeta.always_on: bool`; the loader enforces a 16 KB body cap with a `WARN`-on-violation that flips the flag back off; the renderer applies `paths` gating defensively + sorts opt-in bodies alphabetically for prompt-cache stability. A latent parser-wiring bug (`_parse_skill_extras` was orphaned from `list_skills` — CC §7 fields silently always-defaulted in production) was fixed alongside because composability test T3.1 required it. 33 new tests; 1,711 tests across the touched surface green; ruff clean.
+A new `always_on: true` skill-frontmatter flag now causes a skill's body to be rendered into every system prompt via Slot 4b of `opencomputer/agent/prompts/base.j2`. The bundled `using-superpowers` skill opts in, so the model sees the 1%-rule, `<SUBAGENT-STOP>` guard, and Instruction-Priority body unconditionally instead of having to first invoke the Skill tool. The schema lives on `SkillMeta.always_on: bool`; the loader enforces a 16 KB body cap with a `WARN`-on-violation that flips the flag back off; the renderer applies `paths` gating defensively + sorts opt-in bodies alphabetically for prompt-cache stability. A latent parser-wiring bug (`_parse_skill_extras` was orphaned from `list_skills` — CC §7 fields silently always-defaulted in production) was fixed alongside because composability test T3.1 required it. 35 new tests; the whole suite verified in process-isolated chunks (~15,300 tests green, zero real failures — see STATUS.md); ruff clean.
 
 ## 🎉 Went well
 
@@ -22,6 +22,7 @@ A new `always_on: true` skill-frontmatter flag now causes a skill's body to be r
 2. **`oc` binary vs. `python -m opencomputer` resolution.** First smoke ran against the parent's code (uv-tools install pointed at `/Users/saksham/Vscode/claude/OpenComputer/`), not the worktree. Had to `uv tool install --force --reinstall --editable .` from the worktree to get smoke 2-3 to actually exercise the new code. CLAUDE.md mentions `pip install -e .` for the worktree's venv but not the uv-tools binary path — worth noting.
 3. **`skill_matches_cwd` walk-up semantics broke first composability test.** Patterns like `**/*.go` glob from the cwd up to filesystem root, so a `tmp_path/docs-only` cwd matched because some ancestor (e.g. the OpenComputer repo itself) had a `.go` file. Fix: anchor patterns with a unique-prefix dirname. Pre-existing quirk in the matcher, but test-author surprise.
 4. **Output-file truncation hid the second smoke's actual error.** `oc chat -q ... --auto` failed at `_run_oneshot_turn` (asyncio.run from a running loop), but the rich-formatted traceback in the captured background-task output didn't flush the exception summary. Had to rerun after `uv tool install` instead of digging.
+5. **The full-suite segfault hunt.** Declaring "done" the first time skipped the full suite. When finally run, it segfaulted — exit code 0 but a `faulthandler` C-stack dump, no summary line. Took a 4-level binary-search through process-isolated chunks (full → A/B → A1/A2/A3 → A2a/A2b → S1/S2/S3 → per-voice-file) to isolate it to `test_voice_mode_orchestrator.py` raising a `PyTuple_Check` C-assertion at interpreter exit. Then a surgical revert-4-files-to-`origin/main` run proved it pre-existing. Slow, but the only way to be sure it wasn't this change. The misleading part: a segfault exits 0 through the background-task wrapper, so "exit code 0" did NOT mean "tests passed."
 
 ## 🔄 Next time
 
@@ -30,6 +31,7 @@ A new `always_on: true` skill-frontmatter flag now causes a skill's body to be r
 3. **For Phase 7 reviews, run an independent code-reviewer subagent in parallel with my own self-review.** I started this one too late (during the review phase rather than at the start of phase 7); the subagent has the strongest signal when it sees the work fresh.
 4. **For composability tests involving `skill_matches_cwd`, use unique-prefix dirnames** (`uniqueprojectroot_xyz/**`) to keep the walk-up matcher from spuriously matching ancestor dirs. Document this hint in `tests/test_skill_frontmatter_extra_fields.py` or wherever the pattern is most discoverable.
 5. **For behaviour-dependent features (like `always_on`), the wire-verification test matters more than the model-behaviour test.** Wire test: direct-prompt inspection asserting `"# Standing skill instructions" in prompt`. Model test: best-effort, document the run count and outcome rate, don't gate on it.
+6. **Run the full verification matrix BEFORE the first "done" claim, not after being asked "are you sure?"** The first "done" ran only a keyword-filtered sweep and skipped `tests/agent/` entirely — even though `AgentLoop.build_with_memory` consumes the new `cwd` parameter. The brutal recheck (345 agent tests + 553 safe-bucket tests + bundled-skill audit + caller audit) found no load-bearing gap, but that was luck, not diligence. The verification-before-completion discipline says: enumerate every surface the change touches, run the test bucket for each, THEN claim done.
 
 ## 📚 Learned
 
@@ -48,6 +50,7 @@ A new `always_on: true` skill-frontmatter flag now causes a skill's body to be r
 | Body file is re-read on every prompt build (acceptable today, may matter later) | 🟢 low | Cache by (path, mtime) if always-on grows |
 | Smoke test infra: `oc chat -q` rich-traceback truncation in background-task captures hid actual errors | 🟢 low | Either dump rich-disabled in `--quiet`, or capture stderr separately |
 | Renderer-side body-cap check is defense-in-depth duplicate of loader-side cap. Belt-and-braces correct, but could become inconsistent if cap value drifts. Keep them in lockstep via `ALWAYS_ON_BODY_CAP_BYTES` import. (Already done.) | 🟢 low | Maintenance note only |
+| **Pre-existing (NOT this PR):** `test_voice_mode_orchestrator.py` crashes the interpreter at exit with a `PyTuple_Check` C-assertion after its 9 tests pass — corrupts any single-process full-suite run. Reproduced on `origin/main`. Worth a separate bug. | 🟡 medium | `tests/test_voice_mode_orchestrator.py` — voice/audio C-extension teardown; needs process isolation or a teardown fix |
 
 ## File list
 

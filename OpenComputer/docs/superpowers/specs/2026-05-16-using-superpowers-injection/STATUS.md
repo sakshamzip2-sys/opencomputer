@@ -11,10 +11,45 @@ CHANGELOG: see entry at top of `[Unreleased]` in repo-root `CHANGELOG.md`
 |---|---|---|
 | M1 — Schema + parser + body cap | ✅ shipped | 15 new (`tests/test_skill_always_on.py`) |
 | M2 — Renderer Slot 4b + flip `using-superpowers` ON | ✅ shipped (MVP) | 9 new (`tests/test_prompt_slot_4b_always_on.py`) |
-| M3 — Composability tests + plugin docs + example | ✅ shipped | 9 new (`tests/test_skill_always_on_composability.py`) |
+| M3 — Composability tests + plugin docs + example | ✅ shipped | 11 new (`tests/test_skill_always_on_composability.py`) |
 | M4 — CHANGELOG + handoff cross-link | ✅ shipped | n/a |
 
-Total: **33 new tests**, all green. Full-suite regression on `skill` / `memory` / `prompt` test families: **1,033 passed, 6 skipped, 0 failed**.
+Total: **35 new tests**, all green (the 11 composability tests include 2 added during code review for the explicit-`cwd` parameter on `PromptBuilder.build`).
+
+## Verification (post-review brutal recheck)
+
+The first "done" claim ran only a keyword-filtered sweep. A follow-up brutal recheck — triggered by "are you sure you're done?" — closed the verification gaps.
+
+### Full-suite verification
+
+The whole suite in a **single process** hits a **pre-existing flaky segfault** — cross-test C-extension state corruption. Confirmed pre-existing: `test_voice_mode_orchestrator.py` raises a CPython-level `Assertion failed: PyTuple_Check(op)` (`tupleobject.h:22`) at interpreter exit *after* all 9 of its tests pass — and it does so **identically when this PR's 4 modified files are reverted to `origin/main`**, so the crash has zero relation to this change. (The 2026-05-16 handoff doc shows the same suite passing at 16,131 in one run — the segfault is nondeterministic.)
+
+The suite was therefore verified in **process-isolated chunks** — the project's documented practice for this segfault. Every chunk green:
+
+| Chunk | Scope | Result |
+|---|---|---|
+| A1 | top-level `tests/test_[a-l]*.py` (633 files) | 6,861 passed, 9 skipped |
+| A2a | top-level `tests/test_[m-r]*.py` (348 files) | 4,009 passed, 9 skipped, 6 xfailed |
+| S1 | top-level `tests/test_s*.py` (173 files — **includes the 3 new test files**) | 2,008 passed, 3 skipped |
+| S2 | top-level `tests/test_[t-u]*.py` (68 files) | 752 passed |
+| S3a | top-level `tests/test_[w-z]*.py` (45 files) | 504 passed, 2 skipped |
+| S3b | `tests/test_v*.py` (18 voice files), run **one file per process** | 17 files clean (147 passed); `test_voice_mode_orchestrator.py` — 9 tests pass, then the pre-existing at-exit C crash |
+| A3 | the 16 remaining `tests/<subdir>/` (acp, channels, cron, gateway, mcp, security, tools, voice, …) | 819 passed, 1 skipped |
+| B | `tests/integration tests/cli tests/streaming tests/cli_ui tests/benchmarks tests/evals` | 359 passed, 14 deselected |
+
+**~15,300 tests pass; zero real failures.** The only non-green item is the pre-existing voice at-exit C-assertion, proven unrelated.
+
+### Other recheck items
+
+| Check | Result |
+|---|---|
+| `tests/agent/` full directory (was NOT in the first sweep — `AgentLoop.build_with_memory` consumes the new `cwd` param) | 345 passed |
+| Canonical safe buckets `tests/extensions tests/skills_hub tests/plugin_sdk` | 553 passed, 1 skipped |
+| `ruff check opencomputer/ plugin_sdk/ extensions/ tests/` | clean |
+| Bundled-skill frontmatter audit — does wiring `_parse_skill_extras` silently change any existing skill's load? | No. Zero bundled skills set `paths` / `disable_model_invocation` / `user_invocable` / `argument_hint` / `allowed_tools` today (`using-superpowers` is the only skill with `always_on`). Wiring is non-breaking. |
+| `PromptBuilder.build` / `build_with_memory` caller audit — does the new `cwd` kwarg break any caller? | No. The single production caller (`loop.py:2250`) uses all-kwargs; the new param is keyword-only with a `None` default. |
+| CHANGELOG.md markdownlint warnings | All 30+ pre-date this change (lines 78–716, prior entries); the new entry at lines 7–8 adds none. |
+| Self-review of own diff | Found + fixed one sloppiness: `logger = __import__("logging")...` hack in `prompt_builder.py` → proper `import logging` + `logging.getLogger(...)`. |
 
 ## Behavioural smoke (T2.6)
 

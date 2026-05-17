@@ -13,6 +13,7 @@ per-turn injection) so Anthropic prefix cache stays hot across turns.
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import platform
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ from opencomputer.agent.memory import (
     skill_matches_cwd,
 )
 
-logger = __import__("logging").getLogger("opencomputer.agent.prompt_builder")
+logger = logging.getLogger("opencomputer.agent.prompt_builder")
 
 _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
 
