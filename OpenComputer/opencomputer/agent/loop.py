@@ -531,8 +531,12 @@ DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
 #: II.2 — Tool names that MUST NEVER run in parallel, regardless of their
 #: per-tool ``parallel_safe`` flag. These are tools whose side-effects can
 #: race even when two invocations look independent: arbitrary shell
-#: commands (``Bash``), user-facing prompts (``AskUserQuestion``), plan-mode
-#: state transitions (``ExitPlanMode``), and mutable-state TODO writes.
+#: commands (``Bash``); arbitrary Python execution whose plain mode routes
+#: through a per-call sandbox backend published on the shared
+#: ``runtime.custom`` (``PythonExec`` — concurrent dispatch would clobber
+#: that per-call backend key); user-facing prompts (``AskUserQuestion``);
+#: plan-mode state transitions (``ExitPlanMode``); and mutable-state TODO
+#: writes.
 #:
 #: This is the first of two layers stacked on top of the existing
 #: ``parallel_safe`` flag. The flag is a hint from the plugin author; this
@@ -543,6 +547,7 @@ DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
 #: ``sources/hermes-agent/run_agent.py`` line 217.
 HARDCODED_NEVER_PARALLEL: frozenset[str] = frozenset({
     "Bash",
+    "PythonExec",
     "AskUserQuestion",
     "ExitPlanMode",
     "TodoWrite",
@@ -1621,6 +1626,7 @@ class AgentLoop:
         thinking_callback=None,
         tool_callback=None,
         system_prompt_override: str | None = None,
+        system_prompt_merge: bool = False,
         initial_messages: list[Message] | None = None,
         images: list[str] | None = None,
         retry_callback=None,
@@ -1644,6 +1650,16 @@ class AgentLoop:
             named-template path; ``system_override`` remains for direct
             callers that want a raw swap. When both are set,
             ``system_prompt_override`` wins (it's the III.5 semantic).
+        system_prompt_merge:
+            M3 #1 fix — gateway-vs-CLI parity. When ``True``, the
+            ``system_prompt_override`` is *appended to* the normal
+            PromptBuilder output rather than *replacing* it: skills /
+            declarative memory / USER.md / SOUL.md stay injected and the
+            routing template's prompt is added as trailing channel-
+            specific guidance. Default ``False`` preserves the historical
+            replace-everything behaviour. Ignored when
+            ``system_prompt_override`` is ``None`` or when only
+            ``system_override`` is set.
         initial_messages:
             Round 2B P-9 — pre-seed a fresh session's history with these
             messages BEFORE ``user_message`` is appended. Only honoured
@@ -2081,7 +2097,16 @@ class AgentLoop:
         # prompts are treated as rendered-Jinja strings: declarative /
         # skills / memory / SOUL injection OFF — the body is assumed
         # intentional.
-        if system_prompt_override is not None:
+        #
+        # M3 #1 fix: when ``system_prompt_merge`` is set, the override
+        # does NOT replace the builder — the builder path runs (skills /
+        # memory / SOUL injected) and the override is appended afterwards
+        # (see the merge block below). So an override+merge turn falls
+        # through to the ``else`` builder branch here.
+        _override_replaces = (
+            system_prompt_override is not None and not system_prompt_merge
+        )
+        if _override_replaces:
             base_system = system_prompt_override
         elif system_override is not None:
             base_system = system_override
@@ -2303,6 +2328,22 @@ class AgentLoop:
                 # Cache hit — mark this session as most-recently-used
                 self._prompt_snapshots.move_to_end(sid)
             base_system = snapshot
+
+        # M3 #1 fix (gateway-vs-CLI parity) — a routing template that
+        # asked to MERGE rather than replace: the builder path above
+        # already ran (skills / declarative memory / USER.md / SOUL.md
+        # injected), so now append the template's prompt as trailing
+        # channel-specific guidance. Deterministic (the override is
+        # constant for a given chat), so it stays inside the cacheable
+        # ``base_system`` prefix and turn-2+ prefix caching still holds.
+        if system_prompt_override is not None and system_prompt_merge:
+            _merge_body = system_prompt_override.strip()
+            if _merge_body:
+                base_system = (
+                    f"{base_system}\n\n{_merge_body}"
+                    if base_system
+                    else _merge_body
+                )
 
         # Compute the 1-indexed turn number for this session. IV.2: providers
         # use this to throttle heavy content (plan/review reminders flip from
@@ -3514,6 +3555,7 @@ class AgentLoop:
                             thinking_callback=thinking_callback,
                             tool_callback=tool_callback,
                             system_prompt_override=system_prompt_override,
+                            system_prompt_merge=system_prompt_merge,
                             retry_callback=retry_callback,
                         )
                     self.db.end_session(sid)
@@ -3719,6 +3761,15 @@ class AgentLoop:
                     BashTool.set_runtime(self._runtime)
                 except Exception:
                     pass  # bash tool may not be registered in some contexts
+
+                # M5 (sandbox-provider-breadth): PythonExec's plain mode
+                # routes through the same resolved backend — give it the
+                # live runtime too, the same propagation pattern as BashTool.
+                try:
+                    from opencomputer.tools.python_exec import PythonExec
+                    PythonExec.set_runtime(self._runtime)
+                except Exception:
+                    pass  # python_exec tool may not be registered
 
                 # v1.1 plan-2 M5.2 (2026-05-09): snapshot the message
                 # history BEFORE dispatching this tool block so a later
@@ -4062,6 +4113,16 @@ class AgentLoop:
         # path so the agent never wedges over a bad override.
         override_id = ""
         rt = getattr(self, "_runtime", None)
+
+        # M3 #7 fix — ``display.persona_override: none`` (threaded onto
+        # the runtime by the gateway dispatcher as ``persona_disabled``)
+        # suppresses the persona overlay entirely, so a gateway session
+        # is not pushed into the platform-driven casual register.
+        if rt is not None and rt.custom.get("persona_disabled"):
+            self._active_persona_id = ""
+            self._active_persona_preferred_tone = ""
+            return ""
+
         if rt is not None:
             override_id = str(
                 rt.custom.get("persona_id_override", "") or ""
@@ -5773,6 +5834,13 @@ class AgentLoop:
     #: resolver chose.
     _SANDBOX_STRATEGY_KEY = "sandbox_backend_strategy"
 
+    #: M3 (T3.3) — ``runtime.custom`` key carrying the pooled-container
+    #: key for a reuse-scoped call (session / agent / shared scope). The
+    #: Bash tool reads it into ``SandboxConfig.container_key`` so the
+    #: Docker strategy reuses one container across same-scope calls.
+    #: Absent for tool / none scope (transient container per call).
+    _SANDBOX_CONTAINER_KEY = "sandbox_container_key"
+
     def _resolve_sandbox_backend(self, call: ToolCall) -> str | None:
         """M2 (T2.6) — resolve the sandbox backend for one tool call.
 
@@ -5804,21 +5872,29 @@ class AgentLoop:
         tool = registry.get(call.name)
         if tool is None:
             return None
-        from opencomputer.sandbox.policy import SandboxScopeContext
+        from opencomputer.sandbox.policy import (
+            SandboxScopeContext,
+            pool_key_for,
+        )
         from opencomputer.sandbox.resolver import resolve_backend
         from plugin_sdk.sandbox import SandboxUnavailable
 
+        # Build the scope context BEFORE the try — the dict reads + the
+        # frozen-dataclass constructor cannot raise, and ``ctx`` is read
+        # again after the try/except (the pool-key publish below), so it
+        # must be unconditionally bound.
+        session_id = ""
+        agent_id = None
+        runtime = self._runtime
+        if runtime is not None and runtime.custom:
+            session_id = str(runtime.custom.get("session_id") or "")
+            agent_id = runtime.custom.get("agent_id")
+        ctx = SandboxScopeContext(
+            session_id=session_id or None,
+            agent_id=str(agent_id) if agent_id else None,
+        )
+
         try:
-            session_id = ""
-            agent_id = None
-            runtime = self._runtime
-            if runtime is not None and runtime.custom:
-                session_id = str(runtime.custom.get("session_id") or "")
-                agent_id = runtime.custom.get("agent_id")
-            ctx = SandboxScopeContext(
-                session_id=session_id or None,
-                agent_id=str(agent_id) if agent_id else None,
-            )
             backend = resolve_backend(tool, self.config, ctx)
         except SandboxUnavailable:
             # A ``required`` tool whose backend can't be resolved under
@@ -5841,10 +5917,21 @@ class AgentLoop:
             # call's backend can't leak into an un-sandboxed tool.
             runtime.custom.pop(self._SANDBOX_BACKEND_KEY, None)
             runtime.custom.pop(self._SANDBOX_STRATEGY_KEY, None)
+            runtime.custom.pop(self._SANDBOX_CONTAINER_KEY, None)
             return None
         name = getattr(backend, "name", None)
         runtime.custom[self._SANDBOX_BACKEND_KEY] = name
         runtime.custom[self._SANDBOX_STRATEGY_KEY] = backend
+        # M3 (T3.3): publish the pooled-container key for a reuse-scoped
+        # call. ``pool_key_for`` returns None for tool / none scope (and
+        # for session / agent scope with the keying id absent) — the
+        # Docker strategy then keeps its transient per-call container.
+        policy = getattr(self.config, "sandbox", None)
+        pool_key = pool_key_for(policy, ctx) if policy is not None else None
+        if pool_key:
+            runtime.custom[self._SANDBOX_CONTAINER_KEY] = pool_key
+        else:
+            runtime.custom.pop(self._SANDBOX_CONTAINER_KEY, None)
         return name
 
     async def _dispatch_tool_calls(

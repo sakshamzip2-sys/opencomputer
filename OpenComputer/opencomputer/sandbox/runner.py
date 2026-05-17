@@ -22,12 +22,18 @@ from __future__ import annotations
 from dataclasses import replace
 
 from opencomputer.sandbox.auto import auto_strategy
+from opencomputer.sandbox.daytona import DaytonaSandboxStrategy
 from opencomputer.sandbox.docker import DockerStrategy
 from opencomputer.sandbox.e2b import E2BSandboxStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
+from opencomputer.sandbox.modal import ModalSandboxStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
-from opencomputer.sandbox.policy import SandboxPolicy, SandboxScopeContext, scope_key
+from opencomputer.sandbox.policy import (
+    SandboxPolicy,
+    SandboxScopeContext,
+    pool_key_for,
+)
 from opencomputer.sandbox.ssh import SSHSandboxStrategy
 from plugin_sdk.sandbox import (
     SandboxConfig,
@@ -51,10 +57,15 @@ def _named_strategy(name: str) -> SandboxStrategy:
         s = SSHSandboxStrategy()
     elif name == "e2b":
         s = E2BSandboxStrategy()
+    elif name == "daytona":
+        s = DaytonaSandboxStrategy()
+    elif name == "modal":
+        s = ModalSandboxStrategy()
     else:
         raise SandboxUnavailable(
             f"unknown sandbox strategy {name!r}; "
-            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / e2b / none"
+            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / "
+            "e2b / daytona / modal / none"
         )
     if not s.is_available():
         raise SandboxUnavailable(
@@ -91,7 +102,13 @@ async def run_sandboxed(
     cfg = config or SandboxConfig()
 
     if policy is not None and cfg.container_key is None:
-        cfg = replace(cfg, container_key=scope_key(policy, scope_ctx))
+        # ``pool_key_for`` yields a reuse key only for a poolable scope+id
+        # (shared, or session / agent WITH the keying id) — and NEVER a
+        # per-call uuid. ``None`` (tool / none scope, or session / agent
+        # with the id absent) keeps the transient container path.
+        pool_key = pool_key_for(policy, scope_ctx)
+        if pool_key:
+            cfg = replace(cfg, container_key=pool_key)
 
     if cfg.strategy == "auto":
         try:

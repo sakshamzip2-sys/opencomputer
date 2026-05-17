@@ -37,6 +37,41 @@ def test_load_config_for_profile_uses_profile_paths(tmp_path: Path) -> None:
     assert cfg.memory.declarative_path.parent == profile_home
 
 
+def test_load_config_for_profile_parses_config_yaml(tmp_path: Path) -> None:
+    """The helper must actually parse ``<profile_home>/config.yaml``.
+
+    Regression: it previously called ``default_config()`` (a bare
+    ``Config()``), so the gateway-dispatch and webui loops ran on the
+    DEFAULT model/provider/loop/etc. regardless of the profile's
+    config.yaml. ``claude-sonnet-4-6`` is a non-default ``model.model``
+    (the default is ``claude-opus-4-7``).
+    """
+    cfg_mod = _config_module()
+    profile_home = tmp_path / "p"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+    cfg = cfg_mod.load_config_for_profile(profile_home)
+    assert isinstance(cfg, cfg_mod.Config)
+    assert cfg.model.model == "claude-sonnet-4-6"
+    # Sanity: the value really is non-default.
+    assert cfg_mod.Config().model.model != "claude-sonnet-4-6"
+
+
+def test_load_config_for_profile_missing_config_yaml_returns_defaults(
+    tmp_path: Path,
+) -> None:
+    """A profile_home with NO config.yaml must yield defaults, not raise."""
+    cfg_mod = _config_module()
+    profile_home = tmp_path / "no-config"
+    profile_home.mkdir()
+    assert not (profile_home / "config.yaml").exists()
+    cfg = cfg_mod.load_config_for_profile(profile_home)
+    assert isinstance(cfg, cfg_mod.Config)
+    assert cfg.model.model == cfg_mod.Config().model.model
+
+
 def test_load_config_for_profile_does_not_mutate_env(tmp_path: Path, monkeypatch) -> None:
     """The helper must not leak its profile selection into the
     process environment or ContextVar — purely scoped."""

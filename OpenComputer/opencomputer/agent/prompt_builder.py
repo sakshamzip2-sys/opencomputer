@@ -614,14 +614,10 @@ class PromptBuilder:
             session_context if session_context is not None else SessionContext()
         )
         # M4 — feed the reranker the decay (edge-recency) + drift signals.
-        # Drift is skipped unless a contradicts edge exists; the common
-        # case has none, so this stays cheap.
+        # Both are bulk: one aggregate query each, every node — never a
+        # per-node loop on this per-session hot path.
         recency_scores = s.node_recency_scores()  # one query, all nodes
-        drift_scores: dict[str, float] = {}
-        if s.count_edges(kinds=("contradicts",)) > 0:
-            drift_scores = {
-                n.node_id: s.node_drift_score(n.node_id) for n in nodes
-            }
+        drift_scores = s.node_drift_scores()      # one query, all nodes
         ranked = UserFactsReranker(RerankWeights.load(_home())).score(
             nodes,
             ctx,

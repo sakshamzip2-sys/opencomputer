@@ -38,6 +38,11 @@ _log = logging.getLogger("opencomputer.tools.bash")
 #: ``opencomputer.agent.loop.AgentLoop._SANDBOX_STRATEGY_KEY``.
 _SANDBOX_STRATEGY_KEY = "sandbox_backend_strategy"
 
+#: M3 (T3.3) — ``runtime.custom`` key carrying the pooled-container key
+#: for a reuse-scoped call. Kept in sync with
+#: ``opencomputer.agent.loop.AgentLoop._SANDBOX_CONTAINER_KEY``.
+_SANDBOX_CONTAINER_KEY = "sandbox_container_key"
+
 #: Hermes-parity infrastructure-var blocklist. These keys are stripped
 #: from the BashTool subprocess env regardless of user passthrough.
 #:
@@ -163,6 +168,23 @@ class BashTool(BaseTool):
         if not isinstance(custom, dict):
             return None
         return custom.get(_SANDBOX_STRATEGY_KEY)
+
+    def _resolved_container_key(self) -> str | None:
+        """Return the pooled-container key for this call, or ``None``.
+
+        Reads ``runtime.custom['sandbox_container_key']`` — published by
+        ``AgentLoop._resolve_sandbox_backend`` for a reuse-scoped call
+        (session / agent / shared scope with the keying id present).
+        ``None`` (the default, and the value for tool / none scope) means
+        "transient container per call". Read defensively so a missing /
+        malformed runtime can never break command execution.
+        """
+        runtime = self._current_runtime
+        custom = getattr(runtime, "custom", None)
+        if not isinstance(custom, dict):
+            return None
+        key = custom.get(_SANDBOX_CONTAINER_KEY)
+        return key if isinstance(key, str) and key else None
 
     def _current_session_id(self) -> str:
         """Return the active session id, or ``""`` when none is published.
@@ -331,7 +353,17 @@ class BashTool(BaseTool):
             )
             if sandboxed is not None:
                 return sandboxed
-            # local-fallback on an unreachable backend — fall through.
+            # Backend unreachable + sandbox.fallback=local — fall through
+            # to the host path, but SURFACE the lost containment on the
+            # result. ``_execute_in_sandbox`` already logged a WARNING;
+            # the resolver contract is "never silently downgrade", so the
+            # model + user must see it on the result too (a log line is
+            # invisible at the surface that matters).
+            warn_prefix += (
+                "[sandbox unavailable — ran on the HOST without "
+                "containment; set sandbox.fallback=error to refuse "
+                "instead]\n"
+            )
 
         # Scope HOME / XDG_* to the active profile's home/ subdir so
         # spawned subprocesses (git, ssh, npm, etc.) get per-profile
@@ -505,6 +537,9 @@ class BashTool(BaseTool):
         sandbox_cfg = SandboxConfig(
             cpu_seconds_limit=timeout,
             network_allowed=False,
+            # M3 (T3.3): a reuse-scoped call carries a pooled-container
+            # key; ``None`` (tool / none scope) → transient container.
+            container_key=self._resolved_container_key(),
         )
 
         run = getattr(strategy, "run", None)

@@ -382,9 +382,14 @@ async def test_compaction_prepends_key_facts_when_bridge_present():
 
     result = await engine.maybe_run(msgs, last_input_tokens=999_999)
     assert result.did_compact
-    # The synthetic summary message should contain the DO-NOT-SUMMARIZE wrapper
-    assert "<KEY-FACTS-DO-NOT-SUMMARIZE>" in result.messages[0].content
-    assert "CRITICAL FACT" in result.messages[0].content
+    # The synthetic [compacted-summary] message carries the key-facts
+    # wrapper. M3 #10 puts the verbatim anchor (first user message)
+    # ahead of it, so locate the summary by content rather than index.
+    summary = next(
+        m for m in result.messages if "[compacted-summary]" in (m.content or "")
+    )
+    assert "<KEY-FACTS-DO-NOT-SUMMARIZE>" in summary.content
+    assert "CRITICAL FACT" in summary.content
 
 
 # ─── AgentLoop.aclose ────────────────────────────────────────────────────────

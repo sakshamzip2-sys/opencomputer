@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import dataclasses
 import logging
 import os
 import sys
@@ -64,6 +65,63 @@ from plugin_sdk.hooks import HookEvent, HookSpec
 from plugin_sdk.runtime_context import RuntimeContext
 
 _DEPRECATION_WARNED: set[str] = set()
+
+
+def _ensure_coding_harness_alias() -> None:
+    """Register an ``extensions.coding_harness`` namespace-package alias.
+
+    The coding-harness plugin lives at ``extensions/coding-harness/``
+    (hyphenated, and the directory itself has no ``__init__.py``), so
+    ``import extensions.coding_harness...`` — the form ``_on_stop_bg``
+    uses to reach ``tools.background.stop_all_processes`` — raises
+    ``ModuleNotFoundError`` at runtime unless a synthetic namespace
+    package is mapped onto the hyphenated dir first.
+
+    Same pattern as ``cli_traces._ensure_alias`` (for the equally
+    hyphenated ``extensions/social-traces/`` plugin). The ``tools/``
+    sub-package DOES have its own ``__init__.py``, so once the
+    ``extensions.coding_harness`` parent exists with the right
+    ``__path__`` Python's normal import machinery resolves
+    ``.tools.background`` against it — namespace-only registration is
+    sufficient.
+
+    Also registers a bare ``coding_harness`` namespace alias so the
+    underscored fallback import inside ``_on_stop_bg``
+    (``importlib.import_module("coding_harness.tools.background")``)
+    resolves too — defense-in-depth.
+
+    Idempotent and silent: a missing ``extensions/coding-harness/``
+    directory is skipped without raising, so this stays correct if the
+    bundled plugin set changes.
+    """
+    import types
+
+    if "extensions.coding_harness" in sys.modules:
+        return
+    project_root = Path(__file__).resolve().parent.parent
+    ext_dir = project_root / "extensions"
+    ch_dir = ext_dir / "coding-harness"
+    if not ch_dir.exists():
+        return
+    if "extensions" not in sys.modules:
+        ext_pkg = types.ModuleType("extensions")
+        ext_pkg.__path__ = [str(ext_dir)]
+        ext_pkg.__package__ = "extensions"
+        sys.modules["extensions"] = ext_pkg
+    mod = types.ModuleType("extensions.coding_harness")
+    mod.__path__ = [str(ch_dir)]
+    mod.__package__ = "extensions.coding_harness"
+    sys.modules["extensions.coding_harness"] = mod
+    sys.modules["extensions"].coding_harness = mod  # type: ignore[attr-defined]
+    # Bare ``coding_harness`` alias for the underscored fallback import.
+    # The on-disk dir is hyphenated with no ``__init__.py``, so a plain
+    # ``import coding_harness`` can't find it; a synthetic namespace
+    # package pointed at the same dir makes the fallback resolve.
+    if "coding_harness" not in sys.modules:
+        bare = types.ModuleType("coding_harness")
+        bare.__path__ = [str(ch_dir)]
+        bare.__package__ = "coding_harness"
+        sys.modules["coding_harness"] = bare
 
 
 def _derive_permission_mode(
@@ -1746,75 +1804,15 @@ def _run_chat_session(
     except Exception:  # noqa: BLE001 — never crash on capability sniff
         runtime.custom["_provider_supports_native_thinking"] = False
 
-    # Register the ThinkingInjector once per process. Idempotent — if a
-    # previous session/test re-init already registered it, unregister
-    # first to avoid InjectionEngine.register's "already registered"
-    # ValueError.
-    from opencomputer.agent.injection import engine as injection_engine
-    from opencomputer.agent.thinking_injector import ThinkingInjector
-    injection_engine.unregister("thinking_tags_fallback")
-    injection_engine.register(ThinkingInjector())
-
-    # v1.1 plan-2 M7 (2026-05-09) — register the path-glob rules
-    # injector so .opencomputer/rules/*.md fire on the next turn after
-    # any path-touching tool call. Empty rules list → provider stays
-    # registered but contributes nothing (cheap no-op per turn).
-    try:
-        from opencomputer.agent.path_rules_injection import (
-            PathGlobRulesProvider,
-            load_rules_for_active_profile,
-        )
-
-        injection_engine.unregister("path_glob_rules")
-        injection_engine.register(
-            PathGlobRulesProvider(rules=load_rules_for_active_profile())
-        )
-    except Exception:  # noqa: BLE001 — never break loop boot on rules load fail
-        import logging as _log_mod
-        _log_mod.getLogger("opencomputer.cli").debug(
-            "path-glob rules registration failed (suppressed)", exc_info=True
-        )
-
-    # 2026-05-13 — profile handoff: register the inbox-injection provider so
-    # any pending handoff in the active profile's ``inbox/`` lands as a
-    # system-prompt section on the next turn. Idempotent. Applies to ALL
-    # surfaces (CLI, webui, workspace, wire clients, gateway adapters) —
-    # the provider keys off the active profile, not the surface.
-    try:
-        from opencomputer.agent.handoff import HandoffInjectionProvider
-
-        def _active_profile_home() -> object:
-            from pathlib import Path
-
-            from opencomputer.profiles import (
-                get_profile_dir,
-                read_active_profile,
-            )
-
-            active = read_active_profile()
-            root = get_profile_dir(active)
-            return Path(root) / "home"
-
-        injection_engine.unregister("handoff_inbox")
-        injection_engine.register(
-            HandoffInjectionProvider(
-                profile_home_resolver=_active_profile_home,
-            ),
-        )
-    except Exception:  # noqa: BLE001 — never break loop boot
-        import logging as _log_mod
-        _log_mod.getLogger("opencomputer.cli").warning(
-            "handoff inbox injection provider registration failed",
-            exc_info=True,
-        )
-
-    # life-event teeth — register the per-turn life-event hint provider for
-    # the CLI surface (always on; the helper handles idempotent
-    # (re)registration + fail-soft boot).
-    from opencomputer.awareness.life_events.injection import (
-        register_life_event_injection_provider,
+    # Register OC's built-in injection providers for the CLI surface.
+    # One call wires ThinkingInjector, PathGlobRulesProvider,
+    # HandoffInjectionProvider (with the CLI-correct sticky-active-profile
+    # resolver) and LifeEventInjectionProvider — each idempotent +
+    # fail-soft. See opencomputer.agent.injection_registration.
+    from opencomputer.agent.injection_registration import (
+        register_default_injection_providers,
     )
-    register_life_event_injection_provider("cli")
+    register_default_injection_providers("cli")
 
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     loop._runtime = runtime
@@ -2943,10 +2941,17 @@ def _run_chat_session(
                 Calls into ``extensions/coding-harness/tools/background``
                 via lazy-import so the slash command degrades to "0 killed"
                 if the coding-harness extension isn't installed.
+
+                The plugin dir is hyphenated (``extensions/coding-harness/``,
+                no ``__init__.py``) so the import below only resolves once
+                ``_ensure_coding_harness_alias`` has registered the synthetic
+                ``extensions.coding_harness`` namespace package. The
+                ``try/except`` is kept as defense-in-depth.
                 """
                 try:
                     import asyncio as _asyncio_local
 
+                    _ensure_coding_harness_alias()
                     from extensions.coding_harness.tools.background import (
                         stop_all_processes,
                     )
@@ -3328,10 +3333,15 @@ def _run_oneshot_turn(
 
     _configure_logging_once()
     cfg = load_config()
-    if model:
-        cfg.model.model = model
-    if provider_name:
-        cfg.model.provider = provider_name
+    # ``cfg.model`` is a frozen+slots ModelConfig — attribute assignment
+    # raises FrozenInstanceError. Rebuild immutably via dataclasses.replace.
+    if model or provider_name:
+        model_cfg = cfg.model
+        if model:
+            model_cfg = dataclasses.replace(model_cfg, model=model)
+        if provider_name:
+            model_cfg = dataclasses.replace(model_cfg, provider=provider_name)
+        cfg = dataclasses.replace(cfg, model=model_cfg)
     _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
@@ -4092,12 +4102,14 @@ def wire(
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
 
-    # life-event teeth — register the per-turn life-event hint provider for
-    # the wire surface (idempotent + fail-soft).
-    from opencomputer.awareness.life_events.injection import (
-        register_life_event_injection_provider,
+    # Register OC's built-in injection providers for the wire surface.
+    # One call wires ThinkingInjector, PathGlobRulesProvider,
+    # HandoffInjectionProvider (ContextVar-aware resolver) and
+    # LifeEventInjectionProvider — each idempotent + fail-soft.
+    from opencomputer.agent.injection_registration import (
+        register_default_injection_providers,
     )
-    register_life_event_injection_provider("wire")
+    register_default_injection_providers("wire")
 
     # 2026-05-11 — bind ``loop`` (not the captured ``cfg``/``provider``
     # locals) so any mid-flight mutation to the wire server's loop
@@ -5035,12 +5047,20 @@ def _service_install(
 
 
 @service_app.command("uninstall")
-def _service_uninstall() -> None:
-    """Stop + disable + remove the system service file (cross-platform)."""
+def _service_uninstall(
+    profile: str = typer.Option(
+        "default", help="Which profile's service to remove."
+    ),
+) -> None:
+    """Stop + disable + remove the system service file (cross-platform).
+
+    ``--profile`` must match the profile passed to ``oc service install``
+    so the matching per-profile service unit is removed (multi-install).
+    """
     from opencomputer.service.factory import get_backend
 
     backend = get_backend()
-    result = backend.uninstall()
+    result = backend.uninstall(profile=profile)
     if result.file_removed:
         typer.echo(f"removed ({result.backend}): {result.config_path}")
     else:

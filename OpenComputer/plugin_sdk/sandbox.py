@@ -47,6 +47,12 @@ class SandboxResult:
 # ``opencomputer.sandbox.auto_strategy`` pick the best available for the host.
 # ``"e2b"`` runs argv inside an ephemeral E2B cloud sandbox (Milestone 2);
 # it requires the optional ``e2b`` extra and an ``E2B_API_KEY``.
+# ``"daytona"`` runs argv inside an ephemeral Daytona cloud sandbox
+# (Milestone 2.1); it requires the optional ``daytona`` extra and a
+# ``DAYTONA_API_KEY``.
+# ``"modal"`` runs argv inside an ephemeral Modal cloud sandbox
+# (Milestone 2.5); it requires the optional ``modal`` extra and Modal
+# credentials (``MODAL_TOKEN_ID`` env or ``~/.modal.toml``).
 SandboxStrategyName = Literal[
     "auto",
     "macos_sandbox_exec",
@@ -54,6 +60,8 @@ SandboxStrategyName = Literal[
     "docker",
     "ssh",
     "e2b",
+    "daytona",
+    "modal",
     "none",
 ]
 

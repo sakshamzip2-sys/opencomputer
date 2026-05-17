@@ -344,29 +344,27 @@ async def _run_agent_completion(
 
     profile_home = profile_home_fn()
     profile_id = profile_home.name
-    loop = build_agent_loop_for_profile(profile_id, profile_home)
-
-    # life-event teeth — register the per-turn life-event hint provider for
-    # the webui surface (serves both ``oc webui`` and ``oc workspace``).
-    # This route runs per request; the helper is idempotent so per-request
-    # (re)registration is fine + fail-soft.
-    from opencomputer.awareness.life_events.injection import (
-        register_life_event_injection_provider,
-    )
-    register_life_event_injection_provider("webui")
-
     # Per-request model override: a workspace user may pick a model from
-    # the dropdown that differs from the profile's default. We respect
-    # that override for the duration of this call only — never persist it.
-    if model and getattr(loop.config.model, "model", "") != model:
-        try:
-            loop.config.model.model = model
-        except Exception:  # noqa: BLE001 — frozen-dataclass edge cases
-            logger.debug(
-                "openai_compat: cannot override model on loop config; "
-                "continuing with profile default %s",
-                getattr(loop.config.model, "model", "?"),
-            )
+    # the dropdown that differs from the profile's default. The factory
+    # bakes the override into the loop's (frozen) ``ModelConfig`` at
+    # construction time via ``dataclasses.replace``. ``model`` may be
+    # None/empty — the factory no-ops on falsy and uses the profile
+    # default. The override is never persisted; it lives only on this
+    # per-request loop.
+    loop = build_agent_loop_for_profile(
+        profile_id, profile_home, model_override=model
+    )
+
+    # Register OC's built-in injection providers for the webui surface
+    # (serves both ``oc webui`` and ``oc workspace``). One call wires
+    # ThinkingInjector, PathGlobRulesProvider, HandoffInjectionProvider
+    # (ContextVar-aware resolver) and LifeEventInjectionProvider. This
+    # route runs per request; every registration is idempotent so
+    # per-request (re)registration is fine + fail-soft.
+    from opencomputer.agent.injection_registration import (
+        register_default_injection_providers,
+    )
+    register_default_injection_providers("webui")
 
     result = await loop.run_conversation(
         user_message=user_message,

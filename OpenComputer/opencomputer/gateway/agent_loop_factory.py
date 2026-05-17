@@ -31,6 +31,7 @@ Audit fixes covered:
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,13 +45,27 @@ logger = logging.getLogger("opencomputer.gateway.agent_loop_factory")
 
 
 def build_agent_loop_for_profile(
-    profile_id: str, profile_home: Path
+    profile_id: str,
+    profile_home: Path,
+    *,
+    model_override: str | None = None,
 ) -> AgentLoop:
     """Construct a fresh AgentLoop bound to ``profile_home``.
 
     All construction happens inside ``set_profile(profile_home)`` so
     the new loop's ``Config`` (which uses ``_home()`` in its field
     factories) captures the correct paths.
+
+    ``model_override`` (optional) pins this loop to a specific model id,
+    overriding the profile's default. The OpenAI-compat webui surface
+    (``openai_compat._run_agent_completion``) passes the per-request
+    model the user picked from the dropdown. The override is applied at
+    construction time via ``dataclasses.replace`` because ``Config`` and
+    ``ModelConfig`` are ``@dataclass(frozen=True, slots=True)`` — direct
+    attribute assignment raises ``FrozenInstanceError``. When ``None``
+    or empty (the default — the gateway dispatch path never passes it),
+    behaviour is byte-identical to a loop built from the profile config
+    unchanged.
 
     The returned loop has:
 
@@ -85,6 +100,18 @@ def build_agent_loop_for_profile(
         #    profile-rooted paths.
         cfg = load_config_for_profile(profile_home)
 
+        # 1b. Per-request model override (webui model-dropdown). ``Config``
+        #     and ``ModelConfig`` are frozen+slots dataclasses, so the
+        #     override is applied by rebuilding both immutably — direct
+        #     assignment would raise FrozenInstanceError. Only the model id
+        #     changes; ``provider`` is left intact so the step-2 provider
+        #     lookup below still resolves the same plugin.
+        if model_override and model_override != cfg.model.model:
+            cfg = dataclasses.replace(
+                cfg,
+                model=dataclasses.replace(cfg.model, model=model_override),
+            )
+
         # 2. Resolve the provider per profile config. Plugins register
         #    the CLASS — instantiate with defaults (matches
         #    ``cli.py::_resolve_provider``). When the registry holds a
@@ -104,9 +131,18 @@ def build_agent_loop_for_profile(
         # 3. Resolve the profile's enabled plugins → tool allowlist.
         #    ``"*"`` means "no filter" (legacy single-profile shape);
         #    a concrete frozenset becomes the allowed-tools allowlist.
+        #
+        #    M3 #2 fix (gateway-vs-CLI parity): ``gateway.tool_filter``
+        #    overrides this. ``profile`` (default) keeps the behaviour
+        #    below; ``wildcard`` forces ``allowed_tools = None`` so the
+        #    gateway sees the full tool registry exactly like the CLI
+        #    (which never sets an allowlist).
         prof_cfg = load_profile_config(profile_home)
         allowed_tools: frozenset[str] | None
-        if prof_cfg.enabled_plugins == "*":
+        tool_filter = getattr(getattr(cfg, "gateway", None), "tool_filter", "profile")
+        if tool_filter == "wildcard":
+            allowed_tools = None
+        elif prof_cfg.enabled_plugins == "*":
             allowed_tools = None  # unrestricted (all loaded tools)
         else:
             assert isinstance(prof_cfg.enabled_plugins, frozenset)

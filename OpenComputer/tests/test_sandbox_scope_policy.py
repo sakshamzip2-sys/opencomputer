@@ -19,6 +19,7 @@ from opencomputer.sandbox.policy import (
     SandboxPolicy,
     SandboxScope,
     SandboxScopeContext,
+    pool_key_for,
     scope_key,
 )
 from opencomputer.sandbox.runner import run_sandboxed
@@ -263,6 +264,42 @@ def test_scope_key_is_docker_name_safe() -> None:
     assert all(c.isalnum() or c == "-" for c in key) and len(key) <= 20
 
 
+# ─── pool_key_for — the poolable-scope gate (M3 T3.3) ─────────────────
+
+
+def test_pool_key_for_shared_is_constant() -> None:
+    assert pool_key_for(SandboxPolicy(scope=SandboxScope.SHARED)) == "shared"
+
+
+def test_pool_key_for_session_with_id() -> None:
+    key = pool_key_for(
+        SandboxPolicy(scope=SandboxScope.SESSION),
+        SandboxScopeContext(session_id="sess-1"),
+    )
+    assert key is not None and key.startswith("session-")
+
+
+def test_pool_key_for_agent_with_id() -> None:
+    key = pool_key_for(
+        SandboxPolicy(scope=SandboxScope.AGENT),
+        SandboxScopeContext(agent_id="researcher"),
+    )
+    assert key is not None and key.startswith("agent-")
+
+
+def test_pool_key_for_none_for_non_poolable_scopes() -> None:
+    """``tool`` / ``none`` scope are transient — no pool key."""
+    assert pool_key_for(SandboxPolicy(scope=SandboxScope.TOOL)) is None
+    assert pool_key_for(SandboxPolicy(scope=SandboxScope.NONE)) is None
+
+
+def test_pool_key_for_none_when_keying_id_absent() -> None:
+    """``session`` / ``agent`` scope WITHOUT the id is not poolable —
+    pooling on a per-call uuid would create a never-reused container."""
+    assert pool_key_for(SandboxPolicy(scope=SandboxScope.SESSION)) is None
+    assert pool_key_for(SandboxPolicy(scope=SandboxScope.AGENT)) is None
+
+
 # ─── run_sandboxed scope plumbing + SandboxConfig.container_key ───────
 
 
@@ -271,11 +308,19 @@ def test_sandbox_config_container_key_defaults_none() -> None:
     assert SandboxConfig(container_key="session-abc").container_key == "session-abc"
 
 
-def test_docker_explain_uses_container_key_when_set() -> None:
+def test_docker_explain_pooled_when_container_key_set() -> None:
+    """M3: a reuse-scoped call (``container_key`` set) explains as the
+    pooled ``docker exec`` form; a keyless call stays transient
+    ``docker run --rm``."""
     strat = DockerStrategy()
-    keyed = strat.explain(["echo", "hi"], config=SandboxConfig(container_key="shared"))
-    assert "oc-sandbox-shared" in keyed
+    keyed = strat.explain(
+        ["echo", "hi"], config=SandboxConfig(container_key="shared")
+    )
+    assert keyed[:3] == ["docker", "exec", "-i"]
+    assert any(tok.startswith("oc-pool-shared-") for tok in keyed)
+    assert keyed[-2:] == ["echo", "hi"]
     plain = strat.explain(["echo", "hi"], config=SandboxConfig())
+    assert plain[:2] == ["docker", "run"]
     assert "oc-sandbox-explain" in plain
 
 

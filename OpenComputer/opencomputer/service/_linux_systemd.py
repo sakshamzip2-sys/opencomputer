@@ -12,13 +12,13 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import ClassVar
+from typing import Final
 
 from . import _common
 from ._naming import _CANONICAL_LABEL, service_label
 from .base import InstallResult, StatusResult, UninstallResult
 
-NAME: ClassVar[str] = "systemd"
+NAME: Final[str] = "systemd"
 _LEGACY_UNIT_FILENAME = "opencomputer.service"
 _TEMPLATE = (Path(__file__).parent / "templates" / _LEGACY_UNIT_FILENAME).read_text()
 
@@ -130,9 +130,9 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
     )
 
 
-def uninstall() -> UninstallResult:
-    path = _user_unit_path()
-    unit = _unit_filename()
+def uninstall(*, profile: str) -> UninstallResult:
+    path = _user_unit_path(profile)
+    unit = _unit_filename(profile)
     if not path.exists():
         return UninstallResult(
             backend=NAME, file_removed=False, config_path=None, notes=[],

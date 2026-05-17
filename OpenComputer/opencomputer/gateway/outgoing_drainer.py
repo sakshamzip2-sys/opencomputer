@@ -132,16 +132,8 @@ class OutgoingDrainer:
                     msg.id, f"no live adapter for platform {msg.platform!r}",
                 )
                 continue
-            # Wave 6.E.6 — Hermes parity. Long notification bodies
-            # (kanban completion summaries, build-log dumps) get
-            # platform-truncated so they don't exceed Telegram /
-            # Discord / Matrix message-length caps. The truncate_smart
-            # helper preserves markdown code-fence boundaries.
             body = msg.body
             cap = getattr(adapter, "max_message_length", 0)
-            if cap and len(body) > cap:
-                from opencomputer.gateway._truncate import truncate_smart
-                body = truncate_smart(body, max_len=cap)
             # Phase 3 (2026-05-06) — MESSAGE_SENDING fire-and-forget hook.
             # Plugins observe outgoing traffic; "skip" decision drops without
             # sending; "rewrite" replaces the body via modified_message.
@@ -177,21 +169,41 @@ class OutgoingDrainer:
                     "MESSAGE_SENDING hook raised, ignoring: %r", _e
                 )
 
-            try:
-                result = await adapter.send(msg.chat_id, body)
-            except Exception as e:  # noqa: BLE001 — capture for the user
-                logger.warning(
-                    "outgoing drainer: send failed for %s — %s", msg.id, e,
-                )
-                self.queue.mark_failed(msg.id, f"{type(e).__name__}: {e}")
-                continue
+            # M3 #3 fix — chunk-and-send instead of truncate. A body
+            # over the adapter's cap (kanban summaries, build-log dumps)
+            # used to be cut by ``truncate_smart`` + ``…[truncated]``,
+            # silently dropping content. Now it is split into ordered
+            # ``(i/N)``-marked messages so nothing is lost. Chunks for
+            # one queue row send sequentially → per-chat order preserved.
+            if cap and len(body) > cap:
+                from opencomputer.gateway.reply_chunker import chunk_text
 
-            success = getattr(result, "success", True)
-            if success:
+                parts = chunk_text(body, cap=cap)
+            else:
+                parts = [body]
+
+            send_failed: str | None = None
+            for part in parts:
+                try:
+                    result = await adapter.send(msg.chat_id, part)
+                except Exception as e:  # noqa: BLE001 — capture for the user
+                    logger.warning(
+                        "outgoing drainer: send failed for %s — %s", msg.id, e,
+                    )
+                    send_failed = f"{type(e).__name__}: {e}"
+                    break
+                if not getattr(result, "success", True):
+                    send_failed = (
+                        getattr(result, "error", None)
+                        or "adapter returned success=False"
+                    )
+                    break
+
+            if send_failed is None:
                 self.queue.mark_sent(msg.id)
             else:
-                err = getattr(result, "error", None) or "adapter returned success=False"
-                self.queue.mark_failed(msg.id, str(err))
+                self.queue.mark_failed(msg.id, str(send_failed))
+                continue
 
             # Phase 3 — MESSAGE_SENT fire-and-forget hook (post-send observability).
             try:

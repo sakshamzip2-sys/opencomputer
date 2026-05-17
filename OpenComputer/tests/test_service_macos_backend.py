@@ -82,9 +82,54 @@ def test_uninstall_removes_plist(
     install_result = _macos_launchd.install(profile="default", extra_args="")
     assert install_result.config_path.exists()
 
-    uninstall_result = _macos_launchd.uninstall()
+    uninstall_result = _macos_launchd.uninstall(profile="default")
     assert uninstall_result.file_removed is True
     assert not install_result.config_path.exists()
+
+
+def test_uninstall_targets_named_profile_plist_not_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``uninstall(profile=...)`` must remove the GIVEN profile's plist,
+    not the default one. A named profile gets a sha256-suffixed label
+    (``com.opencomputer.gateway.<hash>``) distinct from the default
+    ``com.opencomputer.gateway``. Pre-fix, ``uninstall`` took no args
+    and only ever resolved the default plist — uninstalling a named
+    profile silently removed the wrong (or no) file."""
+    from opencomputer.service import _macos_launchd
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(_macos_launchd, "_resolve_executable", lambda: "/usr/local/bin/oc")
+    monkeypatch.setattr(_macos_launchd, "_uid", lambda: 501)
+    booted_out: list[str] = []
+    monkeypatch.setattr(
+        _macos_launchd, "_launchctl",
+        lambda *a: (booted_out.append(a[1]) if a and a[0] == "bootout" else None)
+        or (0, "", ""),
+    )
+
+    # Install both the default and a named-profile service.
+    default_result = _macos_launchd.install(profile="default", extra_args="")
+    named_result = _macos_launchd.install(profile="coder", extra_args="")
+    # Named-profile plist must be a distinct path from the default.
+    assert named_result.config_path != default_result.config_path
+    assert default_result.config_path.exists()
+    assert named_result.config_path.exists()
+
+    uninstall_result = _macos_launchd.uninstall(profile="coder")
+
+    # Only the named-profile plist was removed; the default survives.
+    assert uninstall_result.file_removed is True
+    assert uninstall_result.config_path == named_result.config_path
+    assert not named_result.config_path.exists()
+    assert default_result.config_path.exists()
+    # bootout targeted the named-profile label.
+    coder_label = _macos_launchd._label("coder")
+    assert any(coder_label in tgt for tgt in booted_out)
 
 
 def test_supported_returns_true_only_on_darwin(monkeypatch: pytest.MonkeyPatch) -> None:

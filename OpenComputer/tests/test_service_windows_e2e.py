@@ -156,7 +156,7 @@ def test_real_install_uninstall_via_backend(
         assert status.file_present is True
         assert status.enabled is True
 
-        uninstall_result = _windows_schtasks.uninstall()
+        uninstall_result = _windows_schtasks.uninstall(profile="default")
         assert uninstall_result.file_removed is True
     finally:
         _delete_task()

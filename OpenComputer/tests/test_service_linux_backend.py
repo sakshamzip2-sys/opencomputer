@@ -59,9 +59,57 @@ def test_uninstall_removes_unit_file(
         sysctl.return_value = (0, "", "")
         result_install = _linux_systemd.install(profile="default", extra_args="gateway")
         assert result_install.config_path.exists()
-        result_uninstall = _linux_systemd.uninstall()
+        result_uninstall = _linux_systemd.uninstall(profile="default")
         assert not result_install.config_path.exists()
         assert result_uninstall.file_removed is True
+
+
+def test_uninstall_targets_named_profile_unit_not_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``uninstall(profile=...)`` must remove + stop/disable the GIVEN
+    profile's unit, not the default one. A named profile gets a
+    sha256-suffixed unit filename (``opencomputer-<hash>.service``)
+    distinct from the default ``opencomputer.service``. Pre-fix,
+    ``uninstall`` took no args and only ever resolved the default
+    unit."""
+    from opencomputer.service import _linux_systemd
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(
+        _linux_systemd, "_resolve_executable",
+        lambda: "/usr/local/bin/oc",
+    )
+
+    systemctl_calls: list[tuple[str, ...]] = []
+
+    def fake_systemctl(*args: str) -> tuple[int, str, str]:
+        systemctl_calls.append(args)
+        return (0, "", "")
+
+    monkeypatch.setattr(_linux_systemd, "_systemctl", fake_systemctl)
+
+    default_result = _linux_systemd.install(profile="default", extra_args="gateway")
+    named_result = _linux_systemd.install(profile="coder", extra_args="gateway")
+    assert named_result.config_path != default_result.config_path
+    assert default_result.config_path.exists()
+    assert named_result.config_path.exists()
+
+    result_uninstall = _linux_systemd.uninstall(profile="coder")
+
+    assert result_uninstall.file_removed is True
+    assert result_uninstall.config_path == named_result.config_path
+    assert not named_result.config_path.exists()
+    assert default_result.config_path.exists()
+    # stop / disable targeted the named-profile unit filename.
+    coder_unit = _linux_systemd._unit_filename("coder")
+    assert ("stop", coder_unit) in systemctl_calls
+    assert ("disable", coder_unit) in systemctl_calls
 
 
 def test_supported_returns_true_only_on_linux(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,8 +6,10 @@ edges via deterministic rules. Importer is idempotent: running
 :meth:`MotifImporter.import_recent` twice over the same motif set
 produces the same graph state, because every node is written via
 ``UserModelStore.upsert_node`` (find-by-``(kind, value)``) and every
-edge is freshly inserted with a UUID — duplicate edges are cheap and
-harmless until Phase 3.D's drift pass folds them.
+edge carries a deterministic id (:func:`_deterministic_edge_id`), so a
+re-imported motif REPLACEs its edge instead of appending a duplicate.
+(Pre-M2 each edge got a fresh ``uuid4`` and re-imports accumulated
+unboundedly — see ``docs/refs/oc-user-model-writers.md`` §4.)
 
 ``CONTRADICTS`` edges are **not** auto-emitted here. Drift detection
 (Phase 3.D) and explicit user statements (future tool) own that edge
@@ -104,8 +106,9 @@ class MotifImporter:
 
         Returns ``(nodes_added, edges_added)``. Node counts reflect
         *new* inserts only — re-asserted existing nodes count toward
-        ``last_seen_at`` bumps but not the total. Edges count every
-        insertion; duplicate-edge dedup is Phase 3.D's concern.
+        ``last_seen_at`` bumps but not the total. ``edges_added`` counts
+        every ``insert_edge`` call; deterministic edge ids mean a
+        re-imported motif REPLACEs its edges rather than duplicating.
 
         Per-motif errors are logged and skipped — one malformed payload
         should not block a batch import.

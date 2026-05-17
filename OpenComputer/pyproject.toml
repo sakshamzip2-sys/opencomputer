@@ -213,6 +213,21 @@ browser = [
 # E2B_API_KEY (free Hobby tier at https://e2b.dev/dashboard). See
 # opencomputer/sandbox/e2b.py and docs/refs/e2b/2026-05-16-sdk-survey.md.
 e2b = ["e2b>=2.21,<3"]
+# Optional: Daytona cloud sandbox backend (Milestone 2.1 — sandbox-provider-
+# breadth). A second cloud provider behind the same per-tool-call resolver
+# as [e2b]. Install with `pip install opencomputer[daytona]`, then set
+# DAYTONA_API_KEY (https://app.daytona.io/dashboard — $200 free credits at
+# signup, billed per second after). See opencomputer/sandbox/daytona.py and
+# docs/sandbox/daytona.md.
+daytona = ["daytona>=0.176,<0.200"]
+# Optional: Modal cloud sandbox backend (Milestone 2.5 — sandbox-provider-
+# breadth). A third cloud provider behind the same per-tool-call resolver
+# as [e2b] / [daytona]. Install with `pip install opencomputer[modal]`,
+# then set MODAL_TOKEN_ID + MODAL_TOKEN_SECRET (or run `modal token set`
+# to write ~/.modal.toml). Modal is meaningfully cheaper per-vCPU than
+# e2b/daytona and captures stdout/stderr separately (no `2>&1` wrap). See
+# opencomputer/sandbox/modal.py and docs/sandbox/modal.md.
+modal = ["modal>=1.4,<2"]
 # Optional: NeuTTS local neural text-to-speech (Milestone 4). NeuTTS is an
 # on-device, voice-cloning TTS model — the VoiceSynthesizeLocal tool
 # synthesizes speech with no API call and no per-call cost. Heavy: it pulls

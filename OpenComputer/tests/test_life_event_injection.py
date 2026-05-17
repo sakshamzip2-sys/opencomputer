@@ -739,41 +739,63 @@ def test_register_helper_is_idempotent() -> None:
         engine.unregister("life_event_hint")
 
 
-# ── 4f: each surface's setup path registers the provider ─────────────
+# ── 4f: each surface's setup path registers ALL FOUR providers ───────
 #
-# Multi-surface life-event teeth: CLI, wire, gateway and webui each call
-# ``register_life_event_injection_provider`` during their boot, carrying
-# their own surface label. These tests drive the *real* surface setup
-# function far enough to hit that registration, then assert the live
-# injection engine holds a ``life_event_hint`` provider with the right
+# Multi-surface injection providers: CLI, wire, gateway and webui each
+# call ``register_default_injection_providers`` during their boot,
+# carrying their own surface label. That one helper registers all four
+# built-in injection providers — ``thinking_tags_fallback``,
+# ``path_glob_rules``, ``handoff_inbox`` and ``life_event_hint``. These
+# tests drive the *real* surface setup function far enough to hit that
+# call, then assert the live injection engine holds every one of the
+# four providers, and that ``life_event_hint`` carries the right
 # ``_surface``. The registration genuinely runs — nothing here asserts
 # source text.
+
+# The four built-in injection provider ids ``register_default_injection_providers``
+# must register on every surface.
+_ALL_INJECTION_PROVIDER_IDS = (
+    "thinking_tags_fallback",
+    "path_glob_rules",
+    "handoff_inbox",
+    "life_event_hint",
+)
 
 
 class _StopAfterRegistrationError(Exception):
     """Sentinel raised by a mock placed on the call *immediately after*
-    a surface's life-event registration, so the surface's setup unwinds
-    the moment registration has run (avoids booting a forever-loop)."""
+    a surface's injection-provider registration, so the surface's setup
+    unwinds the moment registration has run (avoids booting a
+    forever-loop)."""
 
 
 @pytest.fixture
 def _clean_life_event_provider():
-    """Ensure the injection engine has no stale ``life_event_hint``
-    provider before the test and is left clean afterwards."""
+    """Ensure the injection engine has no stale built-in injection
+    providers before the test and is left clean afterwards.
+
+    Scrubs all four ids ``register_default_injection_providers``
+    registers — not just ``life_event_hint`` — so a registration from
+    one test never leaks into the next (``InjectionEngine.register``
+    raises ``ValueError`` on a duplicate ``provider_id``)."""
     from opencomputer.agent.injection import engine
 
-    engine.unregister("life_event_hint")
+    for _pid in _ALL_INJECTION_PROVIDER_IDS:
+        engine.unregister(_pid)
     try:
         yield engine
     finally:
-        engine.unregister("life_event_hint")
+        for _pid in _ALL_INJECTION_PROVIDER_IDS:
+            engine.unregister(_pid)
 
 
 def test_cli_chat_surface_registers_life_event_provider(
     _clean_life_event_provider, monkeypatch
 ) -> None:
-    """``_run_chat_session`` (the ``oc chat`` REPL) registers the
-    life-event provider with ``surface="cli"``."""
+    """``_run_chat_session`` (the ``oc chat`` REPL) calls
+    ``register_default_injection_providers("cli")`` — so all four
+    built-in injection providers register and ``life_event_hint``
+    carries ``surface="cli"``."""
     from unittest.mock import MagicMock
 
     from opencomputer import cli
@@ -813,6 +835,10 @@ def test_cli_chat_surface_registers_life_event_provider(
     with pytest.raises(_StopAfterRegistrationError):
         cli._run_chat_session(resume="", plan=False, no_compact=False)
 
+    # All four built-in injection providers are registered for the CLI
+    # surface — the combined helper is wired in.
+    for pid in _ALL_INJECTION_PROVIDER_IDS:
+        assert pid in engine._providers, f"{pid} not registered for cli"
     prov = engine._providers.get("life_event_hint")
     assert isinstance(prov, LifeEventInjectionProvider)
     assert prov._surface == "cli"
@@ -821,8 +847,10 @@ def test_cli_chat_surface_registers_life_event_provider(
 def test_wire_surface_registers_life_event_provider(
     _clean_life_event_provider, monkeypatch
 ) -> None:
-    """The ``oc wire`` command registers the life-event provider with
-    ``surface="wire"``."""
+    """The ``oc wire`` command calls
+    ``register_default_injection_providers("wire")`` — so all four
+    built-in injection providers register and ``life_event_hint``
+    carries ``surface="wire"``."""
     from unittest.mock import MagicMock
 
     from opencomputer import cli
@@ -860,6 +888,10 @@ def test_wire_surface_registers_life_event_provider(
     with pytest.raises(_StopAfterRegistrationError):
         cli.wire(host="127.0.0.1", port=18789, detach=False)
 
+    # All four built-in injection providers are registered for the wire
+    # surface — the combined helper is wired in.
+    for pid in _ALL_INJECTION_PROVIDER_IDS:
+        assert pid in engine._providers, f"{pid} not registered for wire"
     prov = engine._providers.get("life_event_hint")
     assert isinstance(prov, LifeEventInjectionProvider)
     assert prov._surface == "wire"
@@ -868,8 +900,10 @@ def test_wire_surface_registers_life_event_provider(
 def test_gateway_foreground_registers_life_event_provider(
     _clean_life_event_provider, monkeypatch
 ) -> None:
-    """``_run_foreground`` (bare ``oc gateway``) registers the life-event
-    provider with ``surface="gateway"``."""
+    """``_run_foreground`` (bare ``oc gateway``) calls
+    ``register_default_injection_providers("gateway")`` — so all four
+    built-in injection providers register and ``life_event_hint``
+    carries ``surface="gateway"``."""
     from unittest.mock import MagicMock
 
     from opencomputer import cli, cli_gateway
@@ -914,6 +948,10 @@ def test_gateway_foreground_registers_life_event_provider(
     with pytest.raises(_StopAfterRegistrationError):
         cli_gateway._run_foreground()
 
+    # All four built-in injection providers are registered for the
+    # gateway surface — the combined helper is wired in.
+    for pid in _ALL_INJECTION_PROVIDER_IDS:
+        assert pid in engine._providers, f"{pid} not registered for gateway"
     prov = engine._providers.get("life_event_hint")
     assert isinstance(prov, LifeEventInjectionProvider)
     assert prov._surface == "gateway"
@@ -923,8 +961,10 @@ async def test_webui_completion_registers_life_event_provider(
     _clean_life_event_provider, monkeypatch
 ) -> None:
     """``_run_agent_completion`` (the ``oc webui`` / ``oc workspace``
-    OpenAI-compat route) registers the life-event provider with
-    ``surface="webui"``."""
+    OpenAI-compat route) calls
+    ``register_default_injection_providers("webui")`` — so all four
+    built-in injection providers register and ``life_event_hint``
+    carries ``surface="webui"``."""
     from unittest.mock import AsyncMock, MagicMock
 
     from opencomputer.dashboard.routes import openai_compat
@@ -949,6 +989,10 @@ async def test_webui_completion_registers_life_event_provider(
         oc_session_id=None,
     )
 
+    # All four built-in injection providers are registered for the webui
+    # surface — the combined helper is wired in.
+    for pid in _ALL_INJECTION_PROVIDER_IDS:
+        assert pid in engine._providers, f"{pid} not registered for webui"
     prov = engine._providers.get("life_event_hint")
     assert isinstance(prov, LifeEventInjectionProvider)
     assert prov._surface == "webui"

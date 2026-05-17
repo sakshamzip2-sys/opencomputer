@@ -679,6 +679,66 @@ class UserModelStore:
             survive *= 1.0 - sr
         return 1.0 - survive
 
+    def node_drift_scores(
+        self, *, max_edges: int = 20_000
+    ) -> dict[str, float]:
+        """Bulk variant of :meth:`node_drift_score` — one query for all.
+
+        Returns ``{node_id: drift penalty}`` for every node with at least
+        one incoming ``contradicts`` edge. The per-node method is one
+        query each; looping it over the prompt's candidate set
+        re-introduces exactly the N-per-node hot-path cost that
+        :meth:`node_recency_scores` exists to remove — so callers on the
+        per-session path (``build_user_facts`` and the awareness CLI)
+        use this single-pass form instead.
+
+        Same ``[0, 1]`` formula as :meth:`node_drift_score`
+        (``1 - Π(1 - source_reliability)``), computed Python-side from one
+        ``contradicts``-edge fetch. Carries the same ``max_edges`` cost
+        guard as :meth:`node_recency_scores`: returns ``{}`` on an
+        un-collapsed graph. Nodes nothing contradicts are absent.
+        """
+        if self.count_edges() > max_edges:
+            return {}
+        sql = (
+            "SELECT to_node, source_reliability FROM edges "
+            "WHERE kind = 'contradicts'"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        survive: dict[str, float] = {}
+        for to_node, sr in rows:
+            clamped = max(0.0, min(1.0, float(sr)))
+            survive[to_node] = survive.get(to_node, 1.0) * (1.0 - clamped)
+        return {nid: 1.0 - s for nid, s in survive.items()}
+
+    def get_nodes(self, node_ids: Sequence[str]) -> dict[str, Node]:
+        """Bulk :meth:`get_node` — fetch many nodes in one query.
+
+        Returns ``{node_id: Node}`` for the ids that exist; unknown ids
+        are simply absent. Duplicate input ids are de-duplicated. Avoids
+        the N-connections / N-queries cost of calling :meth:`get_node` in
+        a loop (e.g. ``oc awareness explain`` rendering incident edges).
+        """
+        unique = list(dict.fromkeys(node_ids))
+        if not unique:
+            return {}
+        out: dict[str, Node] = {}
+        with self._connect() as conn:
+            # Chunk under SQLite's bound-parameter limit (999 on older
+            # builds). ``placeholders`` is only ``?`` + commas — not input.
+            for i in range(0, len(unique), 900):
+                chunk = unique[i : i + 900]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT * FROM nodes WHERE node_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    node = self._row_to_node(r)
+                    out[node.node_id] = node
+        return out
+
     # ─── helpers ──────────────────────────────────────────────────────
 
     @staticmethod

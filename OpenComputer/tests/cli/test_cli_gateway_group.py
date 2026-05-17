@@ -112,6 +112,45 @@ def test_install_calls_backend(monkeypatch):
     assert install_called["extra_args"] == "gateway"
 
 
+def test_uninstall_calls_backend_uninstall_with_profile_kwarg(monkeypatch):
+    """``ServiceBackend.uninstall`` is profile-aware (mirrors ``install``):
+    it takes ``*, profile``. ``oc gateway uninstall --profile X`` must
+    forward ``profile=X`` so the backend removes X's service unit, not
+    the default profile's.
+
+    This FakeBackend mirrors the real Protocol: ``uninstall`` accepts a
+    keyword-only ``profile``. The pre-fix call ``backend.uninstall()``
+    (no args) cannot pass the user's chosen profile through.
+    """
+    from opencomputer.service.base import UninstallResult
+
+    uninstall_called = {}
+
+    class FakeBackend:
+        def uninstall(self, *, profile: str) -> UninstallResult:
+            uninstall_called["profile"] = profile
+            return UninstallResult(
+                backend="systemd-user",
+                file_removed=True,
+                config_path=Path("/tmp/foo.service"),
+                notes=[],
+            )
+
+    monkeypatch.setattr(
+        "opencomputer.service.factory.get_backend", lambda: FakeBackend()
+    )
+    result = runner.invoke(gateway_app, ["uninstall", "--profile", "work"])
+    assert result.exit_code == 0, (
+        f"oc gateway uninstall failed (exit {result.exit_code}); "
+        f"output={result.output!r}"
+    )
+    # The user's --profile must reach the backend, not the default.
+    assert uninstall_called.get("profile") == "work"
+    assert result.exception is None or not isinstance(
+        result.exception, TypeError
+    ), f"uninstall raised TypeError: {result.exception!r}"
+
+
 def test_start_calls_backend_start(monkeypatch):
     class FakeBackend:
         def start(self):

@@ -54,6 +54,7 @@ import time
 from opencomputer.sandbox._common import (
     TIMEOUT_EXIT_CODE,
     TIMEOUT_STDERR,
+    coerce_exit_code,
     decode_stream,
     filtered_env,
 )
@@ -235,7 +236,7 @@ class E2BSandboxStrategy(SandboxStrategy):
                 # synthesize the result so failing commands behave like
                 # they do under docker / none (a result, not a raise).
                 return SandboxResult(
-                    exit_code=_coerce_exit_code(getattr(exc, "exit_code", None)),
+                    exit_code=coerce_exit_code(getattr(exc, "exit_code", None)),
                     stdout=decode_stream(getattr(exc, "stdout", "")),
                     stderr=decode_stream(getattr(exc, "stderr", "")),
                     duration_seconds=time.monotonic() - start,
@@ -243,7 +244,7 @@ class E2BSandboxStrategy(SandboxStrategy):
                     strategy_name=self.name,
                 )
             return SandboxResult(
-                exit_code=_coerce_exit_code(getattr(result, "exit_code", 0)),
+                exit_code=coerce_exit_code(getattr(result, "exit_code", 0)),
                 stdout=decode_stream(getattr(result, "stdout", "")),
                 stderr=decode_stream(getattr(result, "stderr", "")),
                 duration_seconds=time.monotonic() - start,
@@ -311,20 +312,3 @@ def _resolve_command_exit_exception() -> type[BaseException]:
             "non-zero-exit handling"
         )
         return Exception
-
-
-def _coerce_exit_code(value: object) -> int:
-    """Best-effort coerce an E2B exit code to ``int``.
-
-    The SDK returns an ``int``; this guards against a ``None`` (defensive
-    — e.g. a partial ``CommandExitException``) by mapping it to ``-1``,
-    the same shape the host-process strategies use for an unknown code.
-    """
-    if isinstance(value, int):
-        return value
-    if value is None:
-        return -1
-    try:
-        return int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return -1

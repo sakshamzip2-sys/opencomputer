@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+# ``reset_policy`` is stdlib-only (no ``opencomputer`` imports) so this
+# top-level import introduces no circular dependency — ``config`` and
+# ``gateway.reset_policy`` share the ``ResetMode`` literal as the single
+# source of truth for ``GatewayConfig.reset_mode``.
+from opencomputer.gateway.reset_policy import ResetMode
+
 # Note: AuxiliaryConfig + AuxSlotConfig are defined in this module (see
 # below) — single source of truth. ``opencomputer.agent.auxiliary_client``
 # re-exports them so legacy imports keep working without circular-import
@@ -1139,6 +1145,16 @@ class GatewayConfig:
 
     photo_burst_window: float = 0.8
 
+    #: M3 #2 fix (gateway-vs-CLI parity, 2026-05-17) — tool-allowlist
+    #: policy for gateway-spawned loops. ``"profile"`` (default) derives
+    #: the allowlist from the profile's ``enabled_plugins`` (``"*"`` →
+    #: no filter); ``"wildcard"`` forces no filter so the gateway sees
+    #: the full tool registry exactly like the CLI, which never sets an
+    #: allowlist. Set ``gateway.tool_filter: wildcard`` when a gateway
+    #: session should be as tool-capable as ``oc chat``. Unknown values
+    #: fall back to ``"profile"`` at the agent_loop_factory call site.
+    tool_filter: str = "profile"
+
     # ─── Startup ping (the OpenClaw "back online" magic message) ──────
     # Opt-in. When the gateway finishes connecting all adapters, send a
     # one-off message to each (platform, chat_id) in this tuple. Lets a
@@ -1228,7 +1244,11 @@ class GatewayConfig:
     #     reset_by_platform:
     #       telegram: { mode: idle, idle_minutes: 240 }
     #       discord:  { mode: idle, idle_minutes: 60 }
-    reset_mode: str = "both"
+    #
+    # ``reset_mode`` is the ``ResetMode`` literal — the same alias the
+    # ``ResetPolicyChecker`` consumes. ``reset_policy`` is stdlib-only
+    # so importing it here introduces no circular dependency.
+    reset_mode: ResetMode = "both"
     reset_daily_at_hour: int = 4
     reset_idle_minutes: int = 1440
     reset_by_platform: dict = field(default_factory=dict)
@@ -1558,11 +1578,19 @@ class RoutingRule:
 
     ``profile`` is optional cross-profile re-bind (M10.3 — not used by
     M10.1's schema layer; recorded so the rule round-trips through YAML).
+
+    ``merge_with_builder`` (M3 gateway-vs-CLI parity, 2026-05-17): when
+    ``true``, the matched template's system prompt is *appended to* the
+    normal PromptBuilder output (skills / memory / SOUL stay injected)
+    rather than *replacing* it. Default ``false`` preserves the
+    historical replace-everything behaviour, so existing routing rules
+    are unaffected.
     """
 
     match: RoutingMatch = field(default_factory=RoutingMatch)
     agent: str = ""
     profile: str = ""
+    merge_with_builder: bool = False
 
     def __post_init__(self) -> None:
         if not self.agent:
@@ -1728,6 +1756,23 @@ class Config:
         compare=False,
         hash=False,
     )
+    #: Gateway display config (2026-05-17, M1 gateway-vs-CLI parity).
+    #: The top-level ``display:`` YAML section — a free-form subtree
+    #: read by :func:`opencomputer.gateway.runtime_footer.resolve_footer_config`
+    #: and :func:`opencomputer.gateway.display_config.resolve_display_setting`
+    #: (``display.runtime_footer.*``, ``display.platforms.*``,
+    #: ``display.busy_ack_enabled``, …). Kept as a plain dict — same
+    #: pattern as ``GatewayConfig.reset_by_platform`` — because the
+    #: subtree is per-platform/free-form and the gateway resolvers
+    #: already consume it dict-shaped. Before this field existed the
+    #: ``display:`` section was silently dropped by ``load_config`` and
+    #: the gateway runtime-footer knob was dead. ``Dispatch`` receives
+    #: this dict via ``Gateway`` so the footer can be resolved per turn.
+    display: dict = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
     #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
     #: applies when the active provider is OpenRouter; ignored otherwise.
     provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)
@@ -1850,17 +1895,21 @@ def load_config_for_profile(profile_home: Path) -> Config:
     ``SessionConfig.db_path``, ``MemoryConfig.declarative_path``,
     etc. capture ``profile_home`` rather than the process default.
 
-    Reads ``profile_home/config.yaml`` if present; falls back to
-    defaults from environment + bundled wizard outputs (matches
-    ``default_config()`` semantics under a different home).
+    Reads ``profile_home/config.yaml`` if present (via
+    :func:`opencomputer.agent.config_store.load_config`, which merges
+    the YAML overrides onto the defaults). A missing or empty
+    config.yaml falls back to defaults.
 
     The function does NOT mutate process state — ``set_profile`` is
     a context manager that resets on exit.
     """
+    # Function-level import: config_store imports from this module, so a
+    # module-level import here would create a circular import.
+    from opencomputer.agent.config_store import load_config
     from plugin_sdk.profile_context import set_profile
 
     with set_profile(profile_home):
-        return default_config()
+        return load_config()
 
 
 __all__ = [
