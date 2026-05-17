@@ -28,6 +28,7 @@ from opencomputer.cli_ui.slash import (
     is_slash_command,
     resolve_command,
 )
+from plugin_sdk.runtime_context import RuntimeContext
 
 
 @dataclass
@@ -1790,3 +1791,32 @@ def dispatch_slash(
         return SlashResult(handled=True)
     handler = _HANDLERS[cmd.name]
     return handler(ctx, args)
+
+
+def dispatch_agent_slash_to_console(
+    text: str, runtime: RuntimeContext, console: Console
+) -> SlashResult:
+    """Dispatch ``text`` via the agent slash registry and render the result.
+
+    This is the tested core of the ``oc chat`` REPL fallthrough — the
+    ``on_unknown`` hook ``dispatch_slash`` calls for a slash absent from
+    the cli_ui registry. It dispatches through the agent ``SlashCommand``
+    registry via ``try_dispatch_agent_slash`` (so ``/copy``, ``/rollback``,
+    ``/background``, … reach `oc chat`), prints the command's output —
+    or an "unknown command" line when no agent command matches either —
+    and returns a handled :class:`SlashResult`.
+
+    ``markup=False`` on the output print: an agent command's text is
+    plain (it can carry a filename or exception message), so a stray
+    ``[`` must not be parsed as Rich markup.
+    """
+    from opencomputer.agent.slash_commands import try_dispatch_agent_slash
+
+    result = try_dispatch_agent_slash(text, runtime)
+    if result is None:
+        parts = text.lstrip("/").split(maxsplit=1)
+        name = parts[0] if parts else ""
+        console.print(f"[red]unknown command:[/red] /{name}  (try /help)")
+    elif result.output:
+        console.print(result.output, markup=False)
+    return SlashResult(handled=True)

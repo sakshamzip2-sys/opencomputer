@@ -3053,13 +3053,14 @@ def _run_chat_session(
                 # chat, not just on gateway/wire/ACP. Dispatched directly
                 # via the slash dispatcher — NOT run_conversation — so
                 # there is no persist / end-session side effect.
-                # ``session_id`` is nonlocal — read live.
+                # ``session_id`` is nonlocal — read live so a post-/resume
+                # swap targets the right session. The dispatch + render
+                # logic is ``dispatch_agent_slash_to_console`` (unit-tested).
                 from dataclasses import replace as _replace
 
-                from opencomputer.agent.slash_commands import (
-                    try_dispatch_agent_slash,
+                from opencomputer.cli_ui.slash_handlers import (
+                    dispatch_agent_slash_to_console,
                 )
-                from opencomputer.cli_ui.slash import SlashResult
 
                 rt = _replace(
                     runtime,
@@ -3069,16 +3070,7 @@ def _run_chat_session(
                         "session_db": loop.db,
                     },
                 )
-                res = try_dispatch_agent_slash(text, rt)
-                if res is None:
-                    parts = text.lstrip("/").split(maxsplit=1)
-                    name = parts[0] if parts else ""
-                    console.print(
-                        f"[red]unknown command:[/red] /{name}  (try /help)"
-                    )
-                elif res.output:
-                    console.print(res.output, markup=False)
-                return SlashResult(handled=True)
+                return dispatch_agent_slash_to_console(text, rt, console)
 
             slash_ctx = SlashContext(
                 console=console,
