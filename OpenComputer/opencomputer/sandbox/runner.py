@@ -31,9 +31,8 @@ from opencomputer.sandbox.modal import ModalSandboxStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
 from opencomputer.sandbox.policy import (
     SandboxPolicy,
-    SandboxScope,
     SandboxScopeContext,
-    scope_key,
+    pool_key_for,
 )
 from opencomputer.sandbox.ssh import SSHSandboxStrategy
 from plugin_sdk.sandbox import (
@@ -103,17 +102,13 @@ async def run_sandboxed(
     cfg = config or SandboxConfig()
 
     if policy is not None and cfg.container_key is None:
-        # Only a *poolable* scope's key drives container reuse. ``tool``
-        # produces a fresh per-call uuid and ``none`` an empty key —
-        # threading either as ``container_key`` would make the Docker
-        # strategy pool a never-reused container per call. ``tool`` /
-        # ``none`` keep the transient path (``container_key`` stays None).
-        if policy.scope in (
-            SandboxScope.SESSION,
-            SandboxScope.AGENT,
-            SandboxScope.SHARED,
-        ):
-            cfg = replace(cfg, container_key=scope_key(policy, scope_ctx))
+        # ``pool_key_for`` yields a reuse key only for a poolable scope+id
+        # (shared, or session / agent WITH the keying id) — and NEVER a
+        # per-call uuid. ``None`` (tool / none scope, or session / agent
+        # with the id absent) keeps the transient container path.
+        pool_key = pool_key_for(policy, scope_ctx)
+        if pool_key:
+            cfg = replace(cfg, container_key=pool_key)
 
     if cfg.strategy == "auto":
         try:

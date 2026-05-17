@@ -202,3 +202,51 @@ def test_docker_run_pooled_execs_into_acquired_container() -> None:
     assert argv[:2] == ("docker", "exec")
     assert "oc-pool-session-x-abc123def456" in argv
     assert argv[-2:] == ("echo", "hi")
+
+
+# --- T3.3: BashTool threads the resolved container key ---------------------
+
+
+def test_bash_threads_resolved_container_key_into_sandbox_config() -> None:
+    """``BashTool._execute_in_sandbox`` reads ``runtime.custom``'s
+    ``sandbox_container_key`` and threads it onto the ``SandboxConfig``
+    the backend receives — the live loop -> runtime -> bash path."""
+    from opencomputer.tools.bash import BashTool
+    from plugin_sdk.core import ToolCall
+    from plugin_sdk.runtime_context import RuntimeContext
+    from plugin_sdk.sandbox import SandboxResult
+
+    captured: dict[str, object] = {}
+
+    class _RecordingStrategy:
+        name = "recording"
+
+        async def run(self, argv, *, config, stdin=None, cwd=None):
+            del stdin, cwd  # ABC signature; unused by this recording double
+            captured["container_key"] = config.container_key
+            return SandboxResult(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                duration_seconds=0.0,
+                wrapped_command=list(argv),
+                strategy_name=self.name,
+            )
+
+    runtime = RuntimeContext()
+    runtime.custom["sandbox_container_key"] = "session-abc"
+    BashTool.set_runtime(runtime)
+    try:
+        result = asyncio.run(
+            BashTool()._execute_in_sandbox(
+                call=ToolCall(id="t1", name="Bash", arguments={}),
+                cmd="echo hi",
+                timeout=60,
+                strategy=_RecordingStrategy(),
+                warn_prefix="",
+            )
+        )
+    finally:
+        BashTool.set_runtime(RuntimeContext())  # reset the class-level runtime
+    assert result is not None and result.is_error is False
+    assert captured["container_key"] == "session-abc"
