@@ -72,6 +72,18 @@ def test_default_skin_provides_face_cycles():
         assert face.strip()
 
 
+def test_default_skin_ships_a_rich_face_pool():
+    """The default skin's spinner pools are wide enough to feel varied —
+    OC historically shipped only 3-4 per cycle; Hermes ships ~10-15."""
+    spec = load_skin("default")
+    assert len(spec.spinner_waiting_faces) >= 8
+    assert len(spec.spinner_thinking_faces) >= 8
+    assert len(spec.spinner_thinking_verbs) >= 8
+    # variety, not padding — no duplicate faces
+    assert len(set(spec.spinner_waiting_faces)) == len(spec.spinner_waiting_faces)
+    assert len(set(spec.spinner_thinking_faces)) == len(spec.spinner_thinking_faces)
+
+
 def test_all_nine_builtin_skins_have_faces():
     """Hermes v2 production-grade: every built-in defines both cycles."""
     names = list_builtin_names()

@@ -51,14 +51,26 @@ colors:
   dim:              "#6E7B8B"
 
 spinner:
+  # 2026-05-18 — widened the face/verb pools (were 3-4 each) toward
+  # Hermes's ~10-15 so the spinner feels varied across a long session.
   thinking_verbs:
     - thinking
     - pondering
     - musing
     - cogitating
+    - contemplating
+    - ruminating
+    - mulling
+    - deliberating
+    - reasoning
+    - reflecting
+    - considering
+    - percolating
   wings:
     - ["⟨✦", "✦⟩"]
     - ["⟨✿", "✿⟩"]
+    - ["⟨♡", "♡⟩"]
+    - ["⟨❀", "❀⟩"]
   # Hermes v2 D5 (2026-05-08): two distinct face cycles. waiting_faces
   # cycles while the API round-trip is in flight (no tokens yet);
   # thinking_faces cycles once the model starts emitting reasoning.
@@ -66,10 +78,24 @@ spinner:
     - "(⊙‿⊙)"
     - "(◔‿◔)"
     - "(◕‿◕)"
+    - "(・‿・)"
+    - "(◠‿◠)"
+    - "(ᵔ‿ᵔ)"
+    - "(◡‿◡)"
+    - "(˘‿˘)"
+    - "(°‿°)"
+    - "(◞‿◟)"
   thinking_faces:
     - "(◉‿◉)"
     - "(◓‿◒)"
     - "(◑‿◑)"
+    - "(◕ᴗ◕)"
+    - "(•ᴗ•)"
+    - "(◔ᴗ◔)"
+    - "(◍‿◍)"
+    - "(♡‿♡)"
+    - "(✧‿✧)"
+    - "(✦‿✦)"
 
 branding:
   agent_name: "OpenComputer"
