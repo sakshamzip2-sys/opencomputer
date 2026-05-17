@@ -464,29 +464,15 @@ class WireServer:
             )
         elif req.method == METHOD_SLASH_LIST:
             # 2026-05-07 (PR6): enumerate registered slash commands so
-            # the dashboard ChatPage and the (future) Ink TUI share a
-            # single source of truth for the slash palette.
-            try:
-                from opencomputer.agent.slash_commands import (
-                    get_registered_commands,
-                )
-
-                cmds = get_registered_commands()
-                payload = {
-                    "commands": [
-                        {
-                            "name": getattr(c, "name", str(c)),
-                            "description": getattr(c, "description", ""),
-                            "aliases": list(getattr(c, "aliases", [])),
-                        }
-                        for c in cmds
-                    ]
-                }
-                await self._send_response(ws, req.id, True, payload=payload)
-            except Exception as exc:  # noqa: BLE001
-                await self._send_response(
-                    ws, req.id, False, error=f"slash.list: {exc}"
-                )
+            # the dashboard ChatPage and the Ink TUI share a single
+            # source of truth for the slash palette. Deduped per command
+            # — see _collect_slash_commands.
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={"commands": self._collect_slash_commands()},
+            )
         elif req.method == METHOD_PERMISSION_RESPONSE:
             # M3.1 (2026-05-09) — wire client posts the user's
             # allow_once / allow_always / deny verdict in response to
@@ -1689,6 +1675,40 @@ class WireServer:
             }
             for cp in rows
         ]
+
+    @staticmethod
+    def _collect_slash_commands() -> list[dict[str, Any]]:
+        """Build the ``METHOD_SLASH_LIST`` payload — one entry per command.
+
+        The slash registry maps the canonical name AND every alias to the
+        *same* command instance, so ``get_registered_commands()`` yields
+        that instance once per alias — every copy carrying the canonical
+        ``.name``. Emitting them all put duplicate names on the wire,
+        which broke any client keying the palette by name (React
+        duplicate-key warnings corrupted the Ink TUI). Dedup by canonical
+        name; the aliases are preserved in each entry's ``aliases`` field.
+
+        Never raises — a registry failure degrades to ``[]``.
+        """
+        try:
+            from opencomputer.agent.slash_commands import get_registered_commands
+
+            cmds = get_registered_commands()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("slash.list: registry unavailable (%s) — empty", exc)
+            return []
+
+        seen: dict[str, dict[str, Any]] = {}
+        for c in cmds:
+            name = getattr(c, "name", None)
+            if not name or name in seen:
+                continue
+            seen[name] = {
+                "name": name,
+                "description": getattr(c, "description", ""),
+                "aliases": list(getattr(c, "aliases", [])),
+            }
+        return list(seen.values())
 
     @staticmethod
     def _collect_tools() -> list[dict[str, str]]:

@@ -138,7 +138,16 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
         sys(`connected to ${client.serverUrl} — ${h.server}`);
         try {
           const s = await client.slashList();
-          setSlashList([...CLIENT_SLASH, ...s.commands]);
+          // Dedup by name: a server command could collide with a
+          // client-side one, and the palette keys rows by name —
+          // duplicates there cause React key warnings. Client commands win.
+          const seen = new Set<string>();
+          const merged = [...CLIENT_SLASH, ...s.commands].filter((c) => {
+            if (seen.has(c.name)) return false;
+            seen.add(c.name);
+            return true;
+          });
+          setSlashList(merged);
         } catch {
           /* older wire-server without slash.list — keep client commands */
         }

@@ -220,6 +220,12 @@ def test_all_overlays_render() -> None:
     assert "claude-opus-4-7" in frame and "demo-skill" in frame, frame
     # The Spinner widget renders (its label; the braille frame char cycles).
     assert "busychk" in frame, f"Spinner widget did not render:\n{frame}"
+    # The skills hub clips an overlong description — the ellipsis is shown
+    # and the description's tail never reaches the screen.
+    assert "…" in frame, f"skill description was not clipped:\n{frame}"
+    assert "THE-TAIL-MARKER" not in frame, (
+        f"overlong skill description leaked past the clip:\n{frame}"
+    )
 
 
 @pytest.mark.skipif(

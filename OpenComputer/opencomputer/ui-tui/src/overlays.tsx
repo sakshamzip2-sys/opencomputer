@@ -38,6 +38,18 @@ function Empty({ label }: { label: string }): React.ReactElement {
   return <Text color="gray">{`  (${label})`}</Text>;
 }
 
+/**
+ * Collapse whitespace and clip to ``n`` columns with an ellipsis.
+ *
+ * Skill descriptions in particular run to full paragraphs with embedded
+ * newlines; rendered raw they wrap the overlay into a wall of text. Every
+ * variable-length cell goes through this so a panel row stays one line.
+ */
+function clip(s: string, n: number): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
+}
+
 // ─── model picker ───────────────────────────────────────────────────
 
 export function ModelPickerOverlay({
@@ -81,7 +93,7 @@ export function SkillsHubOverlay({
       {skills.slice(0, 12).map((s, i) => (
         <Text key={s.id} color={i === index ? "cyan" : "white"}>
           {(i === index ? "› " : "  ") + s.name}
-          <Text color="gray">{"  — " + s.description}</Text>
+          <Text color="gray">{"  — " + clip(s.description, 60)}</Text>
         </Text>
       ))}
       {selected && preview && (
@@ -92,7 +104,7 @@ export function SkillsHubOverlay({
             .slice(0, 8)
             .map((line, i) => (
               <Text key={i} color="gray">
-                {"  " + line}
+                {"  " + clip(line, 92)}
               </Text>
             ))}
         </Box>

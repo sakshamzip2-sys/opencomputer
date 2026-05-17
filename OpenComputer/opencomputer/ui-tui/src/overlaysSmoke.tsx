@@ -30,9 +30,18 @@ const tree = (
       index={0}
     />
     <SkillsHubOverlay
-      skills={[{ id: "demo", name: "demo-skill", description: "a demo" }]}
+      skills={[
+        {
+          id: "demo",
+          name: "demo-skill",
+          // Deliberately long — verifies the overlay clips it to one line
+          // instead of wrapping the panel into a wall of text.
+          description:
+            "a deliberately overlong skill description that must be clipped well before it reaches THE-TAIL-MARKER at the very end",
+        },
+      ]}
       index={0}
-      preview="## Body\nthe skill body"
+      preview={"## Body\nthe skill body"}
     />
     <SettingsOverlay
       entries={[{ key: "model.provider", value: "anthropic" }]}
