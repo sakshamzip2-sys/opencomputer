@@ -431,3 +431,61 @@ def test_node_recency_scores_cost_guard_skips_huge_edge_table(
     assert store.node_recency_scores(max_edges=1) == {}
     # Under the budget it computes normally.
     assert store.node_recency_scores(max_edges=100) != {}
+
+
+# ─── node_drift_scores / get_nodes (awareness-followup W1 + W3) ───────────
+
+
+def test_node_drift_scores_bulk_matches_singular(tmp_path: Path) -> None:
+    """``node_drift_scores`` (bulk, one query) equals the per-node form."""
+    store = _store(tmp_path)
+    target = store.upsert_node(kind="preference", value="target")
+    rival = store.upsert_node(kind="preference", value="rival")
+    a = store.upsert_node(kind="attribute", value="a")
+    b = store.upsert_node(kind="attribute", value="b")
+    # Two contradicts edges into `target`, one into `rival`.
+    store.insert_edge(Edge(kind="contradicts", from_node=a.node_id,
+                           to_node=target.node_id, source_reliability=0.5))
+    store.insert_edge(Edge(kind="contradicts", from_node=b.node_id,
+                           to_node=target.node_id, source_reliability=0.8))
+    store.insert_edge(Edge(kind="contradicts", from_node=a.node_id,
+                           to_node=rival.node_id, source_reliability=1.0))
+    # A non-contradicts edge into `target` must not count.
+    store.insert_edge(Edge(kind="asserts", from_node=b.node_id,
+                           to_node=target.node_id, source_reliability=0.9))
+    bulk = store.node_drift_scores()
+    assert bulk[target.node_id] == store.node_drift_score(target.node_id)
+    assert bulk[rival.node_id] == store.node_drift_score(rival.node_id)
+    # target: 1 - (1-0.5)(1-0.8) = 0.9 ;  rival: 1 - (1-1.0) = 1.0
+    assert abs(bulk[target.node_id] - 0.9) < 1e-9
+    assert abs(bulk[rival.node_id] - 1.0) < 1e-9
+    # A node with no incoming contradicts edge is absent from the dict.
+    assert a.node_id not in bulk
+
+
+def test_node_drift_scores_empty_without_contradicts(tmp_path: Path) -> None:
+    """No contradicts edges → empty dict; cost guard mirrors recency."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="a")
+    b = store.upsert_node(kind="attribute", value="b")
+    store.insert_edge(Edge(kind="asserts", from_node=a.node_id, to_node=b.node_id))
+    assert store.node_drift_scores() == {}
+    # Above max_edges the bulk query is skipped, like node_recency_scores.
+    store.insert_edge(Edge(kind="contradicts", from_node=a.node_id,
+                           to_node=b.node_id, source_reliability=0.5))
+    assert store.node_drift_scores(max_edges=1) == {}
+
+
+def test_get_nodes_bulk_fetch(tmp_path: Path) -> None:
+    """``get_nodes`` returns the requested nodes; missing ids are absent."""
+    store = _store(tmp_path)
+    a = store.upsert_node(kind="attribute", value="a")
+    b = store.upsert_node(kind="preference", value="b")
+    c = store.upsert_node(kind="goal", value="c")
+    # Repeated + unknown id in the request — dedup handled, unknown absent.
+    got = store.get_nodes([a.node_id, c.node_id, "no-such-id", a.node_id])
+    assert set(got) == {a.node_id, c.node_id}
+    assert got[a.node_id].value == "a"
+    assert got[c.node_id].kind == "goal"
+    assert b.node_id not in got
+    assert store.get_nodes([]) == {}

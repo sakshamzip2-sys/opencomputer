@@ -91,7 +91,10 @@ def test_migrate_apply_is_idempotent(tmp_path, monkeypatch):
     runner.invoke(app, ["awareness", "migrate", "--apply"])
     second = runner.invoke(app, ["awareness", "migrate", "--apply"])
     assert second.exit_code == 0, second.stdout
-    assert "0" in second.stdout  # zero new flags / collapses
+    # Specific: a bare "0" anywhere in stdout also matched timestamps and
+    # any number containing a zero. Assert the actual report lines.
+    assert "facts flagged needs_review: 0" in second.stdout
+    assert "duplicate edges collapsed: 0" in second.stdout
     assert store.count_edges() == 1
 
 

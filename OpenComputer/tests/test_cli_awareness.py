@@ -106,6 +106,18 @@ def test_unknown_pattern_id_errors(tmp_path, monkeypatch):
     assert "not_a_real_pattern" in combined
 
 
+def test_unknown_pattern_unmute_errors(tmp_path, monkeypatch):
+    """`unmute <unknown>` exits non-zero — symmetric with `mute`."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    result = runner.invoke(
+        app, ["awareness", "patterns", "unmute", "not_a_real_pattern"]
+    )
+    assert result.exit_code == 1
+    combined = (result.stdout or "") + (getattr(result, "stderr", "") or "")
+    assert "Unknown pattern" in combined
+    assert "not_a_real_pattern" in combined
+
+
 def test_personas_list_graceful_when_registry_missing(tmp_path, monkeypatch):
     """V2.C-T4 hasn't shipped the registry; `personas list` must not crash."""
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
