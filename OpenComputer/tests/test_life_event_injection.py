@@ -737,3 +737,218 @@ def test_register_helper_is_idempotent() -> None:
         assert provider._surface == "wire"
     finally:
         engine.unregister("life_event_hint")
+
+
+# ── 4f: each surface's setup path registers the provider ─────────────
+#
+# Multi-surface life-event teeth: CLI, wire, gateway and webui each call
+# ``register_life_event_injection_provider`` during their boot, carrying
+# their own surface label. These tests drive the *real* surface setup
+# function far enough to hit that registration, then assert the live
+# injection engine holds a ``life_event_hint`` provider with the right
+# ``_surface``. The registration genuinely runs — nothing here asserts
+# source text.
+
+
+class _StopAfterRegistrationError(Exception):
+    """Sentinel raised by a mock placed on the call *immediately after*
+    a surface's life-event registration, so the surface's setup unwinds
+    the moment registration has run (avoids booting a forever-loop)."""
+
+
+@pytest.fixture
+def _clean_life_event_provider():
+    """Ensure the injection engine has no stale ``life_event_hint``
+    provider before the test and is left clean afterwards."""
+    from opencomputer.agent.injection import engine
+
+    engine.unregister("life_event_hint")
+    try:
+        yield engine
+    finally:
+        engine.unregister("life_event_hint")
+
+
+def test_cli_chat_surface_registers_life_event_provider(
+    _clean_life_event_provider, monkeypatch
+) -> None:
+    """``_run_chat_session`` (the ``oc chat`` REPL) registers the
+    life-event provider with ``surface="cli"``."""
+    from unittest.mock import MagicMock
+
+    from opencomputer import cli
+
+    engine = _clean_life_event_provider
+
+    # Neutralise every setup call between session start and the
+    # registration line; ``AgentLoop`` (the statement right after the
+    # registration) raises the sentinel so the REPL never boots.
+    for name in (
+        "_configure_logging_once",
+        "_check_provider_key",
+        "_register_builtin_tools",
+        "_discover_plugins",
+        "_apply_model_overrides",
+        "_discover_and_register_agents",
+        "_register_settings_hooks",
+        "_seed_chat_status_metadata",
+        "_apply_personality_skin_at_startup",
+        "_has_any_provider_configured",
+    ):
+        monkeypatch.setattr(cli, name, MagicMock(return_value=True))
+
+    fake_cfg = MagicMock()
+    fake_cfg.model.provider = "stub"
+    monkeypatch.setattr(cli, "load_config", MagicMock(return_value=fake_cfg))
+
+    provider = MagicMock()
+    provider.supports_native_thinking_for.return_value = False
+    monkeypatch.setattr(cli, "_resolve_provider", MagicMock(return_value=provider))
+
+    def _stop(*_a, **_k):
+        raise _StopAfterRegistrationError
+
+    monkeypatch.setattr(cli, "AgentLoop", _stop)
+
+    with pytest.raises(_StopAfterRegistrationError):
+        cli._run_chat_session(resume="", plan=False, no_compact=False)
+
+    prov = engine._providers.get("life_event_hint")
+    assert isinstance(prov, LifeEventInjectionProvider)
+    assert prov._surface == "cli"
+
+
+def test_wire_surface_registers_life_event_provider(
+    _clean_life_event_provider, monkeypatch
+) -> None:
+    """The ``oc wire`` command registers the life-event provider with
+    ``surface="wire"``."""
+    from unittest.mock import MagicMock
+
+    from opencomputer import cli
+
+    engine = _clean_life_event_provider
+
+    for name in (
+        "_configure_logging_once",
+        "_check_provider_key",
+        "_register_builtin_tools",
+        "_discover_plugins",
+        "_apply_model_overrides",
+        "_discover_and_register_agents",
+        "_register_settings_hooks",
+    ):
+        monkeypatch.setattr(cli, name, MagicMock(return_value=True))
+
+    fake_cfg = MagicMock()
+    fake_cfg.model.provider = "stub"
+    monkeypatch.setattr(cli, "load_config", MagicMock(return_value=fake_cfg))
+    monkeypatch.setattr(cli, "_resolve_provider", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(cli, "AgentLoop", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        "opencomputer.cli_hints.maybe_print_docker_toggle_hint", MagicMock()
+    )
+
+    # ``DelegateTool.set_factory`` is the statement right after the
+    # wire surface's life-event registration — raise there to unwind
+    # before the WebSocket server boots.
+    def _stop(*_a, **_k):
+        raise _StopAfterRegistrationError
+
+    monkeypatch.setattr(cli.DelegateTool, "set_factory", _stop)
+
+    with pytest.raises(_StopAfterRegistrationError):
+        cli.wire(host="127.0.0.1", port=18789, detach=False)
+
+    prov = engine._providers.get("life_event_hint")
+    assert isinstance(prov, LifeEventInjectionProvider)
+    assert prov._surface == "wire"
+
+
+def test_gateway_foreground_registers_life_event_provider(
+    _clean_life_event_provider, monkeypatch
+) -> None:
+    """``_run_foreground`` (bare ``oc gateway``) registers the life-event
+    provider with ``surface="gateway"``."""
+    from unittest.mock import MagicMock
+
+    from opencomputer import cli, cli_gateway
+
+    engine = _clean_life_event_provider
+
+    # ``_run_foreground`` imports these helpers from ``opencomputer.cli``
+    # at call time — patch them on that module.
+    for name in (
+        "_configure_logging_once",
+        "_check_provider_key",
+        "_register_builtin_tools",
+        "_discover_plugins",
+        "_apply_model_overrides",
+        "_discover_and_register_agents",
+        "_register_settings_hooks",
+        "_resolve_provider",
+    ):
+        monkeypatch.setattr(cli, name, MagicMock(return_value=True))
+    monkeypatch.setattr(cli, "_discover_plugins", MagicMock(return_value=0))
+
+    fake_cfg = MagicMock()
+    fake_cfg.model.provider = "stub"
+    fake_cfg.mcp.session_scoped = False
+    monkeypatch.setattr(
+        "opencomputer.agent.config_store.load_config",
+        MagicMock(return_value=fake_cfg),
+    )
+    monkeypatch.setattr(
+        "opencomputer.agent.loop.AgentLoop", MagicMock(return_value=MagicMock())
+    )
+
+    # ``MCPManager(...)`` is the first statement after the gateway
+    # surface's life-event registration — raise there.
+    def _stop(*_a, **_k):
+        raise _StopAfterRegistrationError
+
+    monkeypatch.setattr("opencomputer.mcp.client.MCPManager", _stop)
+    # ``DelegateTool.set_factory`` runs before the registration; it only
+    # stores a factory closure, so it is inert and left unpatched.
+
+    with pytest.raises(_StopAfterRegistrationError):
+        cli_gateway._run_foreground()
+
+    prov = engine._providers.get("life_event_hint")
+    assert isinstance(prov, LifeEventInjectionProvider)
+    assert prov._surface == "gateway"
+
+
+async def test_webui_completion_registers_life_event_provider(
+    _clean_life_event_provider, monkeypatch
+) -> None:
+    """``_run_agent_completion`` (the ``oc webui`` / ``oc workspace``
+    OpenAI-compat route) registers the life-event provider with
+    ``surface="webui"``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from opencomputer.dashboard.routes import openai_compat
+
+    engine = _clean_life_event_provider
+
+    fake_loop = MagicMock()
+    fake_loop.config.model.model = "stub-model"
+    fake_loop.run_conversation = AsyncMock(
+        return_value=MagicMock(final_message=MagicMock(content="ok")),
+    )
+    monkeypatch.setattr(
+        "opencomputer.gateway.agent_loop_factory.build_agent_loop_for_profile",
+        MagicMock(return_value=fake_loop),
+    )
+
+    await openai_compat._run_agent_completion(
+        user_message="hello",
+        history=[],
+        system_prompt=None,
+        model="stub-model",
+        oc_session_id=None,
+    )
+
+    prov = engine._providers.get("life_event_hint")
+    assert isinstance(prov, LifeEventInjectionProvider)
+    assert prov._surface == "webui"
