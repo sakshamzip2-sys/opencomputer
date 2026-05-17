@@ -1,8 +1,11 @@
+import json
 import time
 
 from opencomputer.awareness.life_events.registry import (
     DEFAULT_PATTERNS,
     LifeEventRegistry,
+    get_global_registry,
+    reset_global_registry_for_test,
     subscribe_to_bus,
 )
 
@@ -163,3 +166,95 @@ def test_subscribe_to_bus_returns_unsub_callable():
         metadata={"url": "https://glassdoor.com/jobs", "visit_time": time.time()},
     ))
     assert reg.drain_pending() == []
+
+
+def test_fresh_registry_loads_persisted_muted_set(tmp_path, monkeypatch):
+    """A fresh registry must honour the persisted ``muted_patterns.json``.
+
+    ``oc awareness patterns mute`` runs in a SEPARATE process and writes
+    ``<profile-home>/awareness/muted_patterns.json``. Without runtime
+    loading, a freshly-started agent process would start ``_muted`` empty
+    and ignore that mute — so ``collect()`` would never filter the pattern.
+    The registry must read the persisted file on construction.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    muted_path = tmp_path / "awareness" / "muted_patterns.json"
+    muted_path.parent.mkdir(parents=True, exist_ok=True)
+    muted_path.write_text(json.dumps(["burnout"]))
+
+    reset_global_registry_for_test()
+    try:
+        reg = get_global_registry()
+        # The persisted mute is honoured by a freshly-constructed registry.
+        assert reg.is_muted("burnout") is True
+        # An un-muted pattern is unaffected.
+        assert reg.is_muted("travel") is False
+    finally:
+        reset_global_registry_for_test()
+
+
+def test_fresh_registry_no_muted_file_starts_empty(tmp_path, monkeypatch):
+    """No ``muted_patterns.json`` → the registry starts mute-free, no raise."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    reset_global_registry_for_test()
+    try:
+        reg = get_global_registry()
+        assert reg.is_muted("burnout") is False
+    finally:
+        reset_global_registry_for_test()
+
+
+def test_fresh_registry_tolerates_corrupt_muted_file(tmp_path, monkeypatch):
+    """A corrupt ``muted_patterns.json`` → empty mute set, never a raise."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    muted_path = tmp_path / "awareness" / "muted_patterns.json"
+    muted_path.parent.mkdir(parents=True, exist_ok=True)
+    muted_path.write_text("{not valid json")
+
+    reset_global_registry_for_test()
+    try:
+        reg = get_global_registry()  # must not raise
+        assert reg.is_muted("burnout") is False
+    finally:
+        reset_global_registry_for_test()
+
+
+def test_peek_survives_drain():
+    """peek_most_recent_firing must NOT be coupled to the drained queue.
+
+    The injection provider drains the queue every turn; the companion-persona
+    overlay still needs the freshest firing as anchor context afterwards.
+    """
+    from opencomputer.awareness.life_events.pattern import (
+        EvidenceItem,
+        LifeEventPattern,
+    )
+
+    class _BurnoutFake(LifeEventPattern):
+        pattern_id = "burnout"
+        surface_threshold = 0.1
+        surfacing = "hint"
+
+        def consider_event(self, event_type: str, metadata: dict[str, object]) -> EvidenceItem | None:
+            return EvidenceItem(timestamp=time.time(), weight=0.5, source="test")
+
+        def hint_text(self) -> str:
+            return "hope you're okay"
+
+    reg = LifeEventRegistry(patterns=[_BurnoutFake()])
+    reg.on_event("anything", {})
+
+    # Before drain: a firing is both queued and peekable.
+    before = reg.peek_most_recent_firing()
+    assert before is not None
+    assert before.pattern_id == "burnout"
+
+    # Drain empties the queue (the injection provider's behavior)...
+    assert reg.drain_pending() != []
+    assert reg.drain_pending() == []
+
+    # ...but peek still returns the most-recent firing.
+    after = reg.peek_most_recent_firing()
+    assert after is not None
+    assert after.pattern_id == "burnout"
+    assert after == before

@@ -131,6 +131,50 @@ def patterns_unmute(
     typer.echo(f"Unmuted: {pattern_id}")
 
 
+@patterns_app.command("status")
+def patterns_status() -> None:
+    """Show the active life-event "teeth" — surfaced hints awaiting a verdict.
+
+    Renders the per-profile ``life_event_state.json``: one row per pattern
+    that has surfaced a hint and scheduled a proactive follow-up cron. The
+    ``verdict?`` column flags patterns whose surfaced hint is still waiting
+    to be judged against the user's next reply.
+    """
+    from opencomputer.awareness.life_events.state import load_state
+
+    state = load_state()
+    console = Console()
+    if not state:
+        console.print("[dim]No active life-event check-ins.[/dim]")
+        return
+
+    table = Table(title="awareness — active life-event check-ins")
+    table.add_column("pattern_id", style="cyan", no_wrap=True)
+    table.add_column("surfaced at", style="dim", no_wrap=True)
+    table.add_column("cron_id", style="dim", no_wrap=True)
+    table.add_column("verdict?", no_wrap=True)
+    table.add_column("turn", justify="right", style="dim")
+
+    for pattern_id, entry in sorted(state.items()):
+        if not isinstance(entry, dict):
+            # Tolerate a hand-edited / corrupt entry — show the id, blank rest.
+            table.add_row(str(pattern_id), "—", "—", "—", "—")
+            continue
+        firing_ts = entry.get("firing_ts")
+        if isinstance(firing_ts, (int, float)):
+            surfaced_at = time.strftime(
+                "%Y-%m-%d %H:%M", time.localtime(firing_ts)
+            )
+        else:
+            surfaced_at = "—"
+        cron_id = str(entry.get("cron_id") or "—")
+        verdict = "yes" if entry.get("verdict_pending") else "no"
+        turn_raw = entry.get("surfaced_turn")
+        turn = str(turn_raw) if isinstance(turn_raw, int) else "—"
+        table.add_row(str(pattern_id), surfaced_at, cron_id, verdict, turn)
+    console.print(table)
+
+
 @personas_app.command("list")
 def personas_list() -> None:
     """List all registered personas.

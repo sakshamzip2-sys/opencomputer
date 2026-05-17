@@ -4,11 +4,21 @@ The registry is constructed once at AgentLoop init. It subscribes to the
 default bus; every published SignalEvent is dispatched to every pattern.
 Pattern firings are appended to an in-memory queue that the chat surfacer
 drains at the start of each turn.
+
+On construction the registry also loads the persisted muted-pattern set
+from ``<profile-home>/awareness/muted_patterns.json`` — the same file
+``oc awareness patterns mute`` writes (see ``cli_awareness.py``). That CLI
+runs in a separate process, so without this load a freshly-started agent
+process would always start with an empty ``_muted`` set and never honour a
+mute set in a prior CLI invocation, breaking the spec promise that "a muted
+pattern produces no hint, no cron".
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from opencomputer.awareness.life_events.burnout import Burnout
 from opencomputer.awareness.life_events.exam_prep import ExamPrep
@@ -28,6 +38,49 @@ DEFAULT_PATTERNS: tuple[type[LifeEventPattern], ...] = (
 )
 
 
+def _muted_patterns_path() -> Path:
+    """Return the path to the persisted muted-patterns JSON list.
+
+    ``<profile-home>/awareness/muted_patterns.json`` — the exact file
+    ``oc awareness patterns {mute,unmute}`` writes (``cli_awareness.py``).
+    Profile home is resolved through ``opencomputer.agent.config._home``,
+    the canonical core resolver, the same way ``state.py`` does it — so an
+    ``awareness/`` module never has to import a ``cli_*`` module (that
+    would be backwards layering). Resolved per call (not cached) so a
+    per-test ``OPENCOMPUTER_HOME`` monkey-patch picks up the right tmp path.
+    """
+    from opencomputer.agent.config import _home
+
+    return _home() / "awareness" / "muted_patterns.json"
+
+
+def _load_persisted_muted() -> set[str]:
+    """Load the persisted muted pattern IDs as a set. Tolerates everything.
+
+    Returns an empty set — never raises — when the file is absent,
+    unreadable, not valid JSON, or valid JSON that is not a list. Matches
+    the JSON shape (a plain list of strings) that ``cli_awareness._save_muted``
+    writes and ``cli_awareness._load_muted`` reads.
+    """
+    path = _muted_patterns_path()
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning(
+            "muted_patterns.json read failed: %s; treating as no mutes", exc
+        )
+        return set()
+    if not isinstance(data, list):
+        _log.warning(
+            "muted_patterns.json is not a list (got %s); treating as no mutes",
+            type(data).__name__,
+        )
+        return set()
+    return {str(x) for x in data}
+
+
 class LifeEventRegistry:
     """Owns the pattern instances + firing queue."""
 
@@ -35,8 +88,17 @@ class LifeEventRegistry:
         if patterns is None:
             patterns = [cls() for cls in DEFAULT_PATTERNS]
         self._patterns: dict[str, LifeEventPattern] = {p.pattern_id: p for p in patterns}
-        self._muted: set[str] = set()
+        # Seed the muted set from the persisted file written by
+        # ``oc awareness patterns mute`` (a separate process). Without this
+        # a fresh agent process would start mute-free and ignore an earlier
+        # CLI mute — breaking the "muted = no hint, no cron" promise. The
+        # loader tolerates a missing/corrupt file (→ empty set), so this
+        # never breaks registry construction.
+        self._muted: set[str] = _load_persisted_muted()
         self._queue: list[PatternFiring] = []
+        # Latest queued firing, retained independently of the queue so that
+        # peek_most_recent_firing survives drain_pending (see that method).
+        self._last_firing: PatternFiring | None = None
 
     def is_muted(self, pattern_id: str) -> bool:
         return pattern_id in self._muted
@@ -71,6 +133,7 @@ class LifeEventRegistry:
                 _log.debug("Silent firing %s confidence=%.2f", pattern_id, firing.confidence)
                 continue
             self._queue.append(firing)
+            self._last_firing = firing
 
     def drain_pending(self) -> list[PatternFiring]:
         """Pop all queued firings (called by chat surfacer at turn start)."""
@@ -78,22 +141,29 @@ class LifeEventRegistry:
         return out
 
     def peek_most_recent_firing(self) -> PatternFiring | None:
-        """Return the most-recent firing WITHOUT draining the queue.
+        """Return the most-recently-recorded non-silent firing.
+
+        Returns ``_last_firing`` — the LAST firing appended to the queue,
+        i.e. the most recently recorded one — NOT a max-by-timestamp scan.
+        ``_last_firing`` is reassigned on every ``_queue.append`` (in event
+        arrival order), so it is whichever non-silent firing was recorded
+        last.
 
         Path A.3 (2026-04-27): the companion-persona overlay augmentation
-        wants to read the freshest firing as anchor context for the LLM,
-        but the firing is still legitimate input for the chat surfacer
-        (which drains the queue at the start of each turn). Peeking is
-        non-destructive.
+        wants to read the freshest firing as anchor context for the LLM.
 
-        Returns None if the queue is empty. Most-recent = highest
-        ``timestamp`` (the queue is append-only so the last entry wins,
-        but we ``max`` over the list to be robust against any future
-        reordering of the queue).
+        The firing is also legitimate input for the chat surfacer / injection
+        provider, which calls ``drain_pending`` at the start of each turn.
+        Reading from ``_queue`` here would mean peek returns ``None`` for the
+        rest of the turn after a drain. ``_last_firing`` is updated alongside
+        every ``_queue.append`` and is never cleared by ``drain_pending``, so
+        peeking stays non-destructive AND survives a drain.
+
+        Returns None until the first non-silent firing is queued. Silent
+        firings are not retained — they never reach this method, matching
+        their exclusion from the chat-surfacer queue.
         """
-        if not self._queue:
-            return None
-        return max(self._queue, key=lambda f: f.timestamp)
+        return self._last_firing
 
 
 # ── Module-level singleton (Path A.3) ─────────────────────────────────

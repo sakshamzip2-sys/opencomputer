@@ -1003,6 +1003,26 @@ class AgentLoop:
         self._profile_rebind_registry = ProfileRebindRegistry()
         self._install_builtin_rebind_handlers()
 
+        # Life-event "teeth" — register the STOP-hook classifier so the
+        # user's reply to a surfaced life-event hint can self-correct the
+        # follow-up cron (refuting reply → cancel the cron). Idempotent via
+        # a process-wide flag; lives here so every surface (CLI / gateway /
+        # wire / webui) gets it, since each constructs an AgentLoop. The
+        # call is internally fail-open — registration failure leaves the
+        # feature dormant, never breaks loop construction.
+        try:
+            from opencomputer.awareness.life_events.classifier import (
+                register_life_event_stop_hook,
+            )
+
+            register_life_event_stop_hook()
+        except Exception:  # noqa: BLE001 — never break AgentLoop construction
+            _log.warning(
+                "life-event STOP hook registration failed; the feature will "
+                "be dormant this session",
+                exc_info=True,
+            )
+
         # §9.8 — drain any plugin-queued rebind handlers (browser-harness,
         # honcho, langfuse) registered through ``PluginAPI.register_profile_rebind_handler``.
         # Plugins call register() once at process start; AgentLoop is
@@ -3610,6 +3630,42 @@ class AgentLoop:
                             sid,
                             exc_info=True,
                         )
+
+                    # STOP hook — fires once per turn when the model stops
+                    # asking for tools (see the HookEvent enum docstring).
+                    # Carries ``turn_index`` (computed at turn-start via the
+                    # ``turn_index = sum(...)`` assignment) and the final
+                    # message list so a registered handler
+                    # can correlate the turn against per-turn injection
+                    # providers. Fire-and-forget: STOP handlers are
+                    # post-turn observers and must never block the return.
+                    # The life-event STOP-hook classifier rides this seam
+                    # to judge the user's reply to a surfaced hint. Failure
+                    # is swallowed — a wedged STOP hook must not wedge the
+                    # loop (CLAUDE.md §7).
+                    try:
+                        from opencomputer.hooks.engine import (
+                            engine as _hook_engine_stop,
+                        )
+                        from plugin_sdk.hooks import (
+                            HookContext as _HookContextStop,
+                        )
+                        from plugin_sdk.hooks import (
+                            HookEvent as _HookEventStop,
+                        )
+
+                        _hook_engine_stop.fire_and_forget(
+                            _HookContextStop(
+                                event=_HookEventStop.STOP,
+                                session_id=sid,
+                                message=final_assistant_msg,
+                                messages=messages,
+                                runtime=self._runtime,
+                                turn_index=turn_index,
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 — STOP must never wedge the loop
+                        _log.debug("STOP hook fire failed", exc_info=True)
 
                     return ConversationResult(
                         final_message=final_assistant_msg,
