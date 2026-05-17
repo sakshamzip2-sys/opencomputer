@@ -156,39 +156,86 @@ grows no teeth. Mute state is persisted at
 `$OPENCOMPUTER_HOME/awareness/muted_patterns.json` and re-applied at the
 start of every session.
 
+## Multi-surface
+
+Life-event teeth shipped **CLI-only** (#630): hints surfaced and check-in
+crons were scheduled only inside `oc chat`. They now also run on the
+**gateway** (Telegram / Discord / Slack / Matrix / …), the **wire**
+WebSocket surface, and the **web UI** — gated behind the
+`life_events.multi_surface_life_events` feature flag (default `false`) in
+`<profile>/feature_flags.json`.
+
+`LifeEventInjectionProvider` is surface-aware: it carries a `surface`
+label, and `register_life_event_injection_provider(surface)` is the
+registration helper each of the four surfaces calls during boot. `collect`
+**drains the registry queue first, then applies the surface gate** — so a
+flag-off long-running gateway daemon still keeps the process-global firing
+queue bounded; the firing is consumed, just not surfaced.
+
+| Surface | Hint injection | Check-in cron |
+|---|---|---|
+| `cli` | always on, unflagged | scheduled, not channel-targeted |
+| `gateway` | opt-in (flag) | scheduled, **origin-targeted** |
+| `wire` | opt-in (flag) | scheduled, not channel-targeted |
+| `webui` | opt-in (flag) | scheduled, not channel-targeted |
+
+- **CLI** — always on, unflagged. Unchanged from #630.
+- **gateway / wire / webui** — opt-in. A `<life-event-hint>` block surfaces
+  on these surfaces only when the flag is `true`.
+
+### The gateway check-in is origin-targeted
+
+The gateway wraps each inbound message's `run_conversation` in a
+`RequestContext` carrying the user's `channel` + `user_id`. On the gateway
+path `collect` reads that context (via `_resolve_origin`) and threads a
+`{"platform", "chat_id"}` **origin** into `schedule_followup` →
+`create_job` with `notify="origin"`. The proactive check-in is therefore
+**delivered back to the chat that triggered it** — the conversation the
+life event was detected in.
+
+### wire / webui hints surface, but the check-in is not channel-targeted
+
+Hint injection works on **wire** and **webui** when the flag is on. The
+check-in cron is *not* channel-targeted there: those surfaces do not
+establish a `RequestContext`, so `_resolve_origin` returns `None` and the
+cron is created with `origin=None`. The check-in cron still fires — it is
+simply **not pushed back to a specific chat** the way a gateway check-in
+is. This is intentional: a proactive push to an ephemeral
+wire socket or a stateless web-UI request is not meaningful — there is no
+durable chat to route back to.
+
+### Enabling it
+
+Set the flag to `true` in `<profile>/feature_flags.json`:
+
+```json
+{ "life_events": { "multi_surface_life_events": true } }
+```
+
+The CLI surface ignores the flag (it is always on); the flag only gates
+the gateway / wire / webui surfaces.
+
 ## Honest v1 limitations
 
-Three parts of the feature are intentionally not finished in v1. They are
+Two parts of the feature are intentionally not finished in v1. They are
 called out here so the feature is not assumed to be more complete than it
 is.
 
-### 1. The check-in cron is not channel-targeted
+### 1. The wire / webui check-in cron is not channel-targeted
 
-The injection layer cannot see which channel you are talking on.
-`RuntimeContext` carries only mode flags (plan / yolo / …), not a channel
-identity, and `InjectionContext` does not surface the `RequestContext` that
-*does* carry `platform` / `chat_id` / `thread_id`. So
-`LifeEventInjectionProvider.collect` schedules the follow-up cron with
-**`origin=None`** — the cron is created and it will fire, but it is **not
-routed back to a specific chat**. (`schedule_followup` *can* accept an
-`origin` and thread it through to `notify="origin"`; the injection caller
-simply has nothing to pass.) **v2** would thread the active channel through
-to the injection layer so the check-in lands back in the conversation that
-triggered it.
+On the **gateway** the check-in cron *is* origin-targeted — see
+[Multi-surface](#multi-surface). On the **CLI**, **wire**, and **webui**
+surfaces it is not: those surfaces establish no `RequestContext`, so
+`_resolve_origin` returns `None` and `LifeEventInjectionProvider.collect`
+schedules the follow-up with **`origin=None`**. The cron is created and it
+fires, but it is **not routed back to a specific chat** the way a gateway
+check-in is pushed to its origin. For the CLI and
+those two stateless surfaces this is intentional (there is no durable chat
+to push to); it is only a true *limitation* for any future surface that
+*does* have a routable chat identity but does not yet establish a
+`RequestContext`.
 
-### 2. Hint injection is CLI-scoped
-
-`LifeEventInjectionProvider` is registered in `_run_chat_session` —
-alongside the other built-in injection providers like `ThinkingInjector` —
-which is the **`oc chat` CLI path**. The `STOP`-hook classifier runs on
-every surface (it registers against the singleton hook engine in
-`AgentLoop.__init__`), but with **no hint injected outside the CLI** the
-feature is effectively **CLI-only** for now: a life event detected during a
-gateway / Telegram / Discord / web-UI conversation grows no visible tooth.
-**v2** would extend injection-provider registration to the gateway and
-channel surfaces so teeth appear everywhere the agent runs.
-
-### 3. A re-fired hint is re-shown but not re-judged while a cron is active
+### 2. A re-fired hint is re-shown but not re-judged while a cron is active
 
 After a `confirmed` or `unclear` verdict, `clear_verdict_pending` leaves the
 pattern's state entry in place with `verdict_pending=False` and the
