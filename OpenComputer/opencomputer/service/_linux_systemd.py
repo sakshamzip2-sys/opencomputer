@@ -130,9 +130,9 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
     )
 
 
-def uninstall() -> UninstallResult:
-    path = _user_unit_path()
-    unit = _unit_filename()
+def uninstall(*, profile: str) -> UninstallResult:
+    path = _user_unit_path(profile)
+    unit = _unit_filename(profile)
     if not path.exists():
         return UninstallResult(
             backend=NAME, file_removed=False, config_path=None, notes=[],

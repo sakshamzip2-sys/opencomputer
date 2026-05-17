@@ -108,9 +108,9 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
     )
 
 
-def uninstall() -> UninstallResult:
-    _schtasks("/delete", "/tn", _task_name(), "/f")
-    path = _xml_path()
+def uninstall(*, profile: str) -> UninstallResult:
+    _schtasks("/delete", "/tn", _task_name(profile), "/f")
+    path = _xml_path(profile)
     if path.exists():
         path.unlink()
         return UninstallResult(

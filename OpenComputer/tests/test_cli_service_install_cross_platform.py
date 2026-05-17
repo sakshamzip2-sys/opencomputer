@@ -147,9 +147,11 @@ def test_service_uninstall_routes_through_factory_on_macos(runner: CliRunner) ->
 
     backend = _fake_backend("launchd")
     with patch("opencomputer.service.factory.get_backend", return_value=backend):
-        result = runner.invoke(app, ["service", "uninstall"])
+        result = runner.invoke(app, ["service", "uninstall", "--profile", "coder"])
     assert result.exit_code == 0
-    backend.uninstall.assert_called_once()
+    # uninstall is profile-aware (mirrors install) — the chosen profile
+    # must reach the backend so the matching per-profile unit is removed.
+    backend.uninstall.assert_called_once_with(profile="coder")
     assert "removed (launchd)" in result.stdout
 
 

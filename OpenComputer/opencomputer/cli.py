@@ -4983,12 +4983,20 @@ def _service_install(
 
 
 @service_app.command("uninstall")
-def _service_uninstall() -> None:
-    """Stop + disable + remove the system service file (cross-platform)."""
+def _service_uninstall(
+    profile: str = typer.Option(
+        "default", help="Which profile's service to remove."
+    ),
+) -> None:
+    """Stop + disable + remove the system service file (cross-platform).
+
+    ``--profile`` must match the profile passed to ``oc service install``
+    so the matching per-profile service unit is removed (multi-install).
+    """
     from opencomputer.service.factory import get_backend
 
     backend = get_backend()
-    result = backend.uninstall()
+    result = backend.uninstall(profile=profile)
     if result.file_removed:
         typer.echo(f"removed ({result.backend}): {result.config_path}")
     else:

@@ -112,23 +112,23 @@ def test_install_calls_backend(monkeypatch):
     assert install_called["extra_args"] == "gateway"
 
 
-def test_uninstall_calls_backend_uninstall_without_profile_kwarg(monkeypatch):
-    """Fix 2 (real bug): ``backend.uninstall()`` takes NO arguments
-    (the ``ServiceBackend`` Protocol). The old code passed
-    ``profile=`` which raised ``TypeError`` — ``oc gateway uninstall``
-    was 100% broken on every platform.
+def test_uninstall_calls_backend_uninstall_with_profile_kwarg(monkeypatch):
+    """``ServiceBackend.uninstall`` is profile-aware (mirrors ``install``):
+    it takes ``*, profile``. ``oc gateway uninstall --profile X`` must
+    forward ``profile=X`` so the backend removes X's service unit, not
+    the default profile's.
 
-    This FakeBackend mirrors the real Protocol: ``uninstall()`` accepts
-    no kwargs. The pre-fix call ``backend.uninstall(profile=...)``
-    raises ``TypeError`` against it.
+    This FakeBackend mirrors the real Protocol: ``uninstall`` accepts a
+    keyword-only ``profile``. The pre-fix call ``backend.uninstall()``
+    (no args) cannot pass the user's chosen profile through.
     """
     from opencomputer.service.base import UninstallResult
 
     uninstall_called = {}
 
     class FakeBackend:
-        def uninstall(self) -> UninstallResult:
-            uninstall_called["hit"] = True
+        def uninstall(self, *, profile: str) -> UninstallResult:
+            uninstall_called["profile"] = profile
             return UninstallResult(
                 backend="systemd-user",
                 file_removed=True,
@@ -144,8 +144,8 @@ def test_uninstall_calls_backend_uninstall_without_profile_kwarg(monkeypatch):
         f"oc gateway uninstall failed (exit {result.exit_code}); "
         f"output={result.output!r}"
     )
-    assert uninstall_called.get("hit") is True
-    # The pre-fix code raised TypeError; ensure it does not surface.
+    # The user's --profile must reach the backend, not the default.
+    assert uninstall_called.get("profile") == "work"
     assert result.exception is None or not isinstance(
         result.exception, TypeError
     ), f"uninstall raised TypeError: {result.exception!r}"

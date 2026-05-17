@@ -61,16 +61,58 @@ def test_uninstall_invokes_schtasks_delete(
     xml_path = user_dir / "opencomputer-task.xml"
     xml_path.write_text("<Task/>")
 
-    monkeypatch.setattr(_windows_schtasks, "_xml_path", lambda: xml_path)
+    monkeypatch.setattr(_windows_schtasks, "_xml_path", lambda *a, **kw: xml_path)
     calls: list = []
     monkeypatch.setattr(
         _windows_schtasks, "_schtasks",
         lambda *a: (calls.append(a) or (0, "", "")),
     )
 
-    result = _windows_schtasks.uninstall()
+    result = _windows_schtasks.uninstall(profile="default")
     assert result.file_removed is True
     assert any(a[0] == "/delete" for a in calls)
+
+
+def test_uninstall_targets_named_profile_task_not_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """``uninstall(profile=...)`` must delete the GIVEN profile's task +
+    XML, not the default one. A named profile gets a sha256-suffixed
+    task name (``OpenComputerGateway-<hash>``) and XML filename
+    distinct from the default. Pre-fix, ``uninstall`` took no args and
+    only ever resolved the default task."""
+    from opencomputer.service import _windows_schtasks
+
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(
+        _windows_schtasks, "_resolve_executable", lambda: r"C:\bin\oc.exe",
+    )
+
+    calls: list = []
+    monkeypatch.setattr(
+        _windows_schtasks, "_schtasks",
+        lambda *a: (calls.append(a) or (0, "SUCCESS", "")),
+    )
+
+    default_result = _windows_schtasks.install(profile="default", extra_args="")
+    named_result = _windows_schtasks.install(profile="coder", extra_args="")
+    assert named_result.config_path != default_result.config_path
+    assert default_result.config_path.exists()
+    assert named_result.config_path.exists()
+
+    result_uninstall = _windows_schtasks.uninstall(profile="coder")
+
+    assert result_uninstall.file_removed is True
+    assert result_uninstall.config_path == named_result.config_path
+    assert not named_result.config_path.exists()
+    assert default_result.config_path.exists()
+    # /delete targeted the named-profile task name.
+    coder_task = _windows_schtasks._task_name("coder")
+    assert any(
+        a[0] == "/delete" and coder_task in a for a in calls
+    ), f"/delete must target {coder_task!r}; calls={calls!r}"
 
 
 def test_supported_returns_true_only_on_win32(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -123,13 +123,13 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
     )
 
 
-def uninstall() -> UninstallResult:
-    path = _plist_path()
+def uninstall(*, profile: str) -> UninstallResult:
+    path = _plist_path(profile)
     if not path.exists():
         return UninstallResult(
             backend=NAME, file_removed=False, config_path=None, notes=[],
         )
-    _launchctl("bootout", f"gui/{_uid()}/{_label()}")
+    _launchctl("bootout", f"gui/{_uid()}/{_label(profile)}")
     path.unlink()
     return UninstallResult(
         backend=NAME, file_removed=True, config_path=path, notes=[],
