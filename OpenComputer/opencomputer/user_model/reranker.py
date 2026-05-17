@@ -63,7 +63,8 @@ _BM25_B = 0.75
 def bm25_scores(query: str, documents: Sequence[str]) -> list[float]:
     """Return the Okapi BM25 score of each document against ``query``.
 
-    Standard BM25 (k1=1.5, b=0.75). The query is the session's recent
+    Okapi BM25 (k1=1.5, b=0.75) with Lucene's non-negative IDF variant
+    (the ``+ 1.0`` inside the ``log``). The query is the session's recent
     messages; each document is a candidate node value. Scores are raw
     (not normalised) — :class:`UserFactsReranker` normalises across the
     candidate set. An empty query, or a document sharing no query term,

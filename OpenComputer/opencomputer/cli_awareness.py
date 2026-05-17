@@ -120,6 +120,11 @@ def patterns_unmute(
     pattern_id: str = typer.Argument(..., help="Pattern ID to unmute."),
 ) -> None:
     """Unmute a previously-muted life-event pattern."""
+    valid_ids = _registry_pattern_ids()
+    if pattern_id not in valid_ids:
+        typer.echo(f"Unknown pattern: {pattern_id}", err=True)
+        typer.echo(f"Known patterns: {', '.join(sorted(valid_ids))}", err=True)
+        raise typer.Exit(1)
     state_path = _muted_state_path()
     if not state_path.exists():
         typer.echo("Nothing muted (no state file).")
@@ -464,11 +469,7 @@ def _explain_session(console: Console, query: str | None) -> None:
         console.print("[dim]no facts to rank[/dim]")
         return
     recency_scores = store.node_recency_scores()  # one query, all nodes
-    drift_scores: dict[str, float] = {}
-    if store.count_edges(kinds=("contradicts",)) > 0:
-        drift_scores = {
-            n.node_id: store.node_drift_score(n.node_id) for n in nodes
-        }
+    drift_scores = store.node_drift_scores()      # one query, all nodes
     ctx = SessionContext(recent_messages=(query,) if query else ())
     scored = UserFactsReranker(_reranker_weights()).score(
         nodes, ctx, recency_scores=recency_scores, drift_scores=drift_scores
@@ -577,6 +578,11 @@ def explain(
         console.print("[dim]no incident edges (orphan node)[/dim]")
         return
 
+    # Batch-fetch the far endpoint of every incident edge — one query,
+    # not a get_node() (which opens a fresh connection) per edge.
+    others = store.get_nodes(
+        [e.to_node for e in outgoing] + [e.from_node for e in incoming]
+    )
     engine = DecayEngine(store=store)
     now = time.time()
     edges_table = Table(
@@ -592,7 +598,7 @@ def explain(
     for direction, edges in (("out →", outgoing), ("in ←", incoming)):
         for e in edges:
             other_id = e.to_node if direction.startswith("out") else e.from_node
-            other = store.get_node(other_id)
+            other = others.get(other_id)
             other_label = other.value[:36] if other else other_id[:8]
             live = engine.compute_recency_weight(e, now=now)
             edges_table.add_row(
@@ -791,7 +797,9 @@ def migrate(
     validator = NodeKindValidator()
 
     # Pass 1 — scan for agent-internal-noise nodes not already flagged
-    # or soft-deleted.
+    # or soft-deleted. The node table stays small even on a bloated
+    # graph — nodes dedup by (kind, value) via upsert_node, so the M2
+    # explosion was always edges (collapsed in SQL below), never nodes.
     noise: list[tuple[Node, str]] = []
     for n in store.list_nodes(limit=1_000_000):
         if _node_is_deleted(n) or n.metadata.get("needs_review"):
@@ -949,11 +957,7 @@ def debug(
     ]
 
     recency_scores = store.node_recency_scores()  # one query, all nodes
-    drift_scores: dict[str, float] = {}
-    if store.count_edges(kinds=("contradicts",)) > 0:
-        drift_scores = {
-            n.node_id: store.node_drift_score(n.node_id) for n in live
-        }
+    drift_scores = store.node_drift_scores()      # one query, all nodes
     ctx = SessionContext(recent_messages=(query,) if query else ())
     scored = UserFactsReranker(_reranker_weights()).score(
         live, ctx, recency_scores=recency_scores, drift_scores=drift_scores
