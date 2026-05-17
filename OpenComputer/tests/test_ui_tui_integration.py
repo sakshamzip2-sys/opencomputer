@@ -31,6 +31,7 @@ _DIST = _REPO / "opencomputer" / "ui-tui" / "dist"
 _CLIENT_BUNDLE = _DIST / "wireClient.js"
 _RENDER_BUNDLE = _DIST / "renderSmoke.js"
 _OVERLAYS_BUNDLE = _DIST / "overlaysSmoke.js"
+_MARKDOWN_BUNDLE = _DIST / "markdownSmoke.js"
 
 
 def _find_node() -> str | None:
@@ -215,3 +216,40 @@ def test_all_overlays_render() -> None:
         assert title in frame, f"overlay {title!r} missing from frame:\n{frame}"
     # Sample data rows rendered, not just the panel chrome.
     assert "claude-opus-4-7" in frame and "demo-skill" in frame, frame
+
+
+@pytest.mark.skipif(
+    _NODE is None or not _MARKDOWN_BUNDLE.is_file(),
+    reason="Node toolchain or built markdown-smoke bundle unavailable",
+)
+def test_markdown_renderer() -> None:
+    """The streaming-safe markdown renderer renders every construct.
+
+    markdownSmoke.js renders <Markdown> with a sample document; this
+    asserts each construct rendered AND that the markdown *syntax* was
+    consumed (no raw ``` fences or ** bold markers leak to the screen).
+    """
+    assert _NODE is not None  # guaranteed by skipif
+    proc = subprocess.run(
+        [_NODE, str(_MARKDOWN_BUNDLE)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    out = proc.stdout
+    assert "FRAME_START" in out and "FRAME_END" in out, (
+        f"markdown-smoke produced no frame.\nstdout={out!r}\nstderr={proc.stderr!r}"
+    )
+    frame = out.split("FRAME_START", 1)[1].split("FRAME_END", 1)[0]
+    for fragment in (
+        "Heading One",
+        "bold words",
+        "inline code",
+        "first bullet",
+        "const answer = 42",
+        "numbered item",
+    ):
+        assert fragment in frame, f"markdown fragment {fragment!r} missing:\n{frame}"
+    # Markdown syntax must be consumed, not shown raw.
+    assert "```" not in frame, f"raw code fence leaked to screen:\n{frame}"
+    assert "**" not in frame, f"raw bold markers leaked to screen:\n{frame}"

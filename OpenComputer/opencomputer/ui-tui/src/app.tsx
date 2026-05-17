@@ -31,19 +31,10 @@ import type {
   WireServerEvent,
 } from "./protocol.js";
 import { EVENT } from "./protocol.js";
+import { Markdown } from "./markdown.js";
+import { theme } from "./theme.js";
+import { Spinner } from "./widgets.js";
 import { OCWireClient } from "./wireClient.js";
-
-// ─── theme ──────────────────────────────────────────────────────────
-
-const theme = {
-  accent: "cyan",
-  user: "white",
-  assistant: "green",
-  tool: "yellow",
-  muted: "gray",
-  ok: "green",
-  error: "red",
-} as const;
 
 // ─── model ──────────────────────────────────────────────────────────
 
@@ -551,26 +542,43 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
 
       <Box flexDirection="column" marginBottom={1}>
         {turns.slice(-25).map((t, i) => (
-          <Box key={i} marginBottom={t.role === "system" ? 0 : 1}>
-            <Text color={colorFor(t.role)}>
-              {prefixFor(t.role)}
-              {t.text}
-            </Text>
+          <Box
+            key={i}
+            marginBottom={t.role === "system" ? 0 : 1}
+            flexDirection="column"
+          >
+            {t.role === "assistant" ? (
+              // Assistant text is rendered as markdown (headings, code
+              // blocks, bold, lists) — see markdown.tsx.
+              <Markdown text={t.text} />
+            ) : (
+              <Text color={colorFor(t.role)}>
+                {prefixFor(t.role)}
+                {t.text}
+              </Text>
+            )}
           </Box>
         ))}
         {streamBuf && (
-          <Text color={theme.assistant}>
-            {"› "}
-            {streamBuf}
+          // Live stream — markdown-rendered incrementally; the line-based
+          // renderer tolerates the half-finished document mid-stream.
+          <Box flexDirection="column">
+            <Markdown text={streamBuf} />
             <Text color={theme.muted}>▌</Text>
-          </Text>
+          </Box>
         )}
       </Box>
 
       <Box>
-        <Text color={busy ? theme.muted : theme.accent}>{busy ? "… " : "> "}</Text>
-        <Text>{input || (connected ? "" : "waiting for wire…")}</Text>
-        {!busy && <Text color={theme.muted}>▌</Text>}
+        {busy ? (
+          <Spinner label="thinking… (ESC interrupts)" />
+        ) : (
+          <>
+            <Text color={theme.accent}>{"> "}</Text>
+            <Text>{input || (connected ? "" : "waiting for wire…")}</Text>
+            <Text color={theme.muted}>▌</Text>
+          </>
+        )}
       </Box>
     </Box>
   );
