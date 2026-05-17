@@ -213,6 +213,13 @@ browser = [
 # E2B_API_KEY (free Hobby tier at https://e2b.dev/dashboard). See
 # opencomputer/sandbox/e2b.py and docs/refs/e2b/2026-05-16-sdk-survey.md.
 e2b = ["e2b>=2.21,<3"]
+# Optional: Daytona cloud sandbox backend (Milestone 2.1 — sandbox-provider-
+# breadth). A second cloud provider behind the same per-tool-call resolver
+# as [e2b]. Install with `pip install opencomputer[daytona]`, then set
+# DAYTONA_API_KEY (https://app.daytona.io/dashboard — $200 free credits at
+# signup, billed per second after). See opencomputer/sandbox/daytona.py and
+# docs/sandbox/daytona.md.
+daytona = ["daytona>=0.176,<0.200"]
 # Optional: NeuTTS local neural text-to-speech (Milestone 4). NeuTTS is an
 # on-device, voice-cloning TTS model — the VoiceSynthesizeLocal tool
 # synthesizes speech with no API call and no per-call cost. Heavy: it pulls

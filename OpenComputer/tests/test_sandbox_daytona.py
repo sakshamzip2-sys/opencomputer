@@ -189,3 +189,29 @@ def test_daytona_exported_from_sandbox_package():
     from opencomputer.sandbox import DaytonaSandboxStrategy as Exported
 
     assert Exported is DaytonaSandboxStrategy
+
+
+# --- T2.3 cost rate (F16 gate) ---------------------------------------------
+
+
+def test_daytona_has_nonzero_cost_rate():
+    """F16: a paid backend with no rate silently bypasses the session cap.
+
+    Daytona's seed rate MUST live in
+    ``DEFAULT_BACKEND_RATES_USD_PER_SECOND`` AND a fresh
+    :class:`SandboxCostGuard` must read it back as ``> 0``.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from opencomputer.cost_guard.sandbox import (
+        DEFAULT_BACKEND_RATES_USD_PER_SECOND,
+        SandboxCostGuard,
+    )
+
+    assert "daytona" in DEFAULT_BACKEND_RATES_USD_PER_SECOND
+    assert DEFAULT_BACKEND_RATES_USD_PER_SECOND["daytona"] > 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        guard = SandboxCostGuard(storage_path=Path(tmp) / "cost.json")
+        assert guard.rate_for("daytona") > 0
