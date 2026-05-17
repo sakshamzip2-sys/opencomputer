@@ -29,9 +29,6 @@ await esbuild.build({
   ...common,
   entryPoints: ["entry.tsx"],
   outfile: "../dist/entry.js",
-  // Ink lazy-loads react-devtools-core only when DEV=true; never needed
-  // in a shipped TUI, and it isn't installed.
-  external: ["react-devtools-core"],
 });
 
 await esbuild.build({
@@ -40,8 +37,15 @@ await esbuild.build({
   outfile: "../dist/wireClient.js",
 });
 
+// Render-smoke harness (test artifact — see tests/test_ui_tui_integration.py).
+await esbuild.build({
+  ...common,
+  entryPoints: ["renderSmoke.tsx"],
+  outfile: "../dist/renderSmoke.js",
+});
+
 // `oc tui` runs the bundle as ESM — the dist/ marker makes Node treat
 // the .js files as modules without a per-file extension dance.
 writeFileSync("../dist/package.json", JSON.stringify({ type: "module" }));
 
-console.log("built ../dist/entry.js + ../dist/wireClient.js");
+console.log("built ../dist/entry.js + wireClient.js + renderSmoke.js");

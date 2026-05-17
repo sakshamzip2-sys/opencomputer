@@ -27,7 +27,9 @@ import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 _TUI_SRC = _REPO / "opencomputer" / "ui-tui" / "src"
-_CLIENT_BUNDLE = _REPO / "opencomputer" / "ui-tui" / "dist" / "wireClient.js"
+_DIST = _REPO / "opencomputer" / "ui-tui" / "dist"
+_CLIENT_BUNDLE = _DIST / "wireClient.js"
+_RENDER_BUNDLE = _DIST / "renderSmoke.js"
 
 
 def _find_node() -> str | None:
@@ -147,3 +149,32 @@ async def test_ts_client_round_trips_against_real_wire_server(
     assert result["methods"] >= 25, result
     # sessions.list returned the row the test seeded.
     assert result["sessions"] >= 1, result
+
+
+@pytest.mark.skipif(
+    _NODE is None or not _RENDER_BUNDLE.is_file(),
+    reason="Node toolchain or built render-smoke bundle unavailable",
+)
+def test_app_renders_without_crashing() -> None:
+    """The Ink <App> component genuinely mounts and produces a frame.
+
+    Typecheck + bundle prove the TUI *compiles*; this proves it *renders*.
+    renderSmoke.js mounts <App> via ink-testing-library with a client
+    pointed at a dead port and prints the first frame between
+    FRAME_START / FRAME_END markers.
+    """
+    assert _NODE is not None  # guaranteed by skipif
+    proc = subprocess.run(
+        [_NODE, str(_RENDER_BUNDLE)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    out = proc.stdout
+    assert "FRAME_START" in out and "FRAME_END" in out, (
+        f"render-smoke produced no frame.\nstdout={out!r}\nstderr={proc.stderr!r}"
+    )
+    frame = out.split("FRAME_START", 1)[1].split("FRAME_END", 1)[0]
+    # The app's banner + a status line must be in the rendered output.
+    assert "OpenComputer TUI" in frame, f"banner missing from frame: {frame!r}"
+    assert "disconnected" in frame, f"status line missing from frame: {frame!r}"
