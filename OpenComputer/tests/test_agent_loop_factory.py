@@ -110,6 +110,62 @@ def test_factory_per_profile_plugin_filter(tmp_path: Path) -> None:
     assert loop.allowed_tools == frozenset()
 
 
+def test_factory_applies_model_override(tmp_path: Path) -> None:
+    """A truthy ``model_override`` must replace the profile-default model
+    on the constructed loop's frozen ``ModelConfig`` — the per-request
+    webui model-dropdown selection (openai_compat._run_agent_completion).
+
+    ``ModelConfig`` is ``@dataclass(frozen=True, slots=True)``; the
+    factory rebuilds the config immutably via ``dataclasses.replace``.
+    """
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+
+    loop = build_agent_loop_for_profile(
+        "p1", profile_home, model_override="some-test-model"
+    )
+    assert loop.config.model.model == "some-test-model"
+    # The provider is untouched — override is model-id only.
+    assert loop.config.model.provider == "anthropic"
+
+
+def test_factory_no_model_override_keeps_profile_default(tmp_path: Path) -> None:
+    """``model_override=None`` (the default — the gateway dispatch path
+    calls the factory WITHOUT the param) must leave the loop's model
+    byte-identical to the profile default. ``""`` is falsy → same.
+
+    The "profile default" is whatever ``load_config_for_profile`` would
+    resolve on its own; we capture it from a baseline no-arg build so
+    the assertion does not pin a specific model id.
+    """
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n"
+    )
+
+    # Baseline: no-arg call (the gateway dispatch path). Whatever model
+    # this resolves to IS the profile default for this test.
+    loop_default = build_agent_loop_for_profile("p1", profile_home)
+    profile_default_model = loop_default.config.model.model
+    assert profile_default_model  # sanity: a non-empty model id
+
+    # Explicit None — must be byte-identical to the no-arg call.
+    loop_none = build_agent_loop_for_profile(
+        "p1", profile_home, model_override=None
+    )
+    assert loop_none.config.model.model == profile_default_model
+
+    # Empty string is falsy → no-op, profile default retained.
+    loop_empty = build_agent_loop_for_profile(
+        "p1", profile_home, model_override=""
+    )
+    assert loop_empty.config.model.model == profile_default_model
+
+
 def test_factory_delegate_factory_closes_over_profile(tmp_path: Path) -> None:
     """Audit G3: a delegate spawned from this loop must build its child
     under THIS profile's home, not whatever was last set globally."""

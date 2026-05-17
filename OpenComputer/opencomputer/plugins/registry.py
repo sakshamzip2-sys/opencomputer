@@ -27,6 +27,7 @@ from opencomputer.plugins.loader import (
     teardown_loaded_plugin,
 )
 from opencomputer.tools.registry import registry as tool_registry
+from plugin_sdk.channel_contract import BaseChannelAdapter
 from plugin_sdk.core import SingleInstanceError
 from plugin_sdk.doctor import HealthContribution
 from plugin_sdk.provider_contract import BaseProvider
@@ -57,7 +58,7 @@ class PluginRegistry:
     """Holds all loaded plugins and the shared API they register into."""
 
     providers: dict[str, BaseProvider] = field(default_factory=dict)
-    channels: dict[str, object] = field(default_factory=dict)
+    channels: dict[str, BaseChannelAdapter] = field(default_factory=dict)
     loaded: list[LoadedPlugin] = field(default_factory=list)
     doctor_contributions: list[HealthContribution] = field(default_factory=list)
     # Phase 12b.6 Task D8: plugin-authored slash commands. Shared across

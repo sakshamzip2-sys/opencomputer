@@ -309,8 +309,13 @@ def _uninstall_service(*, profile: str, system: bool) -> None:
 
     backend = get_backend()
     if hasattr(backend, "uninstall"):
-        backend.uninstall(profile=profile)
-        typer.echo("Uninstalled service")
+        # ``ServiceBackend.uninstall`` is profile-aware (mirrors
+        # ``install``): pass the chosen ``profile`` so the backend
+        # removes THAT profile's service unit, not the default one.
+        result = backend.uninstall(profile=profile)
+        typer.echo(f"Uninstalled {result.backend} service")
+        for note in result.notes:
+            typer.echo(f"  note: {note}")
     else:
         typer.echo("uninstall not supported by current backend")
 

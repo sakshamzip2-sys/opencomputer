@@ -494,3 +494,63 @@ def test_chat_completions_skips_model_check_when_registry_empty(
             },
         )
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Per-request model override (frozen-ModelConfig bug fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_agent_completion_passes_model_override_to_factory(
+    tmp_path: Any,
+) -> None:
+    """``_run_agent_completion`` must forward the requested model into
+    ``build_agent_loop_for_profile`` as ``model_override`` so the loop is
+    constructed with the per-request model already in its (frozen) config.
+
+    Regression guard for the silently-dead override: the old code did
+    ``loop.config.model.model = model`` which always raised
+    ``FrozenInstanceError`` and was swallowed at DEBUG.
+    """
+    from opencomputer.dashboard.routes import openai_compat
+
+    captured: dict[str, Any] = {}
+
+    class _FakeResult:
+        final_message = type("M", (), {"content": "ok"})()
+
+    class _FakeLoop:
+        async def run_conversation(self, **_: Any) -> Any:
+            return _FakeResult()
+
+    def _fake_factory(
+        profile_id: str, profile_home: Any, *, model_override: Any = None,
+    ) -> _FakeLoop:
+        captured["model_override"] = model_override
+        return _FakeLoop()
+
+    with (
+        patch(
+            "opencomputer.gateway.agent_loop_factory.build_agent_loop_for_profile",
+            new=_fake_factory,
+        ),
+        patch(
+            "opencomputer.agent.config._home",
+            return_value=tmp_path,
+        ),
+        patch(
+            "opencomputer.agent.injection_registration."
+            "register_default_injection_providers",
+        ),
+    ):
+        result = await openai_compat._run_agent_completion(
+            user_message="hi",
+            history=[],
+            system_prompt=None,
+            model="user-picked-model",
+            oc_session_id=None,
+        )
+
+    assert result == "ok"
+    assert captured["model_override"] == "user-picked-model"

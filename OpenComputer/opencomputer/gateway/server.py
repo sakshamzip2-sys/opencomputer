@@ -147,10 +147,19 @@ class Gateway:
             def _resolve_profile_home(profile_id: str) -> Path:
                 # Default profile -> ``_home()`` (the active
                 # OPENCOMPUTER_HOME or default).
-                # Per-profile -> ``~/.opencomputer/<profile_id>``.
+                # Named profile -> the canonical
+                # ``~/.opencomputer/profiles/<profile_id>`` directory.
+                # ``get_profile_dir`` is the single source of truth for
+                # profile paths (it adds the ``profiles/`` segment) —
+                # building the path by hand here previously dropped that
+                # segment, so the gateway routed named-profile messages
+                # to a blank, silently-``mkdir``'d directory and the
+                # profile lost all its memory / sessions / config / .env.
+                from opencomputer.profiles import get_profile_dir
+
                 if profile_id == "default":
                     return _resolve_home()
-                return Path.home() / ".opencomputer" / profile_id
+                return get_profile_dir(profile_id)
 
             router = _AgentRouter(
                 loop_factory=_wrapped_factory,

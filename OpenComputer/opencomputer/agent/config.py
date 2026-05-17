@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+# ``reset_policy`` is stdlib-only (no ``opencomputer`` imports) so this
+# top-level import introduces no circular dependency — ``config`` and
+# ``gateway.reset_policy`` share the ``ResetMode`` literal as the single
+# source of truth for ``GatewayConfig.reset_mode``.
+from opencomputer.gateway.reset_policy import ResetMode
+
 # Note: AuxiliaryConfig + AuxSlotConfig are defined in this module (see
 # below) — single source of truth. ``opencomputer.agent.auxiliary_client``
 # re-exports them so legacy imports keep working without circular-import
@@ -1228,7 +1234,11 @@ class GatewayConfig:
     #     reset_by_platform:
     #       telegram: { mode: idle, idle_minutes: 240 }
     #       discord:  { mode: idle, idle_minutes: 60 }
-    reset_mode: str = "both"
+    #
+    # ``reset_mode`` is the ``ResetMode`` literal — the same alias the
+    # ``ResetPolicyChecker`` consumes. ``reset_policy`` is stdlib-only
+    # so importing it here introduces no circular dependency.
+    reset_mode: ResetMode = "both"
     reset_daily_at_hour: int = 4
     reset_idle_minutes: int = 1440
     reset_by_platform: dict = field(default_factory=dict)
@@ -1850,17 +1860,21 @@ def load_config_for_profile(profile_home: Path) -> Config:
     ``SessionConfig.db_path``, ``MemoryConfig.declarative_path``,
     etc. capture ``profile_home`` rather than the process default.
 
-    Reads ``profile_home/config.yaml`` if present; falls back to
-    defaults from environment + bundled wizard outputs (matches
-    ``default_config()`` semantics under a different home).
+    Reads ``profile_home/config.yaml`` if present (via
+    :func:`opencomputer.agent.config_store.load_config`, which merges
+    the YAML overrides onto the defaults). A missing or empty
+    config.yaml falls back to defaults.
 
     The function does NOT mutate process state — ``set_profile`` is
     a context manager that resets on exit.
     """
+    # Function-level import: config_store imports from this module, so a
+    # module-level import here would create a circular import.
+    from opencomputer.agent.config_store import load_config
     from plugin_sdk.profile_context import set_profile
 
     with set_profile(profile_home):
-        return default_config()
+        return load_config()
 
 
 __all__ = [
