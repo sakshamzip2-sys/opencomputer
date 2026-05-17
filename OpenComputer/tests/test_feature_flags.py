@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from opencomputer.agent.feature_flags import (
+    DEFAULT_LIFE_EVENTS,
     DEFAULT_POLICY_FLAGS,
     FeatureFlags,
 )
@@ -69,3 +70,41 @@ def test_corrupt_json_falls_back_to_defaults(tmp_path):
     path.write_text("this is not json")
     f = FeatureFlags(path)
     assert f.read("policy_engine.enabled") is True  # default
+
+
+# ---------------------------------------------------------------------------
+# life_events.* namespace
+# ---------------------------------------------------------------------------
+
+
+def test_life_events_default_when_file_missing(tmp_path):
+    """Absent flag file → multi_surface_life_events returns False."""
+    f = FeatureFlags(tmp_path / "feature_flags.json")
+    assert f.read("life_events.multi_surface_life_events") is False
+
+
+def test_life_events_write_then_read(tmp_path):
+    """Written True value round-trips through write() / read()."""
+    f = FeatureFlags(tmp_path / "feature_flags.json")
+    f.write("life_events.multi_surface_life_events", True)
+    assert f.read("life_events.multi_surface_life_events") is True
+
+
+def test_life_events_unknown_key_returns_caller_default(tmp_path):
+    """Unknown life_events.<something> returns the caller-supplied default."""
+    f = FeatureFlags(tmp_path / "feature_flags.json")
+    assert f.read("life_events.no_such_flag", default="sentinel") == "sentinel"
+    assert f.read("life_events.no_such_flag") is None
+
+
+def test_life_events_not_seeded_into_read_all(tmp_path):
+    """life_events is NOT pre-seeded by read_all() (only policy_engine is)."""
+    f = FeatureFlags(tmp_path / "feature_flags.json")
+    flags = f.read_all()
+    assert "life_events" not in flags
+
+
+def test_life_events_default_constant_shape():
+    """DEFAULT_LIFE_EVENTS exists and has the expected key with False default."""
+    assert "multi_surface_life_events" in DEFAULT_LIFE_EVENTS
+    assert DEFAULT_LIFE_EVENTS["multi_surface_life_events"] is False
