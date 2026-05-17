@@ -892,6 +892,80 @@ def _resolve_plugin_filter():
     return resolved.enabled
 
 
+def _activation_mode() -> str:
+    """Resolve the best-of-three Recipe 3 activation flag.
+
+    ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan`` opts into manifest-driven
+    activation narrowing; anything else (including unset) keeps today's
+    load-everything behaviour. ``OPENCOMPUTER_LOAD_ALL_PLUGINS=1`` is a
+    hard escape hatch that forces ``all`` regardless — the documented
+    way to bisect a "missing plugin" report.
+
+    Default is ``all``: narrowing stays opt-in until the extension
+    catalog carries enough ``activation`` metadata to narrow safely.
+    """
+    if os.environ.get("OPENCOMPUTER_LOAD_ALL_PLUGINS") == "1":
+        return "all"
+    return os.environ.get("OPENCOMPUTER_PLUGIN_ACTIVATION", "all").strip().lower()
+
+
+def _activation_narrowed_enabled_ids(search_paths):  # type: ignore[no-untyped-def]
+    """Build a narrowed ``enabled_ids`` set from the activation planner.
+
+    Best-of-three Recipe 3. Only consulted when the user has NO explicit
+    ``profile.yaml`` plugin filter and ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan``.
+    Reads each plugin's ``manifest.activation`` block and the current
+    provider/model triggers, then returns the deterministic set of
+    plugin ids whose triggers fire.
+
+    The result is intentionally a *seed* set: ``load_all`` still unions
+    in ``enabled_by_default`` plugins (Layer D) and model-matched
+    plugins (Layer C), so a session never loses its provider.
+
+    Returns ``None`` on any failure — the caller then falls back to
+    loading everything. Narrowing must never wedge startup.
+    """
+    import logging
+
+    log = logging.getLogger("opencomputer.cli")
+    try:
+        from opencomputer.agent.config import _home, load_config_for_profile
+        from opencomputer.plugins.activation_planner import (
+            ActivationTriggers,
+            plan_activations,
+        )
+        from opencomputer.plugins.discovery import discover
+
+        candidates = discover(search_paths)
+        try:
+            cfg = load_config_for_profile(_home())
+            provider = getattr(cfg.model, "provider", "") or ""
+            model = getattr(cfg.model, "model", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            log.warning("activation planner: config read failed (%s)", exc)
+            provider, model = "", ""
+        triggers = ActivationTriggers(
+            active_providers=frozenset(p for p in (provider,) if p),
+            active_model=model,
+        )
+        planned = plan_activations(candidates, triggers)
+        log.info(
+            "plugin activation planner: %d/%d plugins triggered "
+            "(provider=%r model=%r); load_all then unions in "
+            "enabled_by_default + model-matched plugins",
+            len(planned),
+            len(candidates),
+            provider,
+            model,
+        )
+        return frozenset(planned)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "activation planner failed — loading all plugins: %s", exc
+        )
+        return None
+
+
 def _discover_plugins() -> int:
     """Discover + load plugins from the canonical search paths. Returns count loaded.
 
@@ -902,6 +976,13 @@ def _discover_plugins() -> int:
 
     search_paths = standard_search_paths()
     enabled = _resolve_plugin_filter()
+    # Best-of-three Recipe 3 — activation narrowing. Only when the user
+    # has no explicit filter (``enabled is None``) and the flag opts in.
+    # A user-curated profile.yaml is never second-guessed.
+    if enabled is None and _activation_mode() == "plan":
+        narrowed = _activation_narrowed_enabled_ids(search_paths)
+        if narrowed is not None:
+            enabled = narrowed
     loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
 
     # v1.1 plan-3 M11.5 — Mount any plugin-registered CLI subcommand
