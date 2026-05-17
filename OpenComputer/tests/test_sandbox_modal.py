@@ -175,3 +175,56 @@ def test_modal_conforms_against_mocked_sdk(monkeypatch):
     cls.create.aio = AsyncMock(side_effect=fake_create)
     with patch("modal.Sandbox", cls):
         assert_conforms(ModalSandboxStrategy())
+
+
+# --- T2.6 wiring ------------------------------------------------------------
+
+
+def test_modal_in_strategy_name_literal():
+    """``"modal"`` is in ``SandboxStrategyName`` — CLI auto-derives via Literal."""
+    import typing
+
+    from plugin_sdk.sandbox import SandboxStrategyName
+
+    assert "modal" in typing.get_args(SandboxStrategyName)
+
+
+def test_modal_resolvable_via_named_strategy(monkeypatch):
+    """``runner._named_strategy("modal")`` returns a ``ModalSandboxStrategy``."""
+    from opencomputer.sandbox.runner import _named_strategy
+
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-token")
+    monkeypatch.setattr(
+        "opencomputer.sandbox.modal._modal_toml_exists", lambda: False
+    )
+    backend = _named_strategy("modal")
+    assert isinstance(backend, ModalSandboxStrategy)
+    assert backend.name == "modal"
+
+
+def test_modal_exported_from_sandbox_package():
+    """``from opencomputer.sandbox import ModalSandboxStrategy`` works."""
+    from opencomputer.sandbox import ModalSandboxStrategy as Exported
+
+    assert Exported is ModalSandboxStrategy
+
+
+# --- T2.7 cost rate (F16 gate) ---------------------------------------------
+
+
+def test_modal_has_nonzero_cost_rate():
+    """F16: a paid backend with no rate silently bypasses the session cap."""
+    import tempfile
+    from pathlib import Path
+
+    from opencomputer.cost_guard.sandbox import (
+        DEFAULT_BACKEND_RATES_USD_PER_SECOND,
+        SandboxCostGuard,
+    )
+
+    assert "modal" in DEFAULT_BACKEND_RATES_USD_PER_SECOND
+    assert DEFAULT_BACKEND_RATES_USD_PER_SECOND["modal"] > 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        guard = SandboxCostGuard(storage_path=Path(tmp) / "cost.json")
+        assert guard.rate_for("modal") > 0

@@ -27,6 +27,7 @@ from opencomputer.sandbox.docker import DockerStrategy
 from opencomputer.sandbox.e2b import E2BSandboxStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
+from opencomputer.sandbox.modal import ModalSandboxStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
 from opencomputer.sandbox.policy import SandboxPolicy, SandboxScopeContext, scope_key
 from opencomputer.sandbox.ssh import SSHSandboxStrategy
@@ -54,11 +55,13 @@ def _named_strategy(name: str) -> SandboxStrategy:
         s = E2BSandboxStrategy()
     elif name == "daytona":
         s = DaytonaSandboxStrategy()
+    elif name == "modal":
+        s = ModalSandboxStrategy()
     else:
         raise SandboxUnavailable(
             f"unknown sandbox strategy {name!r}; "
             "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / "
-            "e2b / daytona / none"
+            "e2b / daytona / modal / none"
         )
     if not s.is_available():
         raise SandboxUnavailable(
