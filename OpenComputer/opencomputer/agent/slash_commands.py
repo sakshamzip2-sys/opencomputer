@@ -83,6 +83,7 @@ from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.status_cmd import StatusCommand
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
+from opencomputer.agent.slash_commands_impl.undo_cmd import UndoCommand
 from opencomputer.agent.slash_commands_impl.update_cmd import UpdateCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
 from opencomputer.plugins.registry import registry as _plugin_registry
@@ -152,6 +153,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # B1 /rollback [N], B2 /busy [interrupt|queue|steer|status],
     # B3 /details [section] [mode], D5 /mouse [on|off|toggle|status].
     RollbackCommand,
+    # 2026-05-17 — Hermes-parity /undo. Conversation-history op: removes
+    # the last user/assistant exchange (distinct from /rollback, which
+    # restores filesystem checkpoints).
+    UndoCommand,
     BusyCommand,
     DetailsCommand,
     MouseCommand,

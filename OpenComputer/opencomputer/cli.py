@@ -2991,6 +2991,18 @@ def _run_chat_session(
                 _image_queue.append(str(p.resolve()))
                 return (True, f"queued image for next turn: {p.name}")
 
+            def _on_undo() -> str:
+                # Bridge cli_ui's sync slash dispatcher to the /undo logic.
+                # undo_last_exchange is plain sync (no event loop needed),
+                # so this closes over the live SessionDB + current session
+                # id directly. ``session_id`` is nonlocal — read live so a
+                # post-/resume swap targets the right session.
+                from opencomputer.agent.slash_commands_impl.undo_cmd import (
+                    undo_last_exchange,
+                )
+
+                return undo_last_exchange(session_id, loop.db)
+
             def _on_reasoning_dispatch(args: str) -> str:
                 # Bridge cli_ui's sync slash dispatcher into the async
                 # ReasoningCommand. Closes over ``runtime`` so the
@@ -3063,6 +3075,7 @@ def _run_chat_session(
                 on_image_attach=_on_image_attach,
                 on_reasoning_dispatch=_on_reasoning_dispatch,
                 on_sources_dispatch=_on_sources_dispatch,
+                on_undo=_on_undo,
                 # Live (model, provider) getter — closes over the running
                 # AgentLoop so ``/model`` and ``/provider`` no-arg reads
                 # reflect the CURRENT state after any number of mid-session

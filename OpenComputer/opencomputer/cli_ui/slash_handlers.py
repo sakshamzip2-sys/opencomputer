@@ -153,6 +153,10 @@ class SlashContext:
     on_sources_dispatch: Callable[[str], str] = lambda _args: (
         "/sources callback not wired"
     )
+    #: ``/undo`` — remove the last user/assistant exchange. Bridges to the
+    #: agent ``UndoCommand``; the chat loop binds this to a closure over
+    #: the live SessionDB + session id. Returns the status text to print.
+    on_undo: Callable[[], str] = lambda: "/undo callback not wired"
     #: ``/goal <text>`` mid-run race-guard — returns True iff the AgentLoop
     #: is currently streaming a turn for this session. The slash handler
     #: refuses the SET form when this is True (status / pause / resume /
@@ -1637,6 +1641,16 @@ def _handle_paste(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_undo(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/undo`` — remove the last user/assistant exchange.
+
+    Bridges to the agent ``UndoCommand`` via the ``on_undo`` callback,
+    which the chat loop binds to a closure over the live SessionDB.
+    """
+    ctx.console.print(ctx.on_undo())
+    return SlashResult(handled=True)
+
+
 # ─── Hermes-parity Tier B (2026-04-30): /retry + /stop ───────────────
 
 
@@ -1739,6 +1753,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "paste":    _handle_paste,
     "tools":    _handle_tools_inline,
     "retry":    _handle_retry,
+    "undo":     _handle_undo,
     "stop":     _handle_stop_bg,
     "reasoning": _handle_reasoning,
     "sources": _handle_sources,

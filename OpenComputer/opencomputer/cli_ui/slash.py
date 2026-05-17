@@ -260,6 +260,14 @@ SLASH_REGISTRY: list[CommandDef] = [
         description="Resend the last user message (queues it for next turn).",
         category="session",
     ),
+    # Hermes-parity — removes the last user/assistant exchange. Logic
+    # lives in the agent UndoCommand; this entry + _handle_undo bridge
+    # it into the oc-chat REPL (mirrors /reasoning, /sources).
+    CommandDef(
+        name="undo",
+        description="Remove the last user/assistant exchange from this session.",
+        category="session",
+    ),
     CommandDef(
         name="stop",
         description="Kill all background processes for this session.",
