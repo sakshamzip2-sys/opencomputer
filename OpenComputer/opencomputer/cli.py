@@ -2362,6 +2362,18 @@ def _run_chat_session(
 
     profile_home = _profile_home_fn()
 
+    # Best-of-three Recipe 2 — surface every System-A built-in command
+    # (agent/slash_commands_impl) in the CLI chat registry so it shows in
+    # /help + autocomplete and dispatches via the System-A bridge below.
+    try:
+        from opencomputer.cli_ui.slash_handlers import sync_builtin_commands
+
+        sync_builtin_commands()
+    except Exception as _sync_exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "built-in command sync failed: %s", _sync_exc
+        )
+
     # Best-of-three Recipe 1 — fold user-authored ``*.md`` slash commands
     # into the registry at boot so they show in /help + autocomplete and
     # dispatch like built-ins. Project-dir commands are opt-in via
@@ -3102,6 +3114,50 @@ def _run_chat_session(
                 )
                 return dispatch_agent_slash_to_console(text, rt, console)
 
+            def _on_builtin_dispatch(name: str, args: str) -> tuple[bool, str]:
+                # Best-of-three Recipe 2 — bridge a System-B miss to the
+                # System-A built-in command registry. Runs the matching
+                # agent/slash_commands_impl Command with the live runtime
+                # so cli_ui never imports the agent registry directly.
+                # Tried BEFORE ``_dispatch_agent_fallthrough`` in
+                # ``dispatch_slash`` so a CommandDef-known slash with no
+                # native handler is resolved here (eliminates the prior
+                # sethome/voice/approve/deny/status KeyError class).
+                import asyncio as _asyncio_bi
+                from dataclasses import replace as _dc_replace
+
+                from opencomputer.agent.slash_commands import (
+                    register_builtin_slash_commands,
+                )
+                from opencomputer.agent.slash_dispatcher import (
+                    dispatch as _bi_dispatch,
+                )
+                from opencomputer.plugins.registry import (
+                    registry as _bi_registry,
+                )
+
+                register_builtin_slash_commands()  # idempotent
+                msg = f"/{name}" + (f" {args}" if args.strip() else "")
+                rt = loop._runtime
+                custom = dict(getattr(rt, "custom", {}) or {})
+                custom.setdefault("session_id", session_id)
+                custom.setdefault("plugin_registry", _bi_registry)
+                rt = _dc_replace(rt, custom=custom)
+                try:
+                    res = _asyncio_bi.run(
+                        _bi_dispatch(msg, _bi_registry.slash_commands, rt)
+                    )
+                except RuntimeError:
+                    _inner = _asyncio_bi.get_event_loop()
+                    _fut = _asyncio_bi.run_coroutine_threadsafe(
+                        _bi_dispatch(msg, _bi_registry.slash_commands, rt),
+                        _inner,
+                    )
+                    res = _fut.result(timeout=30.0)
+                if res is None:
+                    return (False, "")
+                return (True, getattr(res, "output", "") or "")
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -3133,6 +3189,7 @@ def _run_chat_session(
                 on_reasoning_dispatch=_on_reasoning_dispatch,
                 on_sources_dispatch=_on_sources_dispatch,
                 on_undo=_on_undo,
+                on_builtin_dispatch=_on_builtin_dispatch,
                 # Live (model, provider) getter — closes over the running
                 # AgentLoop so ``/model`` and ``/provider`` no-arg reads
                 # reflect the CURRENT state after any number of mid-session
