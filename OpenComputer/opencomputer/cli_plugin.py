@@ -1499,6 +1499,176 @@ def verify(
     raise typer.Exit(code=1)
 
 
+# ── plugin doctor (best-of-three Recipe 8) ───────────────────────────
+
+
+def _host_version() -> str:
+    """Running opencomputer version, or '' if it can't be resolved."""
+    try:
+        from importlib.metadata import version
+
+        return version("opencomputer")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _entry_file(candidate: object) -> Path | None:
+    """Resolve a candidate's entry-module source file on disk."""
+    manifest = candidate.manifest  # type: ignore[attr-defined]
+    entry = str(getattr(manifest, "entry", "") or "plugin")
+    root = candidate.root_dir  # type: ignore[attr-defined]
+    cand = root / entry if entry.endswith(".py") else root / f"{entry}.py"
+    return cand if cand.is_file() else None
+
+
+def _diagnose_plugin(candidate: object) -> list[tuple[str, str, str]]:
+    """Run read-only checks on one discovered plugin.
+
+    Returns ``[(check, status, detail)]`` with status in
+    PASS / FAIL / SKIP / INFO. No plugin code is executed — the entry
+    module is syntax-checked via ``compile()``, never imported.
+    """
+    from opencomputer.plugins.loader import (
+        PluginIncompatibleError,
+        _check_min_host_version,
+    )
+    from opencomputer.plugins.registry import _manifest_allows_profile
+    from opencomputer.profiles import read_active_profile
+
+    manifest = candidate.manifest  # type: ignore[attr-defined]
+    rows: list[tuple[str, str, str]] = []
+
+    # 1. Manifest — discovery already parsed + validated it.
+    rows.append(("manifest", "PASS", f"v{manifest.version}, kind={manifest.kind}"))
+
+    # 2. Entry module — exists + compiles (syntax only, never executed).
+    entry_file = _entry_file(candidate)
+    if entry_file is None:
+        rows.append(("entry module", "FAIL", "entry source file not found"))
+    else:
+        try:
+            compile(
+                entry_file.read_text(encoding="utf-8"), str(entry_file), "exec"
+            )
+            rows.append(("entry module", "PASS", entry_file.name))
+        except (SyntaxError, OSError) as exc:
+            rows.append(("entry module", "FAIL", f"{type(exc).__name__}: {exc}"))
+
+    # 3. min_host_version compatibility.
+    min_host = str(getattr(manifest, "min_host_version", "") or "")
+    if not min_host:
+        rows.append(("min_host_version", "SKIP", "not declared"))
+    else:
+        try:
+            _check_min_host_version(
+                plugin_id=manifest.id,
+                min_host_version=min_host,
+                host_version=_host_version() or "0",
+            )
+            rows.append(("min_host_version", "PASS", f">= {min_host}"))
+        except PluginIncompatibleError as exc:
+            rows.append(("min_host_version", "FAIL", str(exc)))
+
+    # 4. Profile scope.
+    active = read_active_profile() or "default"
+    allowed, reason = _manifest_allows_profile(manifest, active)
+    if allowed:
+        rows.append(("profile scope", "PASS", f"allowed in {active!r}"))
+    else:
+        rows.append(("profile scope", "FAIL", reason or f"excluded in {active!r}"))
+
+    # 5. Enabled status — against the resolved profile.yaml filter.
+    try:
+        from opencomputer.cli import _resolve_plugin_filter
+
+        enabled = _resolve_plugin_filter()
+    except Exception:  # noqa: BLE001
+        enabled = None
+    if enabled is None:
+        rows.append(("enabled", "SKIP", "no explicit filter — all enabled"))
+    elif manifest.id in enabled:
+        rows.append(("enabled", "PASS", "in active enabled set"))
+    else:
+        # Disabled-by-config is a deliberate state, not a fault — keep
+        # it INFO so ``doctor`` exits non-zero only on real breakage.
+        rows.append(("enabled", "INFO", "disabled — not in profile.yaml enabled set"))
+
+    # 6. Declared surface (informational).
+    n_tools = len(getattr(manifest, "tool_names", ()) or ())
+    n_mcp = len(getattr(manifest, "mcp_servers", ()) or ())
+    n_cli = len(getattr(manifest, "cli_commands", ()) or ())
+    rows.append((
+        "declared surface",
+        "INFO",
+        f"{n_tools} tools, {n_mcp} mcp servers, {n_cli} cli commands",
+    ))
+    return rows
+
+
+_DOCTOR_STYLE = {
+    "PASS": "green",
+    "FAIL": "red",
+    "SKIP": "dim",
+    "INFO": "cyan",
+}
+
+
+@plugin_app.command("doctor")
+def plugin_doctor(
+    plugin_id: str = typer.Argument(
+        "", help="Plugin id to diagnose. Omit and pass --all for every plugin."
+    ),
+    check_all: bool = typer.Option(
+        False, "--all", help="Diagnose every discovered plugin."
+    ),
+) -> None:
+    """Diagnose plugins — manifest, entry module, compatibility, status.
+
+    Read-only: the entry module is syntax-checked, never imported, so
+    ``doctor`` is safe to run against an untrusted plugin.
+    """
+    from opencomputer.plugins.discovery import discover, standard_search_paths
+
+    candidates = discover(standard_search_paths())
+    by_id = {c.manifest.id: c for c in candidates}
+
+    if check_all:
+        targets = sorted(by_id)
+    elif plugin_id:
+        if plugin_id not in by_id:
+            _console.print(
+                f"[red]no plugin {plugin_id!r} discovered.[/red] "
+                f"run [cyan]oc plugins[/cyan] to list discovered ids."
+            )
+            raise typer.Exit(code=1)
+        targets = [plugin_id]
+    else:
+        _console.print(
+            "usage: [cyan]oc plugin doctor <id>[/cyan] "
+            "or [cyan]oc plugin doctor --all[/cyan]"
+        )
+        raise typer.Exit(code=2)
+
+    any_fail = False
+    for tid in targets:
+        rows = _diagnose_plugin(by_id[tid])
+        table = Table(title=f"plugin doctor — {tid}", header_style="bold")
+        table.add_column("Check", style="bold")
+        table.add_column("Status")
+        table.add_column("Detail")
+        for check, status, detail in rows:
+            if status == "FAIL":
+                any_fail = True
+            table.add_row(
+                check,
+                f"[{_DOCTOR_STYLE.get(status, 'white')}]{status}[/]",
+                detail,
+            )
+        _console.print(table)
+    if any_fail:
+        raise typer.Exit(code=1)
+
+
 # ── named marketplaces (best-of-three Recipe 5) ──────────────────────
 
 marketplace_app = typer.Typer(
