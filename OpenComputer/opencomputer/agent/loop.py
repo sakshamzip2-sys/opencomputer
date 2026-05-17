@@ -3664,6 +3664,15 @@ class AgentLoop:
                 except Exception:
                     pass  # bash tool may not be registered in some contexts
 
+                # M5 (sandbox-provider-breadth): PythonExec's plain mode
+                # routes through the same resolved backend — give it the
+                # live runtime too, the same propagation pattern as BashTool.
+                try:
+                    from opencomputer.tools.python_exec import PythonExec
+                    PythonExec.set_runtime(self._runtime)
+                except Exception:
+                    pass  # python_exec tool may not be registered
+
                 # v1.1 plan-2 M5.2 (2026-05-09): snapshot the message
                 # history BEFORE dispatching this tool block so a later
                 # `oc session rewind --mode conv_only` can restore state
