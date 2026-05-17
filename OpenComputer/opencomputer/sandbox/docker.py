@@ -1,10 +1,17 @@
-"""Docker strategy — cross-platform containment via ``docker run --rm ...``.
+"""Docker strategy — cross-platform containment via ``docker run`` / ``exec``.
 
 Available on any host with the ``docker`` CLI on PATH AND a reachable
-daemon (verified once at construction via ``docker info``). Each call
-spawns a transient container; we set ``--rm`` so cleanup is automatic
-and ``--name`` so we can ``docker kill`` if the wrapper process gets
-orphaned during a timeout.
+daemon (verified once at construction via ``docker info``).
+
+Two execution modes:
+
+* **Transient** (default — no ``container_key``): each call spawns a fresh
+  ``docker run --rm`` container. We set ``--name`` so an orphaned
+  container can be ``docker kill``-ed during a timeout.
+* **Pooled** (M3 — ``container_key`` set for session / agent / shared
+  scope): the call ``docker exec``s into a long-lived container leased
+  from :class:`~opencomputer.sandbox.pool.ContainerPool`, so repeated
+  same-scope, same-containment calls reuse one container.
 
 Memory cap: ``--memory <N>m``. Network: ``--network none`` when
 ``config.network_allowed=False``. Path bindings: ``-v src:dst:ro`` for
@@ -17,6 +24,7 @@ responsible for ensuring the image is pulled — we don't auto-pull.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -29,6 +37,7 @@ from opencomputer.sandbox._common import (
     decode_stream,
     filtered_env,
 )
+from opencomputer.sandbox.pool import ContainerPool
 from plugin_sdk.sandbox import SandboxConfig, SandboxResult, SandboxStrategy
 
 _log = logging.getLogger("opencomputer.sandbox.docker")
@@ -71,8 +80,23 @@ def _derive_cpu_quota(cpu_seconds_limit: int) -> int:
     return min(2, max(1, cpu_seconds_limit // 30))
 
 
+#: Process-wide container reuse pool. A module-level singleton because
+#: ``_named_strategy("docker")`` mints a fresh ``DockerStrategy`` per call —
+#: the pool's per-key locks MUST be shared across every instance.
+_pool_singleton: ContainerPool | None = None
+
+
+def _get_pool() -> ContainerPool:
+    """Return the process-wide :class:`ContainerPool` (lazy singleton)."""
+    global _pool_singleton
+    if _pool_singleton is None:
+        _pool_singleton = ContainerPool()
+    return _pool_singleton
+
+
 class DockerStrategy(SandboxStrategy):
-    """Wraps argv in ``docker run --rm ...``."""
+    """Wraps argv in ``docker run --rm ...`` (transient) or ``docker exec``
+    into a pooled container (reuse-scoped)."""
 
     name = "docker"
 
@@ -106,45 +130,41 @@ class DockerStrategy(SandboxStrategy):
     def is_available(self) -> bool:
         return self._available
 
-    def _wrap(
-        self,
-        argv: list[str],
-        *,
-        config: SandboxConfig,
-        container_name: str,
-    ) -> list[str]:
-        cmd: list[str] = [
-            "docker", "run",
-            "--rm",
-            "-i",
-            "--name", container_name,
+    def _containment_flags(self, config: SandboxConfig) -> list[str]:
+        """``docker run`` containment flags shared by the transient and
+        pooled paths — everything EXCEPT ``--rm`` / ``-i`` / ``--name``,
+        the ``-e`` env, the image, and argv. The flag order is preserved
+        so the transient :meth:`_wrap` output stays byte-identical to
+        pre-M3 (the ``test_docker_strategy_*`` tests are the guard).
+        """
+        flags: list[str] = [
             "--memory", f"{config.memory_mb_limit}m",
             "--cpus", str(_derive_cpu_quota(config.cpu_seconds_limit)),
         ]
         # Hermes-parity hardening: cap-drop ALL + selective re-adds,
         # no-new-privileges, pids-limit, tmpfs trio. Always-on; see
         # _SECURITY_ARGS for rationale.
-        cmd.extend(_SECURITY_ARGS)
+        flags.extend(_SECURITY_ARGS)
         if not config.network_allowed:
-            cmd.extend(["--network", "none"])
+            flags.extend(["--network", "none"])
         # Hermes parity: container_persistent: false locks down /workspace
         # + /root with explicit tmpfs so the implicit container layer can't
         # accumulate state. Default True (no extra tmpfs) preserves
         # current behaviour.
         if not config.container_persistent:
-            cmd.extend(["--tmpfs", "/workspace:rw,size=512m"])
-            cmd.extend(["--tmpfs", "/root:rw,size=256m"])
+            flags.extend(["--tmpfs", "/workspace:rw,size=512m"])
+            flags.extend(["--tmpfs", "/root:rw,size=256m"])
         for p in config.read_paths:
-            cmd.extend(["-v", f"{p}:{p}:ro"])
+            flags.extend(["-v", f"{p}:{p}:ro"])
         for p in config.write_paths:
-            cmd.extend(["-v", f"{p}:{p}:rw"])
-        # P3.5 Hermes-parity: bind-mount each
-        # ``required_credential_files`` entry from the active profile
-        # read-only into ``/root/.opencomputer/<path>``. Skills that
-        # declare ``required_credential_files`` in SKILL.md frontmatter
-        # contribute via the global registry; missing files are
-        # skipped silently (logged at debug). All mounts ``:ro`` —
-        # the container can read but never overwrite.
+            flags.extend(["-v", f"{p}:{p}:rw"])
+        # P3.5 Hermes-parity: bind-mount each ``required_credential_files``
+        # entry from the active profile read-only into
+        # ``/root/.opencomputer/<path>``. Skills that declare
+        # ``required_credential_files`` in SKILL.md frontmatter contribute
+        # via the global registry; missing files are skipped silently
+        # (logged at debug). All mounts ``:ro`` — the container can read
+        # but never overwrite.
         try:
             from opencomputer.profiles import (
                 profile_home_dir,
@@ -158,11 +178,19 @@ class DockerStrategy(SandboxStrategy):
             if active:
                 profile_home = profile_home_dir(active)
                 for host, container in resolve_credential_file_paths(profile_home):
-                    cmd.extend(["-v", f"{host}:{container}:ro"])
+                    flags.extend(["-v", f"{host}:{container}:ro"])
         except Exception:  # noqa: BLE001 — credential-mount failure must
             # never starve a sandbox launch; the skill that declared the
             # missing file will surface its own runtime error.
             _log.debug("credential file mount resolution failed", exc_info=True)
+        return flags
+
+    def _env_flags(self, config: SandboxConfig) -> list[str]:
+        """``-e KEY=VALUE`` flags — the allowlisted env unioned with
+        skill-declared passthrough. Used by the transient ``docker run``
+        and the pooled ``docker exec`` alike (env is per-invocation, so it
+        is NOT baked into a pooled container at creation).
+        """
         # Pass through allowed env vars. We use ``-e KEY=VALUE`` rather
         # than ``--env-file`` so the env stays purely in argv (easier to
         # audit + no temp file to clean up).
@@ -185,19 +213,72 @@ class DockerStrategy(SandboxStrategy):
                     env_pass[key] = val
         except Exception:  # noqa: BLE001
             _log.debug("skill-declared env passthrough union failed", exc_info=True)
+        flags: list[str] = []
         for k, v in env_pass.items():
-            cmd.extend(["-e", f"{k}={v}"])
+            flags.extend(["-e", f"{k}={v}"])
+        return flags
+
+    def _wrap(
+        self,
+        argv: list[str],
+        *,
+        config: SandboxConfig,
+        container_name: str,
+    ) -> list[str]:
+        """Build the transient ``docker run --rm`` argv.
+
+        Composition of :meth:`_containment_flags` + :meth:`_env_flags`; the
+        flag order is byte-identical to the pre-M3 single-method ``_wrap``.
+        """
+        cmd: list[str] = [
+            "docker", "run",
+            "--rm",
+            "-i",
+            "--name", container_name,
+        ]
+        cmd.extend(self._containment_flags(config))
+        cmd.extend(self._env_flags(config))
         cmd.append(config.image)
         cmd.extend(argv)
         return cmd
 
+    def _pool_key(self, config: SandboxConfig) -> str:
+        """Pool key for a reuse-scoped call: the scope-derived
+        ``container_key`` plus a digest of the containment-relevant config.
+
+        Two calls share a pooled container ONLY when both their scope AND
+        their containment config match — a pooled container's ``docker
+        run`` flags are fixed at creation, so a differing ``image`` /
+        ``network`` / memory / mounts must key a *distinct* container
+        (audit finding P6).
+        """
+        material = "|".join([
+            config.image,
+            str(config.network_allowed),
+            str(config.memory_mb_limit),
+            str(_derive_cpu_quota(config.cpu_seconds_limit)),
+            str(config.container_persistent),
+            ",".join(config.read_paths),
+            ",".join(config.write_paths),
+        ])
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+        return f"{config.container_key}-{digest}"
+
     def explain(self, argv: list[str], *, config: SandboxConfig) -> list[str]:
-        name = (
-            f"oc-sandbox-{config.container_key}"
-            if config.container_key
-            else "oc-sandbox-explain"
+        # Mirror what `run` would do: a reuse-scoped call (`container_key`
+        # set) goes through the pooled `docker exec` path; everything else
+        # is a transient `docker run --rm`.
+        if config.container_key:
+            container = ContainerPool.container_name(self._pool_key(config))
+            return [
+                "docker", "exec", "-i",
+                *self._env_flags(config),
+                container,
+                *argv,
+            ]
+        return self._wrap(
+            argv, config=config, container_name="oc-sandbox-explain"
         )
-        return self._wrap(argv, config=config, container_name=name)
 
     async def run(
         self,
@@ -207,10 +288,27 @@ class DockerStrategy(SandboxStrategy):
         stdin: bytes | None = None,
         cwd: str | None = None,
     ) -> SandboxResult:
-        # Scope-keyed name when the runner derived one (session / agent /
-        # shared scope); a fresh uuid otherwise (tool / none scope, or no
-        # policy) — preserving the historical transient-per-call behavior.
-        container_name = f"oc-sandbox-{config.container_key or uuid.uuid4().hex[:12]}"
+        # A reuse-scoped call (``container_key`` set by the runner / loop
+        # for session / agent / shared scope) routes through the container
+        # pool; everything else keeps the byte-identical transient path.
+        if config.container_key:
+            return await self._run_pooled(
+                argv, config=config, stdin=stdin, cwd=cwd
+            )
+        return await self._run_transient(
+            argv, config=config, stdin=stdin, cwd=cwd
+        )
+
+    async def _run_transient(
+        self,
+        argv: list[str],
+        *,
+        config: SandboxConfig,
+        stdin: bytes | None,
+        cwd: str | None,
+    ) -> SandboxResult:
+        """Run argv in a fresh ``docker run --rm`` container (pre-M3 path)."""
+        container_name = f"oc-sandbox-{uuid.uuid4().hex[:12]}"
         wrapped = self._wrap(argv, config=config, container_name=container_name)
         # Docker daemon already isolates env from the host shell, so we
         # don't need to pass ``env=`` here (the ``-e`` flags inside
@@ -265,5 +363,80 @@ class DockerStrategy(SandboxStrategy):
             stderr=decode_stream(stderr),
             duration_seconds=time.monotonic() - start,
             wrapped_command=wrapped,
+            strategy_name=self.name,
+        )
+
+    async def _run_pooled(
+        self,
+        argv: list[str],
+        *,
+        config: SandboxConfig,
+        stdin: bytes | None,
+        cwd: str | None,
+    ) -> SandboxResult:
+        """Run argv inside a reused (pooled) container via ``docker exec``.
+
+        The pool creates the container once (``docker run -d`` with the
+        containment flags) and this call ``docker exec``s into it. The
+        container is NOT removed after the call — that is the point of
+        pooling; ``oc sandbox prune`` (M4) cleans pooled containers up.
+        """
+        pool = _get_pool()
+        pool_key = self._pool_key(config)
+        # ``acquire`` raises SandboxUnavailable on a create failure — the
+        # caller (BashTool._execute_in_sandbox) maps that to the
+        # sandbox.fallback policy, exactly as for any unreachable backend.
+        container = await pool.acquire(
+            pool_key,
+            image=config.image,
+            run_flags=self._containment_flags(config),
+        )
+        # ``docker exec`` the command into the pooled container. ``-i``
+        # mirrors the transient path's stdin handling; ``-e`` carries the
+        # per-call env.
+        exec_argv: list[str] = ["docker", "exec", "-i"]
+        exec_argv.extend(self._env_flags(config))
+        exec_argv.append(container)
+        exec_argv.extend(argv)
+        start = time.monotonic()
+        proc = await asyncio.create_subprocess_exec(
+            *exec_argv,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=stdin),
+                timeout=config.cpu_seconds_limit,
+            )
+        except TimeoutError:
+            # Kill the ``docker exec`` CLI. We do NOT ``docker kill`` the
+            # container — it is pooled / shared. The timed-out command's
+            # in-container process may linger until the pooled container
+            # is pruned or recreated (``oc sandbox prune``, M4).
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001
+                pass
+            return SandboxResult(
+                exit_code=TIMEOUT_EXIT_CODE,
+                stdout="",
+                stderr=TIMEOUT_STDERR,
+                duration_seconds=time.monotonic() - start,
+                wrapped_command=exec_argv,
+                strategy_name=self.name,
+            )
+        return SandboxResult(
+            exit_code=proc.returncode if proc.returncode is not None else -1,
+            stdout=decode_stream(stdout),
+            stderr=decode_stream(stderr),
+            duration_seconds=time.monotonic() - start,
+            wrapped_command=exec_argv,
             strategy_name=self.name,
         )

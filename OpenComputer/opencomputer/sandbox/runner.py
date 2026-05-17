@@ -29,7 +29,12 @@ from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
 from opencomputer.sandbox.modal import ModalSandboxStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
-from opencomputer.sandbox.policy import SandboxPolicy, SandboxScopeContext, scope_key
+from opencomputer.sandbox.policy import (
+    SandboxPolicy,
+    SandboxScope,
+    SandboxScopeContext,
+    scope_key,
+)
 from opencomputer.sandbox.ssh import SSHSandboxStrategy
 from plugin_sdk.sandbox import (
     SandboxConfig,
@@ -98,7 +103,17 @@ async def run_sandboxed(
     cfg = config or SandboxConfig()
 
     if policy is not None and cfg.container_key is None:
-        cfg = replace(cfg, container_key=scope_key(policy, scope_ctx))
+        # Only a *poolable* scope's key drives container reuse. ``tool``
+        # produces a fresh per-call uuid and ``none`` an empty key —
+        # threading either as ``container_key`` would make the Docker
+        # strategy pool a never-reused container per call. ``tool`` /
+        # ``none`` keep the transient path (``container_key`` stays None).
+        if policy.scope in (
+            SandboxScope.SESSION,
+            SandboxScope.AGENT,
+            SandboxScope.SHARED,
+        ):
+            cfg = replace(cfg, container_key=scope_key(policy, scope_ctx))
 
     if cfg.strategy == "auto":
         try:

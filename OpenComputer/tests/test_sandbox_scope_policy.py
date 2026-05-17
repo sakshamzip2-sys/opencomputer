@@ -271,11 +271,19 @@ def test_sandbox_config_container_key_defaults_none() -> None:
     assert SandboxConfig(container_key="session-abc").container_key == "session-abc"
 
 
-def test_docker_explain_uses_container_key_when_set() -> None:
+def test_docker_explain_pooled_when_container_key_set() -> None:
+    """M3: a reuse-scoped call (``container_key`` set) explains as the
+    pooled ``docker exec`` form; a keyless call stays transient
+    ``docker run --rm``."""
     strat = DockerStrategy()
-    keyed = strat.explain(["echo", "hi"], config=SandboxConfig(container_key="shared"))
-    assert "oc-sandbox-shared" in keyed
+    keyed = strat.explain(
+        ["echo", "hi"], config=SandboxConfig(container_key="shared")
+    )
+    assert keyed[:3] == ["docker", "exec", "-i"]
+    assert any(tok.startswith("oc-pool-shared-") for tok in keyed)
+    assert keyed[-2:] == ["echo", "hi"]
     plain = strat.explain(["echo", "hi"], config=SandboxConfig())
+    assert plain[:2] == ["docker", "run"]
     assert "oc-sandbox-explain" in plain
 
 

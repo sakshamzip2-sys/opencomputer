@@ -138,3 +138,67 @@ def test_different_keys_get_distinct_containers() -> None:
     names = asyncio.run(_both())
     assert sorted(names) == ["oc-pool-k1", "oc-pool-k2"]
     assert fake.count("run") == 2
+
+
+# --- T3.2: docker.py pooled-path integration --------------------------------
+
+
+def test_docker_pool_key_deterministic_and_config_sensitive() -> None:
+    """``_pool_key`` = scope key + a digest of the containment config (P6)."""
+    from opencomputer.sandbox.docker import DockerStrategy
+    from plugin_sdk.sandbox import SandboxConfig
+
+    strat = DockerStrategy()
+    base = SandboxConfig(container_key="session-x")
+    assert strat._pool_key(base) == strat._pool_key(base)  # deterministic
+    assert strat._pool_key(base).startswith("session-x-")  # scope-key prefix
+    # A different image / network keys a DISTINCT pooled container.
+    assert strat._pool_key(base) != strat._pool_key(
+        SandboxConfig(container_key="session-x", image="python:3.12-slim")
+    )
+    assert strat._pool_key(base) != strat._pool_key(
+        SandboxConfig(container_key="session-x", network_allowed=True)
+    )
+
+
+def test_docker_run_pooled_execs_into_acquired_container() -> None:
+    """``run`` with a ``container_key`` acquires a pooled container and
+    ``docker exec``s the command into it (mocked — no real Docker)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from opencomputer.sandbox.docker import DockerStrategy
+    from plugin_sdk.sandbox import SandboxConfig, SandboxResult
+
+    fake_pool = MagicMock()
+    fake_pool.acquire = AsyncMock(return_value="oc-pool-session-x-abc123def456")
+
+    captured: dict[str, tuple[str, ...]] = {}
+
+    async def fake_exec(*argv: str, **_kw: object):
+        del _kw  # absorb stdin/stdout/stderr/cwd kwargs — unused here
+        captured["argv"] = argv
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"pooled-ok\n", b""))
+        proc.returncode = 0
+        return proc
+
+    strat = DockerStrategy()
+    with (
+        patch("opencomputer.sandbox.docker._get_pool", return_value=fake_pool),
+        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+    ):
+        result = asyncio.run(
+            strat.run(
+                ["echo", "hi"],
+                config=SandboxConfig(container_key="session-x"),
+            )
+        )
+    assert isinstance(result, SandboxResult)
+    assert result.exit_code == 0
+    assert result.stdout == "pooled-ok\n"
+    assert result.strategy_name == "docker"
+    fake_pool.acquire.assert_awaited_once()
+    argv = captured["argv"]
+    assert argv[:2] == ("docker", "exec")
+    assert "oc-pool-session-x-abc123def456" in argv
+    assert argv[-2:] == ("echo", "hi")
