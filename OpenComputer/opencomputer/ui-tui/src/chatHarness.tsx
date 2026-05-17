@@ -1,13 +1,13 @@
 // OpenComputer TUI — chat-loop integration harness.
 //
 // Mounts the real <App> against a SCRIPTED mock wire server (URL from
-// argv) and drives a full turn: send a message, watch the streamed
-// markdown + tool call + tool result, answer a permission prompt, see
-// the retry banner, then scroll back and recall input history.
+// argv) and drives a full conversation: tab-completes a slash command,
+// sends a message, watches the streamed markdown + tool call + tool
+// result + memory event, answers a permission prompt, sees the retry
+// banner, queues a follow-up while busy, then scrolls back and recalls
+// history.
 //
-// Exercises the conversation-loop fixes the unit smokes can't:
-// tool.result, permission.request, stream.retry, scrollback, history.
-//
+// Exercises every conversation-loop fix the unit smokes can't.
 // Driven by tests/test_ui_tui_chat_loop.py. A build/test artifact.
 
 import { render } from "ink-testing-library";
@@ -30,24 +30,41 @@ async function run(): Promise<void> {
   await pause(900); // connect + hello
   emit("CONNECTED");
 
-  stdin.write("hello there"); // type a message
+  // Tab-completion: type a prefix, Tab completes it from the palette.
+  stdin.write("/mod");
+  await pause(150);
+  stdin.write("\t");
   await pause(200);
-  stdin.write("\r"); // send → mock scripts the turn
-  await pause(900); // turn.begin → tool calls → tool.result → permission.request
-  emit("MID_TURN"); // tool call + result + the permission prompt
+  emit("TAB");
+  stdin.write("\x1b"); // ESC clears the composer
+  await pause(150);
 
-  stdin.write("a"); // allow_once → app sends permission.response
-  await pause(450);
-  emit("RETRY"); // mock emits stream.retry before finishing
+  // Turn 1 — the scripted turn (tool calls, memory event, permission).
+  stdin.write("hello there");
+  await pause(200);
+  stdin.write("\r");
+  await pause(950);
+  emit("MID_TURN");
 
-  await pause(1300); // mock finishes: assistant.message + turn.end
-  emit("AFTER"); // final markdown reply, prompt + retry cleared
+  stdin.write("a"); // allow_once → permission.response
+  await pause(300);
+  emit("RETRY"); // retry banner is visible in this window
+
+  // Queue a follow-up while the turn is still running.
+  stdin.write("a queued question");
+  await pause(150);
+  stdin.write("\r");
+  await pause(220);
+  emit("QUEUED");
+
+  await pause(1900); // turn 1 ends → queued message drains → turn 2
+  emit("AFTER");
 
   stdin.write("\x1b[5~"); // PageUp
   await pause(250);
   emit("SCROLLED");
 
-  stdin.write("\x1b[A"); // up arrow at an empty composer → recall history
+  stdin.write("\x1b[A"); // up arrow → recall input history
   await pause(250);
   emit("HISTORY");
 

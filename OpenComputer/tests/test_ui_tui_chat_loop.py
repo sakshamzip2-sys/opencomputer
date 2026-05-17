@@ -64,6 +64,8 @@ async def _mock_wire_handler(ws) -> None:  # noqa: ANN001 — websockets server 
     async def ev(name: str, payload: dict) -> None:
         await ws.send(json.dumps({"type": "event", "event": name, "payload": payload}))
 
+    chat_count = 0
+
     async for raw in ws:
         msg = json.loads(raw)
         method = msg.get("method")
@@ -81,6 +83,7 @@ async def _mock_wire_handler(ws) -> None:  # noqa: ANN001 — websockets server 
         elif method == "slash.list":
             await res(mid, {"commands": []})
         elif method == "chat":
+            chat_count += 1
             await res(
                 mid,
                 {
@@ -91,6 +94,13 @@ async def _mock_wire_handler(ws) -> None:  # noqa: ANN001 — websockets server 
                     "output_tokens": 0,
                 },
             )
+            if chat_count > 1:
+                # The queued follow-up message — a short turn so the test
+                # can confirm the queue drained after turn 1 ended.
+                await ev("turn.begin", {"request_id": "r2"})
+                await ev("assistant.message", {"delta": "second reply received"})
+                await ev("turn.end", {"request_id": "r2"})
+                continue
             await ev("turn.begin", {"request_id": "r1"})
             await ev("assistant.message", {"delta": "Running steps.\n\n"})
             # 30 tool calls → >25 turns → scrollback (#4) becomes reachable.
@@ -100,6 +110,11 @@ async def _mock_wire_handler(ws) -> None:  # noqa: ANN001 — websockets server 
             await ev(
                 "tool.result",
                 {"content": "hello from the tool", "is_error": False},
+            )
+            # event surfacing — memory.write should appear as a system line.
+            await ev(
+                "memory.write",
+                {"action": "append", "target": "MEMORY.md", "cap_limit": 4000},
             )
             # #2 — consent prompt; the rest of the turn waits for the answer.
             await ev(
@@ -164,22 +179,31 @@ async def test_chat_loop_closes_all_functional_defects() -> None:
     def section(name: str) -> str:
         return text.split(f"<<{name}>>", 1)[1].split("<<", 1)[0]
 
+    tab = section("TAB")
     mid = section("MID_TURN")
     retry = section("RETRY")
+    queued = section("QUEUED")
     after = section("AFTER")
     scrolled = section("SCROLLED")
     hist = section("HISTORY")
 
+    # Batch B — Tab completed "/mod" → "/model" from the palette.
+    assert "/model" in tab, f"tab-completion did not fill the command:\n{tab}"
     # #1 — tool call AND tool result render in the transcript.
     assert "step-" in mid, f"tool.call turns missing:\n{mid}"
     assert "hello from the tool" in mid, f"tool.result not rendered (#1):\n{mid}"
+    # Batch B — the memory.write event surfaced as a system line.
+    assert "memory:" in mid, f"memory.write event not surfaced:\n{mid}"
     # #2 — the permission prompt appeared and paused the turn.
     assert "Permission needed" in mid, f"permission prompt missing (#2):\n{mid}"
     assert "shell.exec" in mid, f"permission capability missing:\n{mid}"
     # #3 — the retry banner showed (it was a silent frozen spinner before).
     assert "retry" in retry.lower(), f"stream.retry banner missing (#3):\n{retry}"
-    # The turn completed: final markdown rendered, prompt + retry cleared.
+    # Batch B — a message typed while busy was queued, not dropped.
+    assert "queued:" in queued, f"message was not queued while busy:\n{queued}"
+    # The turn completed AND the queued follow-up drained into turn 2.
     assert "answer" in after, f"final assistant message not rendered:\n{after}"
+    assert "second reply" in after, f"queued message never drained:\n{after}"
     assert "Permission needed" not in after, f"permission prompt stuck:\n{after}"
     # #4 — >25 turns, so PageUp genuinely scrolls (a "newer" marker appears).
     assert "newer" in scrolled, f"scrollback did not move (#4):\n{scrolled}"

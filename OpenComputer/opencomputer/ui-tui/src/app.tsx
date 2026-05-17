@@ -114,6 +114,7 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
   const [scrollOffset, setScrollOffset] = useState(0); // 0 = pinned to bottom
   const [history, setHistory] = useState<string[]>([]); // submitted inputs
   const [histIdx, setHistIdx] = useState(-1); // -1 = not recalling
+  const [queue, setQueue] = useState<string[]>([]); // messages typed while busy
 
   // Per-overlay data.
   const [sessions, setSessions] = useState<SessionRow[]>([]);
@@ -210,6 +211,18 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       } else if (ev.event === EVENT.PERMISSION_REQUEST) {
         // Functional fix #2 — the turn used to hang with no prompt.
         setPermReq(payload as unknown as PermissionRequestPayload);
+      } else if (ev.event === EVENT.MEMORY_WRITE) {
+        sys(
+          `memory: ${String(payload.action ?? "write")} → ` +
+            `${String(payload.target ?? "")}`,
+        );
+      } else if (ev.event === EVENT.EVOLUTION_TUNING_CHANGED) {
+        sys("evolution: self-tuning thresholds updated");
+      } else if (ev.event === EVENT.PROFILE_SWAP) {
+        sys(
+          `profile: ${String(payload.from_profile ?? "?")} → ` +
+            `${String(payload.to_profile ?? "?")}`,
+        );
       } else if (ev.event === EVENT.ERROR) {
         push({ role: "system", text: `error: ${String(payload.error ?? "")}` });
         setBusy(false);
@@ -223,6 +236,17 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, resumeSpec]);
+
+  // ── queued-message drain ──────────────────────────────────────────
+  // Messages typed while a turn was running are queued; when the turn
+  // ends (busy → false) the next one is dispatched, in order.
+  useEffect(() => {
+    if (busy || queue.length === 0 || !connected) return;
+    const next = queue[0];
+    setQueue((q) => q.slice(1));
+    if (next) void sendText(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, queue, connected]);
 
   // ── resume plumbing ────────────────────────────────────────────────
   async function applyResume(): Promise<void> {
@@ -516,11 +540,29 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
       void openOverlay("sessions");
       return;
     }
-    if (busy) return;
-    if (key.return) {
-      void send();
+    // Tab completes the current slash command from the palette.
+    if (key.tab && showPalette) {
+      const f = ed.text.slice(1);
+      const match = slashList.find((c) => c.name.startsWith(f));
+      if (match) ed.setText(`/${match.name} `);
       return;
     }
+    if (key.return) {
+      const m = ed.text.trim();
+      if (busy) {
+        // A turn is running — queue the message; the drain effect sends
+        // it when the turn ends. Input is no longer dropped while busy.
+        if (m) {
+          setQueue((q) => [...q, m]);
+          ed.clear();
+          sys(`queued: ${m.length > 40 ? `${m.slice(0, 40)}…` : m}`);
+        }
+      } else {
+        void send();
+      }
+      return;
+    }
+    // Typing is allowed while busy — compose the next message ahead.
     const consumed = ed.onKey(raw, key);
     if (consumed) return;
     // Editor declined the key — at the top/bottom line, ↑↓ recall history.
@@ -535,7 +577,12 @@ export function App({ client, resumeSpec = "" }: AppProps): React.ReactElement {
     ed.clear();
     setHistory((h) => (h[h.length - 1] === msg ? h : [...h, msg]));
     setHistIdx(-1);
+    void sendText(msg);
+  }
 
+  /** Dispatch one already-trimmed message — a slash command or a chat turn.
+   *  Shared by the live composer and the queued-message drain. */
+  async function sendText(msg: string): Promise<void> {
     if (msg.startsWith("/")) {
       const parts = msg.slice(1).split(/\s+/);
       const name = (parts[0] ?? "").toLowerCase();
