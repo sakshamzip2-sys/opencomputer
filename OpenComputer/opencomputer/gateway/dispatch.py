@@ -433,6 +433,13 @@ class Dispatch:
         # otherwise-invisible binding/routing/profile-rebind decision;
         # shown once per session so it doesn't clutter every reply.
         self._routing_badge_shown: set[str] = set()
+        # M3 #5 — per-session count of consent approval prompts sent.
+        # Bumped by _send_approval_prompt; the dispatcher snapshots it
+        # before/after run_conversation so mechanism #5
+        # (no_interactive_consent) fires only on turns that actually
+        # paid the async-consent round-trip, not structurally on every
+        # turn (the gateway DOES have working interactive consent).
+        self._consent_prompt_counts: dict[str, int] = {}
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
         # Task I.9: the shared PluginAPI whose ``in_request`` we wrap
@@ -1331,6 +1338,30 @@ class Dispatch:
             # composed system prompt — staying out of the FROZEN base
             # so prefix-cache hits on turn 2+ remain valid.
             runtime = self._build_channel_runtime(event, adapter, loop)
+            # M3 #7 fix — display.persona_override. When the operator
+            # has pinned a persona for gateway sessions, thread it onto
+            # the runtime so the loop's existing override path
+            # (_build_persona_overlay) applies it instead of letting the
+            # platform-driven classifier pick a casual register.
+            #   value "none"/"off" → suppress the persona overlay entirely
+            #   any other value     → pin that persona id
+            # CRITICAL: _build_channel_runtime returns the module-shared
+            # DEFAULT_RUNTIME_CONTEXT when there is no channel_id —
+            # mutating its .custom would leak across every session (the
+            # #10-class bug). So we build a FRESH RuntimeContext here.
+            _persona_override = str(
+                (self._display_cfg.get("display") or {}).get(
+                    "persona_override", ""
+                )
+                or ""
+            ).strip()
+            if _persona_override:
+                _rt_custom = dict(getattr(runtime, "custom", {}) or {})
+                if _persona_override.lower() in ("none", "off", "disabled"):
+                    _rt_custom["persona_disabled"] = True
+                else:
+                    _rt_custom["persona_id_override"] = _persona_override
+                runtime = RuntimeContext(custom=_rt_custom)
             # M1 parity telemetry — mechanisms decidable from the
             # per-turn runtime: #4 (channel_prompt_overlay) fired iff
             # _build_channel_runtime stuffed a channel-scoped prompt or
@@ -1355,17 +1386,24 @@ class Dispatch:
                         if _overlay
                         else {},
                     )
+                    # #7 — fires when the turn runs in the platform-
+                    # driven casual register. A display.persona_override
+                    # (pin or disable) closes the gap → fired=False.
                     _agent_ctx = getattr(runtime, "agent_context", "chat") or "chat"
+                    _persona_pinned = bool(
+                        _custom.get("persona_id_override")
+                        or _custom.get("persona_disabled")
+                    )
                     _parity_probe.observe(
                         "persona_casual_register",
-                        _agent_ctx == "chat",
-                        {"agent_context": _agent_ctx},
+                        _agent_ctx == "chat" and not _persona_pinned,
+                        {
+                            "agent_context": _agent_ctx,
+                            "persona_override": _persona_pinned,
+                        },
                     )
-                    _parity_probe.observe(
-                        "no_interactive_consent",
-                        True,
-                        {"mode": "async_round_trip"},
-                    )
+                    # #5 (no_interactive_consent) is decided AFTER the
+                    # turn — see the post-run consent-delta observe.
                 except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
                     logger.debug("parity probe observe (runtime) failed", exc_info=True)
             # Phase 2 audit G1: bind the per-task ``current_profile_home``
@@ -1530,6 +1568,10 @@ class Dispatch:
                 # key written by one turn's ``_record_compaction`` leaks
                 # into every later turn's runtime and would over-report.
                 _pre_compactions = _read_compactions_count(loop.db, session_id)
+                # M3 #5 — snapshot the consent-prompt count so we can
+                # tell, post-turn, whether this turn actually paid an
+                # async-consent round-trip.
+                _pre_consent = self._consent_prompt_counts.get(session_id, 0)
 
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
@@ -1753,6 +1795,22 @@ class Dispatch:
                                 "compactions_after": _post_compactions,
                             }
                             if _compacted
+                            else {},
+                        )
+                        # #5 — fired iff this turn actually sent an
+                        # async-consent approval prompt. The gateway HAS
+                        # working interactive consent (buttons + text
+                        # reply); #5 marks the turns that paid its
+                        # round-trip latency, not every turn.
+                        _post_consent = self._consent_prompt_counts.get(
+                            session_id, 0
+                        )
+                        _consent_roundtrip = _post_consent > _pre_consent
+                        _parity_probe.observe(
+                            "no_interactive_consent",
+                            _consent_roundtrip,
+                            {"prompts": _post_consent - _pre_consent}
+                            if _consent_roundtrip
                             else {},
                         )
                     except Exception:  # noqa: BLE001
@@ -2199,6 +2257,12 @@ class Dispatch:
         # otherwise a synchronous failure would leave a dangling entry
         # that a stale click could pick up against a future request.
         self._approval_tokens[token] = (session_id, claim.capability_id)
+        # M3 #5 telemetry — record that this turn paid an async-consent
+        # round-trip, so mechanism #5 fires only when consent actually
+        # happened (not structurally on every turn).
+        self._consent_prompt_counts[session_id] = (
+            self._consent_prompt_counts.get(session_id, 0) + 1
+        )
         return True
 
     async def _maybe_resolve_consent_text_reply(

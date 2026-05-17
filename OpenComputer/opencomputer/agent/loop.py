@@ -4099,6 +4099,16 @@ class AgentLoop:
         # path so the agent never wedges over a bad override.
         override_id = ""
         rt = getattr(self, "_runtime", None)
+
+        # M3 #7 fix — ``display.persona_override: none`` (threaded onto
+        # the runtime by the gateway dispatcher as ``persona_disabled``)
+        # suppresses the persona overlay entirely, so a gateway session
+        # is not pushed into the platform-driven casual register.
+        if rt is not None and rt.custom.get("persona_disabled"):
+            self._active_persona_id = ""
+            self._active_persona_preferred_tone = ""
+            return ""
+
         if rt is not None:
             override_id = str(
                 rt.custom.get("persona_id_override", "") or ""

@@ -89,8 +89,11 @@ async def test_structural_mechanisms_fire_without_routing(tmp_path: Path) -> Non
     assert fired["tool_allowlist"] is False
     assert fired["profile_rebind"] is False
     assert fired["routing_decision_invisible"] is False
-    # Structural mechanisms — always fire on a gateway turn.
-    assert fired["no_interactive_consent"] is True
+    # #5 — M3 made this per-turn, not structural: no gated tool was
+    # invoked, so no async-consent round-trip happened → does not fire.
+    assert fired["no_interactive_consent"] is False
+    # #7 — the persona casual register still fires (no override set).
+    assert fired["persona_casual_register"] is True
     assert fired["runtime_footer_off"] is True  # footer off by default
 
 
@@ -259,3 +262,62 @@ async def test_routing_badge_shows_once_per_session(
 
     assert "↪ routed: agent=stocks" in (first or "")
     assert "↪ routed:" not in (second or "")  # suppressed on turn 2
+
+
+@pytest.mark.asyncio
+async def test_persona_override_closes_mechanism_7(tmp_path: Path) -> None:
+    """M3 #7 — display.persona_override threads onto the runtime and
+    flips persona_casual_register off (gap closed)."""
+    loop = _fake_loop(tmp_path)
+    router = AgentRouter(
+        loop_factory=lambda pid, home: loop,
+        profile_home_resolver=lambda pid: tmp_path / pid,
+    )
+    dispatch = Dispatch(
+        router=router, config={"display": {"persona_override": "none"}}
+    )
+    await dispatch.handle_message(_event())
+
+    rows = query_parity_log(tmp_path / "audit.db")
+    persona = next(
+        r for r in rows if r["mechanism_id"] == "persona_casual_register"
+    )
+    assert persona["fired"] is False
+    assert persona["detail"]["persona_override"] is True
+
+
+@pytest.mark.asyncio
+async def test_consent_mechanism_5_fires_only_on_roundtrip(
+    tmp_path: Path,
+) -> None:
+    """M3 #5 — no_interactive_consent fires only when a consent prompt
+    was actually sent this turn, not structurally every turn."""
+    loop = _fake_loop(tmp_path)
+    router = AgentRouter(
+        loop_factory=lambda pid, home: loop,
+        profile_home_resolver=lambda pid: tmp_path / pid,
+    )
+    dispatch = Dispatch(router=router)
+
+    sid = {"v": ""}
+
+    async def fake_run(user_message: str, session_id: str, **kw):
+        # Simulate the consent gate sending an approval prompt mid-turn.
+        sid["v"] = session_id
+        dispatch._consent_prompt_counts[session_id] = (
+            dispatch._consent_prompt_counts.get(session_id, 0) + 1
+        )
+        result = MagicMock()
+        result.final_message = MagicMock(content="ok")
+        result.input_tokens = 0
+        return result
+
+    loop.run_conversation = fake_run
+    await dispatch.handle_message(_event())
+
+    rows = query_parity_log(tmp_path / "audit.db")
+    consent = next(
+        r for r in rows if r["mechanism_id"] == "no_interactive_consent"
+    )
+    assert consent["fired"] is True  # a prompt was sent → fired
+    assert consent["detail"]["prompts"] == 1

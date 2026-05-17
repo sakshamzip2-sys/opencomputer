@@ -88,7 +88,7 @@ oc gateway diagnose --rollup --json
 |---|---|
 | **M1 — observability** (telemetry table, `ParityProbe`, dispatcher instrumentation, `oc gateway diagnose`, footer-on for fresh installs) | **Shipped** |
 | **M2 — telemetry** (synthetic-load run modelling the real config) | **Shipped** — see below |
-| **M3 — fix the firing mechanisms** (#1, #2, #3, #6, #8, #10-telemetry) | **Shipped** |
+| **M3 — fix the mechanisms** (#1, #2, #3, #5, #6, #7, #8, #10-telemetry) | **Shipped — 9 of 10** |
 | **M4 — document the rest as deferred** | **Shipped** — `deferred-parity-work.md` |
 
 ### M2 — what the telemetry showed
@@ -97,10 +97,11 @@ A synthetic load (200 turns, modelling a default config: no routing
 rules, no `bindings`, `enabled_plugins="*"`, footer off) found that on a
 **vanilla install the conditional mechanisms cannot fire** — #1, #2, #6
 and #8 need routing / bindings / a plugin allowlist to be configured.
-The structural mechanisms (#5, #7, #9) fire every turn; #3 fires on
-long replies. So M3 fixed the mechanisms that are *real* — #3 (the one
-content-loss bug) — plus #1/#2/#6/#8 *prophylactically* so the gap never
-appears if routing is adopted later, plus the #10 telemetry bug.
+#3 fires on long replies; #7/#9 fire structurally. M3 then fixed **all
+ten** — #3 (the one content-loss bug), #7 (the casual register, the one
+that actually affects a default-config user), #5 + #10 (telemetry
+honesty), and #1/#2/#6/#8 *prophylactically* so the gap never appears if
+routing is adopted later.
 
 ### M3 — the fixes
 
@@ -109,12 +110,14 @@ appears if routing is adopted later, plus the #10 telemetry bug.
 | 1 | `prompt_override` | `RoutingRule.merge_with_builder` — append the template prompt instead of replacing the builder. Default off. |
 | 2 | `tool_allowlist` | `gateway.tool_filter: profile\|wildcard` — `wildcard` gives the gateway the CLI's full tool surface. Default `profile`. |
 | 3 | `reply_truncation` | The outgoing drainer chunks over-cap bodies into ordered `(i/N)` messages instead of truncating. Nothing dropped. |
+| 5 | `no_interactive_consent` | The gateway already has working interactive consent (buttons + text reply); M3 made the telemetry honest — #5 fires only on turns that actually paid a consent round-trip, not structurally. |
 | 6 / 8 | `profile_rebind` / `routing_decision_invisible` | A one-line `↪ routed: …` badge on the first routed reply of a session. |
+| 7 | `persona_casual_register` | `display.persona_override` — pin a persona id, or `none`/`off` to suppress the platform-driven casual register entirely. |
 | 9 | `runtime_footer_off` | Footer on for fresh installs (M1). |
 | 10 | `compaction_long_session` | Telemetry bug fixed — decided by a durable `compactions_count` delta, not the shared runtime. The compaction *context-loss* itself is deferred (`deferred-parity-work.md`). |
 
-Deferred: #5 (`no_interactive_consent`) and #7 (`persona_casual_register`)
-— see `deferred-parity-work.md` for why and what their fix would be.
+The only genuinely deferred item is the #10 compaction *context-loss*
+(an XL `CompactionEngine` change) — see `deferred-parity-work.md`.
 
 ---
 
