@@ -196,7 +196,30 @@ class HookEngine:
         async def _run_and_record(spec: HookSpec, ctx: HookContext) -> None:
             handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
             try:
-                await spec.handler(ctx)
+                if spec.timeout_ms and spec.timeout_ms > 0:
+                    await asyncio.wait_for(
+                        spec.handler(ctx),
+                        timeout=spec.timeout_ms / 1000.0,
+                    )
+                else:
+                    await spec.handler(ctx)
+            except TimeoutError:
+                # ``wait_for`` has already cancelled the wedged coroutine —
+                # swallow the timeout (fail-open), matching fire_blocking and
+                # collect_inject_contexts. A wedged hook must never wedge the
+                # loop (CLAUDE.md §7).
+                logger.warning(
+                    "fire-and-forget hook %s timed out after %dms — failing open",
+                    handler_id,
+                    spec.timeout_ms,
+                )
+                _record(
+                    event=ctx.event.value,
+                    source_id=handler_id,
+                    ok=False,
+                    summary=f"timeout after {spec.timeout_ms}ms",
+                )
+                return
             except Exception as exc:  # noqa: BLE001 — runner already logs
                 _record(
                     event=ctx.event.value,
