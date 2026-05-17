@@ -271,6 +271,88 @@ async def test_stop_all_processes_returns_zero_when_idle():
     assert killed == 0
 
 
+# ─── /stop coding-harness alias bootstrap ───────────────────────────
+#
+# ``cli._on_stop_bg`` imports the coding-harness background module via
+# ``from extensions.coding_harness.tools.background import ...``. The
+# plugin dir is hyphenated (``extensions/coding-harness/``, no
+# ``__init__.py``) so that import raises ``ModuleNotFoundError`` at
+# runtime unless an ``extensions.coding_harness`` namespace alias is
+# registered first — exactly the bug ``_ensure_coding_harness_alias``
+# fixes (mirroring ``cli_traces._ensure_alias``).
+#
+# tests/conftest.py registers that alias globally for the whole test
+# session, so the import would *spuriously* succeed pre-fix. These
+# tests pop the alias out of ``sys.modules`` to recreate the real
+# production cold-start, prove the import is dead, then prove the
+# helper revives it.
+
+
+def _pop_coding_harness_alias() -> dict:
+    """Remove every coding_harness alias entry and return them for restore."""
+    import sys
+
+    saved: dict = {}
+    for key in list(sys.modules):
+        if (
+            key == "coding_harness"
+            or key.startswith("coding_harness.")
+            or key == "extensions.coding_harness"
+            or key.startswith("extensions.coding_harness.")
+        ):
+            saved[key] = sys.modules.pop(key)
+    return saved
+
+
+def test_ensure_coding_harness_alias_revives_dead_import():
+    """Pre-fix the coding-harness import is dead; the helper revives it.
+
+    Proves ``cli._on_stop_bg``'s import path actually resolves at
+    runtime after the alias bootstrap runs.
+    """
+    import importlib
+    import sys
+
+    from opencomputer.cli import _ensure_coding_harness_alias
+
+    saved = _pop_coding_harness_alias()
+    try:
+        # Cold-start baseline: with the alias gone, the exact import
+        # form ``_on_stop_bg`` uses raises — the dead-feature symptom.
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("extensions.coding_harness.tools.background")
+
+        # The fix: the helper registers the namespace alias.
+        _ensure_coding_harness_alias()
+
+        # Now the import ``_on_stop_bg`` performs resolves, and
+        # ``stop_all_processes`` is reachable through it.
+        mod = importlib.import_module(
+            "extensions.coding_harness.tools.background"
+        )
+        assert callable(mod.stop_all_processes)
+    finally:
+        # Restore whatever conftest had registered so later tests in
+        # the session keep importing coding_harness normally.
+        for key in list(sys.modules):
+            if (
+                key == "coding_harness"
+                or key.startswith("coding_harness.")
+                or key == "extensions.coding_harness"
+                or key.startswith("extensions.coding_harness.")
+            ):
+                del sys.modules[key]
+        sys.modules.update(saved)
+
+
+def test_ensure_coding_harness_alias_is_idempotent():
+    """Calling the helper twice is safe (mirrors cli_traces._ensure_alias)."""
+    from opencomputer.cli import _ensure_coding_harness_alias
+
+    _ensure_coding_harness_alias()
+    _ensure_coding_harness_alias()  # must not raise
+
+
 # ─── dispatch integration ──────────────────────────────────────────
 
 

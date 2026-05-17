@@ -14,13 +14,13 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import ClassVar
+from typing import Final
 
 from . import _common
 from ._naming import _CANONICAL_LABEL, service_label
 from .base import InstallResult, StatusResult, UninstallResult
 
-NAME: ClassVar[str] = "launchd"
+NAME: Final[str] = "launchd"
 _LEGACY_LABEL = "com.opencomputer.gateway"
 _LEGACY_PLIST_FILENAME = f"{_LEGACY_LABEL}.plist"
 _TEMPLATE = (Path(__file__).parent / "templates" / _LEGACY_PLIST_FILENAME).read_text()

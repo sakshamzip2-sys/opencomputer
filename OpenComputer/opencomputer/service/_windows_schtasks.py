@@ -12,13 +12,13 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import ClassVar
+from typing import Final
 
 from . import _common
 from ._naming import _CANONICAL_LABEL, service_label
 from .base import InstallResult, StatusResult, UninstallResult
 
-NAME: ClassVar[str] = "schtasks"
+NAME: Final[str] = "schtasks"
 _LEGACY_TASK_NAME = "OpenComputerGateway"
 _LEGACY_XML_FILENAME = "opencomputer-task.xml"
 _TEMPLATE = (Path(__file__).parent / "templates" / _LEGACY_XML_FILENAME).read_text()
