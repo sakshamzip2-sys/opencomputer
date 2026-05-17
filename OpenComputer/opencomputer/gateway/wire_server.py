@@ -50,11 +50,13 @@ from opencomputer.gateway.protocol import (
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
+    METHOD_SESSION_FORK,
     METHOD_SESSION_LIST,
     METHOD_SESSION_MOST_RECENT,
     METHOD_SESSION_RENAME,
     METHOD_SESSION_RESUME,
     METHOD_SESSION_USAGE,
+    METHOD_SKILL_SHOW,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
@@ -366,6 +368,8 @@ class WireServer:
                         METHOD_SESSION_USAGE,
                         METHOD_SUBAGENTS_LIST,
                         METHOD_SESSION_MOST_RECENT,
+                        METHOD_SKILL_SHOW,
+                        METHOD_SESSION_FORK,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -800,6 +804,74 @@ class WireServer:
                 )
                 return
             await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SKILL_SHOW:
+            # 2026-05-17 TUI-parity M1 batch 6 — a skill's SKILL.md body
+            # for the skills-hub preview. Unknown id → found=False.
+            skill_id = str(req.params.get("skill_id", "")).strip()
+            if not skill_id:
+                await self._send_response(
+                    ws, req.id, False, error="skill.show: skill_id is required"
+                )
+                return
+            try:
+                _loop = await self._router.get_or_load("default")
+                payload = self._collect_skill_body(_loop, skill_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("skill.show: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"skill.show: {exc}"
+                )
+                return
+            await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_SESSION_FORK:
+            # 2026-05-17 TUI-parity M1 batch 6 — clone a session's history
+            # into a new session id (fork-tree / branch affordance).
+            session_id = str(req.params.get("session_id", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="session.fork: session_id is required"
+                )
+                return
+            title = str(req.params.get("title", "")).strip()
+            record_parent = bool(req.params.get("record_parent", False))
+            try:
+                from opencomputer.agent.session_fork import (
+                    SourceSessionNotFoundError,
+                    fork_session,
+                )
+
+                _loop = await self._router.get_or_load("default")
+                result = fork_session(
+                    _loop.db,
+                    session_id,
+                    title=title or None,
+                    record_parent=record_parent,
+                )
+            except SourceSessionNotFoundError:
+                await self._send_response(
+                    ws,
+                    req.id,
+                    False,
+                    error=f"session.fork: source session {session_id} not found",
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("session.fork: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"session.fork: {exc}"
+                )
+                return
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={
+                    "source_session_id": session_id,
+                    "new_session_id": result.new_session_id,
+                    "messages_copied": result.messages_copied,
+                    "ok": True,
+                },
+            )
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -1388,10 +1460,11 @@ class WireServer:
             return []
 
         try:
-            from opencomputer.agent.subagent_store import (
-                SubagentStore,
-                SubagentStoreUnavailable,
-            )
+            # Single broad except: SubagentStoreUnavailable (DB predating
+            # the subagents table) is a RuntimeError subclass and is
+            # caught here too. Catching it by name would risk an unbound
+            # reference if the import itself failed — so catch broadly.
+            from opencomputer.agent.subagent_store import SubagentStore
 
             store = SubagentStore(db.db_path, allow_create=False)
             # history() excludes running records by design (they live in
@@ -1404,11 +1477,11 @@ class WireServer:
                 records = list(store.list_running()) + list(
                     store.history(limit=max(1, limit))
                 )
-        except SubagentStoreUnavailable:
-            logger.debug("subagents.list: store unavailable (old DB) — empty")
-            return []
         except Exception as exc:  # noqa: BLE001
-            logger.warning("subagents.list: store read failed: %s — empty", exc)
+            logger.debug(
+                "subagents.list: store unavailable / read failed (%s) — empty",
+                exc,
+            )
             return []
 
         out: list[dict[str, Any]] = []
@@ -1432,6 +1505,35 @@ class WireServer:
                 }
             )
         return out
+
+    @staticmethod
+    def _collect_skill_body(loop: Any, skill_id: str) -> dict[str, Any]:
+        """Build the ``METHOD_SKILL_SHOW`` payload — one skill's body text.
+
+        Cross-checks ``list_skills()`` for an authoritative existence test
+        (``load_skill_body`` alone can't tell "missing" from "empty body"),
+        then loads the SKILL.md content minus frontmatter.
+
+        Returns ``{skill_id, body, found}``; ``found=False`` (empty body)
+        when ``loop.memory`` is missing or no skill has that id. Never raises.
+        """
+        memory = getattr(loop, "memory", None)
+        if memory is None:
+            logger.debug("skill.show: loop has no memory manager — not found")
+            return {"skill_id": skill_id, "body": "", "found": False}
+
+        try:
+            known = {
+                getattr(s, "id", None) for s in memory.list_skills()
+            }
+            if skill_id not in known:
+                return {"skill_id": skill_id, "body": "", "found": False}
+            body = memory.load_skill_body(skill_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skill.show: failed for %r: %s", skill_id, exc)
+            return {"skill_id": skill_id, "body": "", "found": False}
+
+        return {"skill_id": skill_id, "body": body, "found": True}
 
     @staticmethod
     def _collect_most_recent(loop: Any) -> dict[str, Any]:

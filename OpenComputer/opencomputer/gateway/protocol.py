@@ -112,6 +112,12 @@ METHOD_SESSION_USAGE = "session.usage"
 METHOD_SUBAGENTS_LIST = "subagents.list"
 METHOD_SESSION_MOST_RECENT = "session.most_recent"
 
+# 2026-05-17 TUI-parity Milestone 1 batch 6 — skill preview + session fork.
+# skill.show powers the skills-hub overlay's preview; session.fork powers
+# the fork-tree / branch affordance.
+METHOD_SKILL_SHOW = "skill.show"
+METHOD_SESSION_FORK = "session.fork"
+
 
 # ─── Event names (gateway → client) ─────────────────────────────
 
@@ -188,6 +194,8 @@ __all__ = [
     "METHOD_SESSION_USAGE",
     "METHOD_SUBAGENTS_LIST",
     "METHOD_SESSION_MOST_RECENT",
+    "METHOD_SKILL_SHOW",
+    "METHOD_SESSION_FORK",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

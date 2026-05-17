@@ -55,11 +55,13 @@ from opencomputer.gateway.protocol import (
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_DELETE,
+    METHOD_SESSION_FORK,
     METHOD_SESSION_LIST,
     METHOD_SESSION_MOST_RECENT,
     METHOD_SESSION_RENAME,
     METHOD_SESSION_RESUME,
     METHOD_SESSION_USAGE,
+    METHOD_SKILL_SHOW,
     METHOD_SKILLS_LIST,
     METHOD_SLASH_DISPATCH,
     METHOD_SLASH_LIST,
@@ -577,6 +579,46 @@ class SessionMostRecentResult(_StrictModel):
     source: str | None = None
 
 
+# 2026-05-17 TUI-parity Milestone 1 batch 6 — skill preview + session fork.
+
+
+class SkillShowParams(_StrictModel):
+    """Fetch one skill's full SKILL.md body for preview."""
+
+    skill_id: str
+
+
+class SkillShowResult(_StrictModel):
+    """A skill's body text. ``found`` is False for an unknown skill id
+    (a success, not an error); ``body`` is then empty."""
+
+    skill_id: str
+    body: str = ""
+    found: bool
+
+
+class SessionForkParams(_StrictModel):
+    """Clone a session's history into a new session id.
+
+    ``record_parent`` records fork lineage so the fork groups under the
+    source in ``oc sessions tree`` (off by default — the fork is
+    functionally independent either way).
+    """
+
+    session_id: str
+    title: str = ""
+    record_parent: bool = False
+
+
+class SessionForkResult(_StrictModel):
+    """Fork outcome — the new session id + how many messages were copied."""
+
+    source_session_id: str
+    new_session_id: str
+    messages_copied: int
+    ok: bool
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -604,6 +646,8 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
         SessionMostRecentParams,
         SessionMostRecentResult,
     ),
+    METHOD_SKILL_SHOW: (SkillShowParams, SkillShowResult),
+    METHOD_SESSION_FORK: (SessionForkParams, SessionForkResult),
 }
 
 
@@ -781,6 +825,8 @@ __all__ = [
     "METHOD_SESSION_USAGE",
     "METHOD_SUBAGENTS_LIST",
     "METHOD_SESSION_MOST_RECENT",
+    "METHOD_SKILL_SHOW",
+    "METHOD_SESSION_FORK",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -843,6 +889,10 @@ __all__ = [
     "SubagentsListResult",
     "SessionMostRecentParams",
     "SessionMostRecentResult",
+    "SkillShowParams",
+    "SkillShowResult",
+    "SessionForkParams",
+    "SessionForkResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",
