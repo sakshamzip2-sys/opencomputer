@@ -1812,4 +1812,114 @@ def plugin_search(
 plugin_app.add_typer(marketplace_app, name="marketplace")
 
 
+# ── per-plugin update notifier (best-of-three Recipe 10) ─────────────
+
+
+def _installed_plugin_records() -> list:
+    """Read every installed-plugin index — active profile + global."""
+    from opencomputer.plugins.installed_index import read_index
+    from opencomputer.profiles import get_default_root, get_profile_dir, read_active_profile
+
+    roots: list[Path] = [get_default_root() / "plugins"]
+    active = read_active_profile()
+    if active is not None:
+        roots.insert(0, get_profile_dir(active) / "plugins")
+    seen: set[str] = set()
+    records: list = []
+    for root in roots:
+        for rec in read_index(root / ".installed_index.json"):
+            if rec.plugin_id in seen:
+                continue
+            seen.add(rec.plugin_id)
+            records.append(rec)
+    return records
+
+
+def _build_catalog_versions() -> dict[str, str]:
+    """Fetch the default catalog + every marketplace; map id → version."""
+    from opencomputer.plugins.marketplaces import (
+        load_marketplaces,
+        marketplace_cache_path,
+    )
+    from opencomputer.plugins.remote_install import (
+        CatalogError,
+        fetch_catalog,
+        resolve_catalog_url,
+    )
+
+    versions: dict[str, str] = {}
+
+    def _absorb(catalog: dict) -> None:
+        for slug, entry in _catalog_plugin_entries(catalog):
+            ver = str(entry.get("version", "")).strip()
+            if ver:
+                versions[slug] = ver
+
+    try:
+        _absorb(fetch_catalog(url=resolve_catalog_url()))
+    except CatalogError:
+        pass  # no default catalog configured — fine
+    for mp in load_marketplaces():
+        try:
+            _absorb(
+                fetch_catalog(
+                    url=mp.url,
+                    cache_path_override=marketplace_cache_path(mp.name),
+                )
+            )
+        except CatalogError as exc:
+            _console.print(f"[yellow]skipping {mp.name}:[/yellow] {exc}")
+    return versions
+
+
+@plugin_app.command("update-check")
+def plugin_update_check(
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Bypass the 6h cache and re-poll catalogs."
+    ),
+) -> None:
+    """Report installed plugins that have a newer catalog version.
+
+    Performing an update is ``oc plugin install <marketplace>/<plugin>
+    --force`` — this command is the notifier.
+    """
+    from opencomputer.plugins.update_check import (
+        compute_updates,
+        read_cache,
+        write_cache,
+    )
+
+    if not refresh:
+        cached = read_cache()
+        if cached is not None:
+            _render_plugin_updates(cached, from_cache=True)
+            return
+
+    records = _installed_plugin_records()
+    catalog_versions = _build_catalog_versions()
+    updates = compute_updates(records, catalog_versions)
+    write_cache(updates)
+    _render_plugin_updates(updates, from_cache=False)
+
+
+def _render_plugin_updates(updates: list, *, from_cache: bool) -> None:  # noqa: ANN001
+    if not updates:
+        suffix = " [dim](cached)[/dim]" if from_cache else ""
+        _console.print(f"[green]all plugins up to date[/green]{suffix}")
+        return
+    table = Table(
+        title=f"{len(updates)} plugin update(s) available", header_style="bold"
+    )
+    table.add_column("Plugin", style="cyan")
+    table.add_column("Installed", style="dim")
+    table.add_column("Available", style="bold green")
+    for u in updates:
+        table.add_row(u.plugin_id, u.installed_version, u.available_version)
+    _console.print(table)
+    _console.print(
+        "[dim]update with[/dim] [cyan]oc plugin install "
+        "<marketplace>/<plugin> --force[/cyan]"
+    )
+
+
 __all__ = ["plugin_app"]
