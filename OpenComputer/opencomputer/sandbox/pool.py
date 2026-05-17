@@ -46,10 +46,22 @@ class ContainerPool:
     """
 
     def __init__(self) -> None:
-        # Per-pool-key locks. Serializes concurrent acquire() of the SAME
-        # key so two tasks can't both create the container; different keys
-        # never contend.
-        self._locks: dict[str, asyncio.Lock] = {}
+        # Per-pool-key lock, tagged with the event loop it belongs to.
+        # Serializes concurrent acquire() of the SAME key so two tasks
+        # can't both create the container; different keys never contend.
+        #
+        # An ``asyncio.Lock`` binds to the loop it is first *contended* on.
+        # This pool is a process-wide singleton (``docker._get_pool``) and
+        # OpenComputer runs each chat turn in its own ``asyncio.run()``
+        # loop — so a lock cached from an earlier turn would raise "bound
+        # to a different event loop" on the next contended acquire.
+        # ``_lock_for`` re-mints the lock when the running loop changes;
+        # turns never overlap, so a fresh per-loop lock loses no real
+        # serialization. Keyed by pool key so ``reap`` still finds every
+        # container this pool created.
+        self._locks: dict[
+            str, tuple[asyncio.AbstractEventLoop | None, asyncio.Lock]
+        ] = {}
 
     @staticmethod
     def container_name(pool_key: str) -> str:
@@ -57,17 +69,31 @@ class ContainerPool:
         return f"{_POOL_NAME_PREFIX}{pool_key}"
 
     def _lock_for(self, pool_key: str) -> asyncio.Lock:
-        """Return (creating if needed) the lock for ``pool_key``.
+        """Return (creating if needed) the lock for ``pool_key``, valid for
+        the CURRENT event loop.
 
         Safe under asyncio's cooperative scheduling: there is no ``await``
         between the ``get`` and the ``__setitem__``, so two tasks cannot
         race to install two different locks for one key.
+
+        An ``asyncio.Lock`` binds to the event loop it is contended on, and
+        this pool outlives any single ``asyncio.run()`` (chat turn) — so a
+        lock cached from a previous turn's loop is re-minted here rather
+        than reused (reusing it raises ``RuntimeError: <Lock> is bound to a
+        different event loop`` on the next contended acquire). Callable
+        outside a running loop too — no loop → a ``None`` tag — so
+        synchronous callers (e.g. test key pre-registration) still work.
         """
-        lock = self._locks.get(pool_key)
-        if lock is None:
+        try:
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        entry = self._locks.get(pool_key)
+        if entry is None or entry[0] is not loop:
             lock = asyncio.Lock()
-            self._locks[pool_key] = lock
-        return lock
+            self._locks[pool_key] = (loop, lock)
+            return lock
+        return entry[1]
 
     async def acquire(
         self, pool_key: str, *, image: str, run_flags: list[str]

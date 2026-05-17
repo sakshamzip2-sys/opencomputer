@@ -126,6 +126,35 @@ def test_per_key_lock_serializes_concurrent_acquire() -> None:
     assert fake.count("run") == 1  # the per-key lock prevented a double-create
 
 
+def test_pool_lock_survives_across_event_loops() -> None:
+    """A pooled lock contended in one chat turn must not break the next.
+
+    ``ContainerPool`` is a process-wide singleton (``docker._get_pool``)
+    and OpenComputer runs each chat turn in its own ``asyncio.run()``
+    loop. ``asyncio.Lock`` binds to the loop it is first *contended* on —
+    so a per-key lock cached across turns raises ``RuntimeError: bound to
+    a different event loop`` on the next contended acquire. Two concurrent
+    same-key acquires per turn force contention; the second turn must run
+    clean. Regression: fails before ``_lock_for`` became loop-aware.
+    """
+    fake = _FakeDocker()
+    pool = _pool_with(fake)  # ONE pool instance, reused across both turns
+
+    async def _contended_turn() -> None:
+        # Two concurrent acquires of the SAME key — the 2nd waits on the
+        # per-key lock, binding it to THIS turn's event loop.
+        await asyncio.gather(
+            pool.acquire("k1", image="alpine:latest", run_flags=[]),
+            pool.acquire("k1", image="alpine:latest", run_flags=[]),
+        )
+
+    asyncio.run(_contended_turn())  # turn 1 — event loop A
+    asyncio.run(_contended_turn())  # turn 2 — event loop B — must NOT raise
+    # The pooled container is created once and reused across both turns.
+    assert fake.count("run") == 1
+    assert "oc-pool-k1" in fake.running
+
+
 def test_different_keys_get_distinct_containers() -> None:
     fake = _FakeDocker()
     pool = _pool_with(fake)
