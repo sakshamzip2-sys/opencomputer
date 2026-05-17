@@ -27,6 +27,7 @@ from opencomputer.awareness.life_events.classifier import (
 )
 from plugin_sdk.core import Message
 from plugin_sdk.hooks import HookContext, HookEvent
+from plugin_sdk.runtime_context import RuntimeContext
 
 # ── The three plan cases ──────────────────────────────────────────────
 
@@ -216,11 +217,16 @@ def _seed_pending(pattern_id: str, *, cron_id: str, surfaced_turn: int) -> None:
     )
 
 
-def _stop_ctx(*, turn_index: int, last_user_text: str) -> HookContext:
+def _stop_ctx(
+    *, turn_index: int, last_user_text: str, delegation_depth: int = 0
+) -> HookContext:
     """A STOP HookContext whose message history ends with a user reply.
 
     Mirrors the real loop: ``messages`` is the conversation so far and the
     final user message is the reply on_stop_hook must classify.
+
+    ``delegation_depth`` defaults to 0 (parent loop). Pass a positive value
+    to simulate a DelegateTool subagent loop — on_stop_hook must skip those.
     """
     return HookContext(
         event=HookEvent.STOP,
@@ -231,6 +237,7 @@ def _stop_ctx(*, turn_index: int, last_user_text: str) -> HookContext:
             Message(role="user", content=last_user_text),
         ],
         turn_index=turn_index,
+        runtime=RuntimeContext(delegation_depth=delegation_depth),
     )
 
 
@@ -598,3 +605,77 @@ def test_loop_fires_stop_hook_emit_site_present():
     assert "turn_index=turn_index" in loop_src, (
         "the STOP fire must thread turn_index for the surfacing-turn skip"
     )
+
+
+# ── Subagent-loop skip (delegation_depth guard) ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_on_stop_hook_skips_subagent_loops(tmp_path, monkeypatch):
+    """A DelegateTool subagent loop (delegation_depth > 0) must be skipped.
+
+    Without the guard a subagent's STOP would read the parent's
+    verdict_pending patterns and classify the subagent's own task prompt
+    against them — pre-clearing verdict_pending and bypassing the user's
+    real self-correction (and racing the non-atomic load-modify-save).
+
+    Seed a verdict-pending burnout entry with surfaced_turn=1. Fire
+    on_stop_hook from a subagent context (delegation_depth=1, turn=99)
+    carrying a clearly refuting reply. The hook must skip: the cron must
+    NOT be removed and verdict_pending must still be True.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    _seed_pending("burnout", cron_id="cron-subagent", surfaced_turn=1)
+
+    removed: list[str] = []
+    monkeypatch.setattr(
+        actions, "remove_job", lambda job_id: removed.append(job_id) or True
+    )
+
+    # delegation_depth=1 → subagent loop; turn_index=99 → well past surfaced_turn
+    await on_stop_hook(
+        _stop_ctx(
+            turn_index=99,
+            last_user_text="I'm totally fine, not stressed",
+            delegation_depth=1,
+        )
+    )
+
+    assert removed == [], "subagent loop must NOT cancel any cron"
+    entry = state.load_state().get("burnout")
+    assert entry is not None, "the state entry must survive a subagent STOP"
+    assert entry["cron_id"] == "cron-subagent", "the cron_id must be retained"
+    assert entry["verdict_pending"] is True, (
+        "verdict_pending must still be True — the subagent reply must not be classified"
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_stop_hook_parent_loop_still_classifies(tmp_path, monkeypatch):
+    """delegation_depth=0 (explicit parent) must NOT be short-circuited.
+
+    The guard must only skip delegation_depth > 0. A parent loop carrying
+    the same refuting reply and the same surfaced entry must still cancel
+    the cron — confirming the guard does not over-fire.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    _seed_pending("burnout", cron_id="cron-parent", surfaced_turn=1)
+
+    removed: list[str] = []
+    monkeypatch.setattr(
+        actions, "remove_job", lambda job_id: removed.append(job_id) or True
+    )
+
+    # delegation_depth=0 → parent loop; turn_index=2 → after surfaced_turn=1
+    await on_stop_hook(
+        _stop_ctx(
+            turn_index=2,
+            last_user_text="I'm totally fine, not stressed",
+            delegation_depth=0,
+        )
+    )
+
+    assert removed == ["cron-parent"], (
+        "a parent-loop (delegation_depth=0) refuting reply must still cancel the cron"
+    )
+    assert "burnout" not in state.load_state(), "the state entry must be cleared"

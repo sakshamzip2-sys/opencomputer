@@ -371,12 +371,30 @@ async def on_stop_hook(ctx: HookContext) -> None:
     entries) reads as turn 0, so a legacy entry's next reply is still
     judged rather than ignored forever.
 
+    Subagent loops are also skipped — ``ctx.runtime.delegation_depth > 0``
+    identifies a ``DelegateTool`` child loop, whose ``messages`` are the
+    subagent's task conversation, not the user's reply. Without this guard
+    a subagent turn would classify its own task prompt against the parent's
+    pending pattern and pre-clear ``verdict_pending``, silently bypassing
+    the user's real self-correction (and racing the non-atomic state
+    load-modify-save).
+
     Fail-open: the whole body is wrapped in ``try``/``except``. A classifier
     or state error must NEVER wedge the turn — it is logged at WARNING and
     the cron is LEFT untouched (an error must never mis-cancel a wanted
     check-in). Returns ``None`` always — STOP handlers are observers.
     """
     try:
+        runtime = getattr(ctx, "runtime", None)
+        depth = getattr(runtime, "delegation_depth", 0) if runtime is not None else 0
+        if depth > 0:
+            _log.debug(
+                "life-event STOP: skipping — delegation_depth=%s (subagent loop, "
+                "verdict belongs to the parent session)",
+                depth,
+            )
+            return
+
         pending = state.verdict_pending_patterns()
         if not pending:
             return  # common case — most turns have nothing pending
