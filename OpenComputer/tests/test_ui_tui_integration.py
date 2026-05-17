@@ -33,6 +33,7 @@ _RENDER_BUNDLE = _DIST / "renderSmoke.js"
 _OVERLAYS_BUNDLE = _DIST / "overlaysSmoke.js"
 _MARKDOWN_BUNDLE = _DIST / "markdownSmoke.js"
 _EDITOR_BUNDLE = _DIST / "editorSmoke.js"
+_HARNESS_BUNDLE = _DIST / "appHarness.js"
 
 
 def _find_node() -> str | None:
@@ -285,3 +286,69 @@ def test_multiline_editor() -> None:
     assert "[hello]" in frame, f"typed line 1 missing:\n{frame}"
     assert "[worl]" in frame, f"line 2 (post-backspace) wrong:\n{frame}"
     assert "rows=2" in frame, f"Ctrl+N newline did not split the buffer:\n{frame}"
+
+
+@pytest.mark.skipif(
+    _NODE is None or not _HARNESS_BUNDLE.is_file(),
+    reason="Node toolchain or built app-harness bundle unavailable",
+)
+@pytest.mark.asyncio
+async def test_full_app_drives_overlay_against_live_server() -> None:
+    """The fully-assembled <App> works end-to-end against a real server.
+
+    This is the integration test the unit smokes don't give: appHarness.js
+    mounts the REAL <App>, connects it to a real WireServer, then drives it
+    with keystrokes — types "/tools", Enter, ESC — and emits the frame at
+    each stage. It exercises the whole glue: mount → WS connect → hello →
+    useInput → editor buffer → send() → client-side slash routing →
+    openOverlay → a live tools.list RPC → overlay render → ESC close.
+    """
+    from opencomputer.agent.loop import AgentLoop
+    from opencomputer.gateway.wire_server import WireServer
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    loop = MagicMock(spec=AgentLoop)
+    server = WireServer(loop=loop, host="127.0.0.1", port=port)
+    await server.start()
+    assert _NODE is not None  # guaranteed by skipif
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _NODE,
+            str(_HARNESS_BUNDLE),
+            f"ws://127.0.0.1:{port}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=30)
+    finally:
+        await server.stop()
+
+    text = out_b.decode()
+    assert "<<END>>" in text, (
+        f"app harness did not finish.\nstdout={text!r}\nstderr={err_b.decode()!r}"
+    )
+
+    def section(name: str) -> str:
+        return text.split(f"<<{name}>>", 1)[1].split("<<", 1)[0]
+
+    connected = section("CONNECTED")
+    typed = section("TYPED")
+    overlay = section("OVERLAY")
+    closed = section("CLOSED")
+
+    # Mount + WS connect + hello handshake landed.
+    assert "● connected" in connected, f"app never connected:\n{connected}"
+    # Typing "/tools" surfaced the client-side slash palette.
+    assert "Slash commands" in typed, f"slash palette did not appear:\n{typed}"
+    # Enter routed "/tools" → openOverlay → a live tools.list RPC → the
+    # overlay rendered. The RPC resolved (the panel shows either tool rows
+    # or the explicit empty state — never a stuck "loading"). The tool
+    # *count* depends on what the server process has registered, so this
+    # asserts the integrated path, not a specific registry population.
+    assert "Tools —" in overlay, f"tools overlay did not open:\n{overlay}"
+    # ESC closed it.
+    assert "Tools —" not in closed, f"ESC did not close the overlay:\n{closed}"
