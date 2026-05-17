@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import subprocess
 
 from opencomputer.sandbox._common import decode_stream
 from plugin_sdk.sandbox import SandboxUnavailable
@@ -97,6 +99,19 @@ class ContainerPool:
             _log.debug("sandbox pool: created container %s", name)
             return name
 
+    def reap(self) -> None:
+        """Best-effort remove every container this pool created.
+
+        Registered as an ``atexit`` hook by ``opencomputer.sandbox.docker``
+        for the process-wide pool singleton (M4) — so a clean process exit
+        does not leak pooled containers. A crash (``kill -9``) bypasses
+        atexit; ``oc sandbox prune`` is the manual cross-process cleanup.
+        Synchronous + every error swallowed inside :func:`_docker_rm` — a
+        reaper must never raise at interpreter shutdown.
+        """
+        for pool_key in list(self._locks):
+            _docker_rm(self.container_name(pool_key))
+
     async def _is_running(self, name: str) -> bool:
         """True iff a container named ``name`` exists AND is running."""
         rc, out, _ = await self._docker(
@@ -145,3 +160,73 @@ class ContainerPool:
         out, err = await proc.communicate()
         rc = proc.returncode if proc.returncode is not None else -1
         return rc, decode_stream(out), decode_stream(err)
+
+
+# --- M4: list / prune pooled containers -------------------------------------
+# Docker is the registry: pooled containers carry the ``oc-pool-`` name
+# prefix, so ``docker ps --filter`` finds them with no separate state file.
+# These helpers are synchronous — they back the sync ``oc sandbox`` CLI
+# commands and the atexit reaper, not the async agent-loop path.
+
+
+def list_pooled_containers() -> list[tuple[str, str, str]]:
+    """Return ``(name, status, age)`` for every pooled container.
+
+    Queries ``docker ps -a --filter name=oc-pool-`` (all states). An empty
+    list is returned when Docker is unavailable, the daemon is down, or no
+    pooled container exists — best-effort, never raises.
+    """
+    if shutil.which("docker") is None:
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "docker", "ps", "-a",
+                "--filter", f"name={_POOL_NAME_PREFIX}",
+                "--format", "{{.Names}}\t{{.Status}}\t{{.RunningFor}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    rows: list[tuple[str, str, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        # Docker's ``name`` filter is a substring match — the startswith
+        # guard keeps a stray ``x-oc-pool-y`` out of the pooled namespace.
+        if len(parts) == 3 and parts[0].startswith(_POOL_NAME_PREFIX):
+            rows.append((parts[0], parts[1], parts[2]))
+    return rows
+
+
+def prune_pooled_containers() -> list[str]:
+    """Force-remove every pooled container; return the removed names.
+
+    The cross-process cleanup behind ``oc sandbox prune`` — removes pooled
+    containers left by ANY OpenComputer process (including crashed ones),
+    since the ``oc-pool-`` Docker namespace is the shared registry.
+    """
+    removed: list[str] = []
+    for name, _, _ in list_pooled_containers():
+        if _docker_rm(name):
+            removed.append(name)
+    return removed
+
+
+def _docker_rm(name: str) -> bool:
+    """``docker rm -f <name>`` — best-effort; returns True on success."""
+    try:
+        result = subprocess.run(
+            ["docker", "rm", "-f", name],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0

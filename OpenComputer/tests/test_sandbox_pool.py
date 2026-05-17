@@ -307,3 +307,123 @@ def test_docker_pool_reuses_one_container_across_calls() -> None:
             timeout=15,
             check=False,
         )
+
+
+# --- M4: list / prune / reap ------------------------------------------------
+
+
+def test_list_pooled_containers_parses_docker_ps() -> None:
+    from unittest.mock import MagicMock, patch
+
+    import opencomputer.sandbox.pool as pool_mod
+
+    fake = MagicMock()
+    fake.returncode = 0
+    fake.stdout = (
+        "oc-pool-session-a-111\tUp 3 minutes\t3 minutes ago\n"
+        "oc-pool-shared-222\tExited (0)\t1 hour ago\n"
+    )
+    with (
+        patch.object(pool_mod.shutil, "which", return_value="/usr/bin/docker"),
+        patch.object(pool_mod.subprocess, "run", return_value=fake),
+    ):
+        rows = pool_mod.list_pooled_containers()
+    assert rows == [
+        ("oc-pool-session-a-111", "Up 3 minutes", "3 minutes ago"),
+        ("oc-pool-shared-222", "Exited (0)", "1 hour ago"),
+    ]
+
+
+def test_list_pooled_containers_empty_when_docker_absent() -> None:
+    from unittest.mock import patch
+
+    import opencomputer.sandbox.pool as pool_mod
+
+    with patch.object(pool_mod.shutil, "which", return_value=None):
+        assert pool_mod.list_pooled_containers() == []
+
+
+def test_prune_pooled_containers_removes_each_listed() -> None:
+    from unittest.mock import patch
+
+    import opencomputer.sandbox.pool as pool_mod
+
+    rows = [("oc-pool-a", "Up", "1m"), ("oc-pool-b", "Exited", "2m")]
+    rm_calls: list[str] = []
+
+    def fake_rm(name: str) -> bool:
+        rm_calls.append(name)
+        return True
+
+    with (
+        patch.object(pool_mod, "list_pooled_containers", return_value=rows),
+        patch.object(pool_mod, "_docker_rm", side_effect=fake_rm),
+    ):
+        removed = pool_mod.prune_pooled_containers()
+    assert removed == ["oc-pool-a", "oc-pool-b"]
+    assert rm_calls == ["oc-pool-a", "oc-pool-b"]
+
+
+def test_reap_removes_each_acquired_pool_container() -> None:
+    from unittest.mock import patch
+
+    import opencomputer.sandbox.pool as pool_mod
+
+    pool = ContainerPool()
+    pool._lock_for("session-x")  # registers the key, as acquire() does
+    pool._lock_for("shared")
+    rm_calls: list[str] = []
+    with patch.object(
+        pool_mod, "_docker_rm", side_effect=lambda n: rm_calls.append(n)
+    ):
+        pool.reap()
+    assert sorted(rm_calls) == ["oc-pool-session-x", "oc-pool-shared"]
+
+
+def test_oc_sandbox_list_renders_pooled_containers() -> None:
+    from unittest.mock import patch
+
+    from typer.testing import CliRunner
+
+    from opencomputer.cli_sandbox import sandbox_app
+
+    fake_rows = [("oc-pool-session-x-abc", "Up 2 minutes", "2 minutes ago")]
+    # Patch where the name is USED — cli_sandbox imported it `from … import`.
+    with patch(
+        "opencomputer.cli_sandbox.list_pooled_containers", return_value=fake_rows
+    ):
+        result = CliRunner().invoke(sandbox_app, ["list"])
+    assert result.exit_code == 0
+    assert "oc-pool-session-x-abc" in result.stdout
+
+
+def test_oc_sandbox_list_empty() -> None:
+    from unittest.mock import patch
+
+    from typer.testing import CliRunner
+
+    from opencomputer.cli_sandbox import sandbox_app
+
+    with patch(
+        "opencomputer.cli_sandbox.list_pooled_containers", return_value=[]
+    ):
+        result = CliRunner().invoke(sandbox_app, ["list"])
+    assert result.exit_code == 0
+    assert "no pooled" in result.stdout.lower()
+
+
+def test_oc_sandbox_prune_reports_removed() -> None:
+    from unittest.mock import patch
+
+    from typer.testing import CliRunner
+
+    from opencomputer.cli_sandbox import sandbox_app
+
+    with patch(
+        "opencomputer.cli_sandbox.prune_pooled_containers",
+        return_value=["oc-pool-session-x-abc", "oc-pool-shared-def"],
+    ):
+        result = CliRunner().invoke(sandbox_app, ["prune"])
+    assert result.exit_code == 0
+    assert "2" in result.stdout
+    assert "oc-pool-session-x-abc" in result.stdout

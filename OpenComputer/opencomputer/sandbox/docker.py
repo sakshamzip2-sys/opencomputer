@@ -24,6 +24,7 @@ responsible for ensuring the image is pulled — we don't auto-pull.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import hashlib
 import logging
 import shutil
@@ -87,10 +88,18 @@ _pool_singleton: ContainerPool | None = None
 
 
 def _get_pool() -> ContainerPool:
-    """Return the process-wide :class:`ContainerPool` (lazy singleton)."""
+    """Return the process-wide :class:`ContainerPool` (lazy singleton).
+
+    On first creation the pool's :meth:`~ContainerPool.reap` is registered
+    as an ``atexit`` hook (M4) so a clean process exit removes the pooled
+    containers this process created. A crash (``kill -9``) bypasses
+    atexit — ``oc sandbox prune`` is the manual cross-process cleanup.
+    """
     global _pool_singleton
     if _pool_singleton is None:
-        _pool_singleton = ContainerPool()
+        pool = ContainerPool()
+        _pool_singleton = pool
+        atexit.register(pool.reap)
     return _pool_singleton
 
 
