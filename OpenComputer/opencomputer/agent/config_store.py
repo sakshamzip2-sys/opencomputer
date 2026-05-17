@@ -908,6 +908,7 @@ def _parse_routing_block(block: Any) -> Any:  # RoutingConfig | None at runtime
                 match=match_obj,
                 agent=agent,
                 profile=str(raw_rule.get("profile", "")),
+                merge_with_builder=bool(raw_rule.get("merge_with_builder", False)),
             )
         except ValueError as e:
             _log.warning("routing.rules: invalid rule %r: %s", raw_rule, e)
@@ -1112,6 +1113,13 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
     # non-empty so default configs stay tidy.
     if getattr(cfg, "credential_pool_strategies", None):
         result["credential_pool_strategies"] = dict(cfg.credential_pool_strategies)
+    # M3 gateway parity — the free-form ``display`` section (runtime
+    # footer, per-platform overrides, persona override). Round-trips as
+    # a plain dict; only emitted when non-empty so default configs stay
+    # tidy. Without this, ``oc config set display.*`` silently no-ops on
+    # save even though set_value built the right Config.
+    if getattr(cfg, "display", None):
+        result["display"] = dict(cfg.display)
     # v1.1 plan-3 M10.1 — routing rules. Round-trips through
     # _parse_routing_block. Only emit when non-default so existing
     # configs stay clean.
@@ -1135,6 +1143,8 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
                     rule_out["match"] = match_dict
                 if r.profile:
                     rule_out["profile"] = r.profile
+                if r.merge_with_builder:
+                    rule_out["merge_with_builder"] = True
                 rules_out.append(rule_out)
             routing_dict["rules"] = rules_out
         if routing.default != type(routing.default)():
@@ -1191,6 +1201,11 @@ def get_value(cfg: Config, key: str) -> Any:
             if not hasattr(current, p):
                 raise KeyError(f"Unknown config key: {key} (failed at '{p}')")
             current = getattr(current, p)
+        elif isinstance(current, dict):
+            # Free-form dict section (e.g. ``display``) — descend by key.
+            if p not in current:
+                raise KeyError(f"Unknown config key: {key} (failed at '{p}')")
+            current = current[p]
         else:
             raise KeyError(f"Unknown config key: {key} (not a config section at '{p}')")
     return current
@@ -1206,6 +1221,29 @@ def set_value(cfg: Config, key: str, value: Any) -> Config:
         raise KeyError(f"Unknown section: {section_name}")
 
     section = getattr(cfg, section_name)
+
+    # Free-form dict sections (e.g. ``display``) — descend the dotted
+    # path, creating intermediate dicts, and set the leaf. Without this
+    # ``oc config set display.runtime_footer.enabled true`` fails even
+    # though ``display`` is a real ``Config`` field (M3 gateway parity).
+    if isinstance(section, dict):
+        import copy
+
+        new_section = copy.deepcopy(section)
+        cursor = new_section
+        for i, p in enumerate(rest):
+            if i == len(rest) - 1:
+                cursor[p] = value
+            else:
+                nxt = cursor.get(p)
+                if not isinstance(nxt, dict):
+                    nxt = {}
+                    cursor[p] = nxt
+                cursor = nxt
+        kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
+        kwargs[section_name] = new_section
+        return Config(**kwargs)
+
     if not is_dataclass(section):
         raise KeyError(f"'{section_name}' is not a config section")
 

@@ -26,6 +26,14 @@ tools:
   web_search:
     provider: ddg
 
+# M1 gateway-vs-CLI parity (2026-05-17): fresh installs surface the
+# `model · context% · ~/cwd` footer on every gateway reply. Existing
+# config.yaml files are never rewritten on upgrade, so they keep the
+# historical OFF default.
+display:
+  runtime_footer:
+    enabled: true
+
 # III.6 settings-declared hooks. The strict variant logs every PreToolUse
 # dispatch to a per-profile audit file so a reviewer can replay the
 # session after the fact. Block decisions come from the plan-mode gate

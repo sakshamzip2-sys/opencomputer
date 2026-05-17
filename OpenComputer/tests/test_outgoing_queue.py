@@ -365,3 +365,68 @@ async def test_mcp_events_wait_caps_timeout_at_120s(tmp_path, monkeypatch):
     await inject_task
     assert time.monotonic() - start < 5.0  # fast path
     assert len(result["messages"]) == 1
+
+
+# ─────────────── M3 #3 fix — drainer chunk-and-send ───────────────
+
+
+class _CappedAdapter(_FakeAdapter):
+    """Adapter with a small message cap so the drainer must chunk."""
+
+    max_message_length = 200
+
+
+async def _drain_one(q, msg, adapter):
+    drainer = OutgoingDrainer(q, {"telegram": adapter}, poll_interval_seconds=0.05)
+    task = asyncio.create_task(drainer.run_forever())
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        if q.get(msg.id).status in ("sent", "failed"):  # type: ignore[union-attr]
+            break
+    drainer.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_drainer_chunks_over_cap_body_losing_nothing(tmp_path):
+    """An over-cap notification body is split, not truncated — no content lost."""
+    q = OutgoingQueue(tmp_path / "x.db")
+    body = "\n".join(f"line {i}" for i in range(150))  # well over 200 chars
+    msg = q.enqueue(platform="telegram", chat_id="42", body=body)
+    adapter = _CappedAdapter()
+
+    await _drain_one(q, msg, adapter)
+
+    assert q.get(msg.id).status == "sent"  # type: ignore[union-attr]
+    # multiple chunks sent, each within the cap
+    assert len(adapter.sent) > 1
+    assert all(len(text) <= 200 for _, text in adapter.sent)
+    # nothing dropped — strip (i/N) markers, rejoin, compare to original
+    rejoined = "".join(t.split("\n", 1)[1] for _, t in adapter.sent)
+    assert rejoined == body
+    # no truncation marker anywhere
+    assert not any("[truncated]" in t for _, t in adapter.sent)
+
+
+@pytest.mark.asyncio
+async def test_drainer_under_cap_body_sends_single_message(tmp_path):
+    """A body within the cap is sent unchunked, unmarked."""
+    q = OutgoingQueue(tmp_path / "x.db")
+    msg = q.enqueue(platform="telegram", chat_id="42", body="short note")
+    adapter = _CappedAdapter()
+
+    await _drain_one(q, msg, adapter)
+
+    assert adapter.sent == [("42", "short note")]
+
+
+@pytest.mark.asyncio
+async def test_drainer_chunk_send_failure_marks_row_failed(tmp_path):
+    """If a chunk send fails, the queue row is marked failed."""
+    q = OutgoingQueue(tmp_path / "x.db")
+    msg = q.enqueue(platform="telegram", chat_id="42", body="z" * 800)
+    adapter = _CappedAdapter(fail_with="network down")
+
+    await _drain_one(q, msg, adapter)
+
+    assert q.get(msg.id).status == "failed"  # type: ignore[union-attr]

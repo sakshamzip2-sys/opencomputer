@@ -1145,6 +1145,16 @@ class GatewayConfig:
 
     photo_burst_window: float = 0.8
 
+    #: M3 #2 fix (gateway-vs-CLI parity, 2026-05-17) — tool-allowlist
+    #: policy for gateway-spawned loops. ``"profile"`` (default) derives
+    #: the allowlist from the profile's ``enabled_plugins`` (``"*"`` →
+    #: no filter); ``"wildcard"`` forces no filter so the gateway sees
+    #: the full tool registry exactly like the CLI, which never sets an
+    #: allowlist. Set ``gateway.tool_filter: wildcard`` when a gateway
+    #: session should be as tool-capable as ``oc chat``. Unknown values
+    #: fall back to ``"profile"`` at the agent_loop_factory call site.
+    tool_filter: str = "profile"
+
     # ─── Startup ping (the OpenClaw "back online" magic message) ──────
     # Opt-in. When the gateway finishes connecting all adapters, send a
     # one-off message to each (platform, chat_id) in this tuple. Lets a
@@ -1568,11 +1578,19 @@ class RoutingRule:
 
     ``profile`` is optional cross-profile re-bind (M10.3 — not used by
     M10.1's schema layer; recorded so the rule round-trips through YAML).
+
+    ``merge_with_builder`` (M3 gateway-vs-CLI parity, 2026-05-17): when
+    ``true``, the matched template's system prompt is *appended to* the
+    normal PromptBuilder output (skills / memory / SOUL stay injected)
+    rather than *replacing* it. Default ``false`` preserves the
+    historical replace-everything behaviour, so existing routing rules
+    are unaffected.
     """
 
     match: RoutingMatch = field(default_factory=RoutingMatch)
     agent: str = ""
     profile: str = ""
+    merge_with_builder: bool = False
 
     def __post_init__(self) -> None:
         if not self.agent:
@@ -1734,6 +1752,23 @@ class Config:
     #: "random" / "least_used"). Unknown values fall back to
     #: "least_used" with a warning at resolve time.
     credential_pool_strategies: dict[str, str] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+    #: Gateway display config (2026-05-17, M1 gateway-vs-CLI parity).
+    #: The top-level ``display:`` YAML section — a free-form subtree
+    #: read by :func:`opencomputer.gateway.runtime_footer.resolve_footer_config`
+    #: and :func:`opencomputer.gateway.display_config.resolve_display_setting`
+    #: (``display.runtime_footer.*``, ``display.platforms.*``,
+    #: ``display.busy_ack_enabled``, …). Kept as a plain dict — same
+    #: pattern as ``GatewayConfig.reset_by_platform`` — because the
+    #: subtree is per-platform/free-form and the gateway resolvers
+    #: already consume it dict-shaped. Before this field existed the
+    #: ``display:`` section was silently dropped by ``load_config`` and
+    #: the gateway runtime-footer knob was dead. ``Dispatch`` receives
+    #: this dict via ``Gateway`` so the footer can be resolved per turn.
+    display: dict = field(
         default_factory=dict,
         compare=False,
         hash=False,

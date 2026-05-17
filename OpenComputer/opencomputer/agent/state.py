@@ -139,7 +139,13 @@ class PromptCheckpoint:
 #: mode both) so thresholds can be tuned against real data. Plain
 #: append table in the F1 ``audit.db`` — replaces a per-call
 #: ``CREATE TABLE IF NOT EXISTS`` that previously ran on every trip.
-SCHEMA_VERSION = 20
+#: v21 = gateway_parity_log (2026-05-17) — M1 of the gateway-vs-CLI
+#: intelligence-parity plan. One row per (turn, mechanism) recording
+#: which of the 10 parity-affecting mechanisms fired on each gateway
+#: turn. Operational telemetry feeding ``oc gateway diagnose``; plain
+#: append table in ``audit.db`` (no HMAC chain, no append-only trigger
+#: — mirrors v20 ``tool_loop_trips``).
+SCHEMA_VERSION = 21
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -379,6 +385,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (17, 18): "_migrate_v17_to_v18",
     (18, 19): "_migrate_v18_to_v19",
     (19, 20): "_migrate_v19_to_v20",
+    (20, 21): "_migrate_v20_to_v21",
 }
 
 
@@ -1149,6 +1156,44 @@ def _migrate_v19_to_v20(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_tool_loop_trips_session
             ON tool_loop_trips(session_id, ts);
+        """
+    )
+
+
+def _migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
+    """gateway_parity_log (2026-05-17) — M1 gateway-vs-CLI parity telemetry.
+
+    Adds the ``gateway_parity_log`` table. The gateway dispatcher
+    (:mod:`opencomputer.gateway.parity_probe`) records one row per
+    (turn, mechanism): which of the 10 parity-affecting mechanisms fired
+    on each gateway turn, so ``oc gateway diagnose`` can show — and the
+    M2/M3 work can prioritise — the asymmetry between CLI and gateway
+    sessions.
+
+    Like ``tool_loop_trips`` (v20) this is operational telemetry, NOT a
+    chained security event, so it gets a plain append table with no HMAC
+    chain and no append-only trigger. It co-exists with the F1
+    ``audit_log`` chain in the same ``audit.db`` file.
+
+    Idempotent: ``CREATE TABLE IF NOT EXISTS`` is a no-op when the table
+    already exists.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS gateway_parity_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           REAL NOT NULL,
+            session_id   TEXT NOT NULL,
+            turn_id      INTEGER NOT NULL,
+            platform     TEXT NOT NULL,
+            mechanism_id TEXT NOT NULL,
+            fired        INTEGER NOT NULL,
+            detail       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_gateway_parity_log_session
+            ON gateway_parity_log(session_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_gateway_parity_log_mechanism
+            ON gateway_parity_log(mechanism_id, ts);
         """
     )
 

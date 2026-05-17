@@ -75,6 +75,27 @@ def _compute_turn_index(db, session_id: str) -> int:
     return int(row[0])
 
 
+def _read_compactions_count(db, session_id: str) -> int:
+    """Return ``sessions.compactions_count`` for ``session_id`` (0 on miss).
+
+    Used by parity mechanism #10 (``compaction_long_session``) — the
+    dispatcher snapshots this before/after ``run_conversation`` and a
+    rise means CompactionEngine ran this turn. Best-effort: any failure
+    (missing row, no DB, SQL error) yields 0 so a delta of 0 reads as
+    "no compaction" rather than wedging telemetry.
+    """
+    try:
+        row = db.get_session(session_id)
+    except Exception:  # noqa: BLE001 — telemetry read must never raise
+        return 0
+    if not row:
+        return 0
+    try:
+        return int(row.get("compactions_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _build_end_of_turn_signals(
     db,
     *,
@@ -407,6 +428,18 @@ class Dispatch:
         # can refuse a new goal when the agent is in flight rather than
         # racing the current continuation prompt.
         self._active_runs: set[str] = set()
+        # M3 #6/#8 — sessions that have already shown the one-line
+        # routing badge. The badge ("↪ routed: …") surfaces the
+        # otherwise-invisible binding/routing/profile-rebind decision;
+        # shown once per session so it doesn't clutter every reply.
+        self._routing_badge_shown: set[str] = set()
+        # M3 #5 — per-session count of consent approval prompts sent.
+        # Bumped by _send_approval_prompt; the dispatcher snapshots it
+        # before/after run_conversation so mechanism #5
+        # (no_interactive_consent) fires only on turns that actually
+        # paid the async-consent round-trip, not structurally on every
+        # turn (the gateway DOES have working interactive consent).
+        self._consent_prompt_counts: dict[str, int] = {}
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
         # Task I.9: the shared PluginAPI whose ``in_request`` we wrap
@@ -1046,6 +1079,25 @@ class Dispatch:
         loop = await self._router.get_or_load(profile_id)
         profile_home = self._router._profile_home_resolver(profile_id)
 
+        # M1 gateway-vs-CLI parity telemetry: one ParityProbe per turn.
+        # The probe accumulates which of the 10 parity-affecting
+        # mechanisms fire and is flushed once at turn-end (10 rows to
+        # ``audit.db``). ``_initial_profile_id`` is captured BEFORE the
+        # M10.3 rebind block so mechanism #6 (profile_rebind) can detect
+        # a swap. All telemetry is best-effort — never breaks dispatch.
+        _initial_profile_id = profile_id
+        _parity_probe = None
+        try:
+            from opencomputer.gateway.parity_probe import ParityProbe
+
+            _parity_probe = ParityProbe(
+                session_id=session_id,
+                turn_id=_compute_turn_index(loop.db, session_id),
+                platform=event.platform.value if event.platform else "unknown",
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break dispatch
+            logger.debug("parity probe init failed", exc_info=True)
+
         # v1.1 plan-3 M10.3 — per-rule profile rebind. After the
         # BindingResolver picks the source profile and we load its loop,
         # consult the source profile's routing.rules for THIS event. If
@@ -1120,6 +1172,30 @@ class Dispatch:
                 "continuing on source profile",
                 e,
             )
+
+        # M1 parity telemetry — mechanism #6 (profile_rebind) and #2
+        # (tool_allowlist) are both decidable now that ``loop`` is
+        # final. #6 fired iff the M10.3 block above swapped profiles;
+        # #2 fired iff the gateway loop carries a non-wildcard tool
+        # allowlist (the CLI never sets one).
+        if _parity_probe is not None:
+            try:
+                _rebound = profile_id != _initial_profile_id
+                _parity_probe.observe(
+                    "profile_rebind",
+                    _rebound,
+                    {"from": _initial_profile_id, "to": profile_id}
+                    if _rebound
+                    else {},
+                )
+                _allowed = getattr(loop, "allowed_tools", None)
+                _parity_probe.observe(
+                    "tool_allowlist",
+                    _allowed is not None,
+                    {"tool_count": len(_allowed)} if _allowed is not None else {},
+                )
+            except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                logger.debug("parity probe observe (rebind/tools) failed", exc_info=True)
 
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
@@ -1262,6 +1338,74 @@ class Dispatch:
             # composed system prompt — staying out of the FROZEN base
             # so prefix-cache hits on turn 2+ remain valid.
             runtime = self._build_channel_runtime(event, adapter, loop)
+            # M3 #7 fix — display.persona_override. When the operator
+            # has pinned a persona for gateway sessions, thread it onto
+            # the runtime so the loop's existing override path
+            # (_build_persona_overlay) applies it instead of letting the
+            # platform-driven classifier pick a casual register.
+            #   value "none"/"off" → suppress the persona overlay entirely
+            #   any other value     → pin that persona id
+            # CRITICAL: _build_channel_runtime returns the module-shared
+            # DEFAULT_RUNTIME_CONTEXT when there is no channel_id —
+            # mutating its .custom would leak across every session (the
+            # #10-class bug). So we build a FRESH RuntimeContext here.
+            _persona_override = str(
+                (self._display_cfg.get("display") or {}).get(
+                    "persona_override", ""
+                )
+                or ""
+            ).strip()
+            if _persona_override:
+                _rt_custom = dict(getattr(runtime, "custom", {}) or {})
+                if _persona_override.lower() in ("none", "off", "disabled"):
+                    _rt_custom["persona_disabled"] = True
+                else:
+                    _rt_custom["persona_id_override"] = _persona_override
+                runtime = RuntimeContext(custom=_rt_custom)
+            # M1 parity telemetry — mechanisms decidable from the
+            # per-turn runtime: #4 (channel_prompt_overlay) fired iff
+            # _build_channel_runtime stuffed a channel-scoped prompt or
+            # skill bodies into custom; #7 (persona_casual_register) is
+            # structural — a gateway turn carries the chat agent_context;
+            # #5 (no_interactive_consent) is structural — the gateway
+            # cannot prompt for tool approval synchronously.
+            if _parity_probe is not None:
+                try:
+                    _custom = getattr(runtime, "custom", {}) or {}
+                    _overlay = bool(
+                        _custom.get("channel_prompt")
+                        or _custom.get("channel_skill_bodies")
+                    )
+                    _parity_probe.observe(
+                        "channel_prompt_overlay",
+                        _overlay,
+                        {
+                            "has_prompt": bool(_custom.get("channel_prompt")),
+                            "has_skills": bool(_custom.get("channel_skill_bodies")),
+                        }
+                        if _overlay
+                        else {},
+                    )
+                    # #7 — fires when the turn runs in the platform-
+                    # driven casual register. A display.persona_override
+                    # (pin or disable) closes the gap → fired=False.
+                    _agent_ctx = getattr(runtime, "agent_context", "chat") or "chat"
+                    _persona_pinned = bool(
+                        _custom.get("persona_id_override")
+                        or _custom.get("persona_disabled")
+                    )
+                    _parity_probe.observe(
+                        "persona_casual_register",
+                        _agent_ctx == "chat" and not _persona_pinned,
+                        {
+                            "agent_context": _agent_ctx,
+                            "persona_override": _persona_pinned,
+                        },
+                    )
+                    # #5 (no_interactive_consent) is decided AFTER the
+                    # turn — see the post-run consent-delta observe.
+                except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                    logger.debug("parity probe observe (runtime) failed", exc_info=True)
             # Phase 2 audit G1: bind the per-task ``current_profile_home``
             # ContextVar around ``run_conversation`` so ``_home()`` and
             # any PluginAPI lazy paths resolve to the right profile for
@@ -1323,6 +1467,8 @@ class Dispatch:
                 # and falls through to the default behavior — a stale
                 # routing rule must NEVER break message dispatch.
                 routing_system_override: str | None = None
+                routing_template_name: str | None = None
+                routing_system_merge: bool = False
                 try:
                     cfg_obj = getattr(loop, "config", None)
                     routing_cfg = getattr(cfg_obj, "routing", None)
@@ -1338,11 +1484,14 @@ class Dispatch:
                         resolved = _rs_template(routing_cfg, event, templates)
                         if resolved is not None:
                             routing_system_override = resolved.system_prompt
+                            routing_template_name = resolved.template_name
+                            routing_system_merge = resolved.merge_with_builder
                             logger.info(
-                                "M10.2 routing: %s:%s → agent=%r",
+                                "M10.2 routing: %s:%s → agent=%r (merge=%s)",
                                 event.platform.value if event.platform else "?",
                                 event.chat_id,
                                 resolved.template_name,
+                                resolved.merge_with_builder,
                             )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
@@ -1350,6 +1499,79 @@ class Dispatch:
                         "to default dispatch): %s",
                         e,
                     )
+
+                # Routing summary for this turn — drives both parity
+                # mechanism #1/#8 telemetry below AND the M3 #6/#8
+                # chat-visible routing badge appended in the success
+                # path. Computed unconditionally (not gated on the
+                # probe) so the badge works even if telemetry init
+                # failed.
+                _override_active = bool(
+                    routing_system_override and routing_system_override.strip()
+                )
+                _binding_matched = (
+                    self._resolver is not None
+                    and profile_id != self._resolver._cfg.default_profile
+                )
+                _rebound = profile_id != _initial_profile_id
+                _routed = _override_active or _binding_matched or _rebound
+
+                # M1 parity telemetry — #1 (prompt_override) fired iff a
+                # routing rule supplied a non-empty system prompt;
+                # #8 (routing_decision_invisible) fired iff ANY routing
+                # decision changed behaviour AND no badge surfaced it.
+                if _parity_probe is not None:
+                    try:
+                        _parity_probe.observe(
+                            "prompt_override",
+                            _override_active,
+                            {
+                                "template": routing_template_name,
+                                "override_len": len(routing_system_override or ""),
+                            }
+                            if _override_active
+                            else {},
+                        )
+                        # #8 "invisible" — fired when routing happened
+                        # but the badge was NOT shown on this turn
+                        # (badge shows once per session; see success
+                        # path). A turn that surfaces the badge reads
+                        # fired=False — the gap is closed for it.
+                        _badge_will_show = (
+                            _routed
+                            and session_id not in self._routing_badge_shown
+                        )
+                        _parity_probe.observe(
+                            "routing_decision_invisible",
+                            _routed and not _badge_will_show,
+                            {
+                                "binding_matched": _binding_matched,
+                                "template": routing_template_name,
+                                "rebound": _rebound,
+                                "badge_shown": _badge_will_show,
+                            }
+                            if _routed
+                            else {},
+                        )
+                    except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                        logger.debug(
+                            "parity probe observe (routing) failed", exc_info=True
+                        )
+
+                # M1/M3 #10 fix — snapshot the session's compaction
+                # count BEFORE the turn. Mechanism #10 must be decided
+                # by a before/after delta on the durable
+                # ``sessions.compactions_count`` column, NOT by probing
+                # ``runtime.custom`` — ``_build_channel_runtime`` returns
+                # the module-shared ``DEFAULT_RUNTIME_CONTEXT`` when
+                # there is no channel_id, so a ``session_compactions``
+                # key written by one turn's ``_record_compaction`` leaks
+                # into every later turn's runtime and would over-report.
+                _pre_compactions = _read_compactions_count(loop.db, session_id)
+                # M3 #5 — snapshot the consent-prompt count so we can
+                # tell, post-turn, whether this turn actually paid an
+                # async-consent round-trip.
+                _pre_consent = self._consent_prompt_counts.get(session_id, 0)
 
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
@@ -1360,6 +1582,7 @@ class Dispatch:
                                 images=images,
                                 runtime=runtime,
                                 system_prompt_override=routing_system_override,
+                                system_prompt_merge=routing_system_merge,
                             )
                     else:
                         result = await loop.run_conversation(
@@ -1368,6 +1591,7 @@ class Dispatch:
                             images=images,
                             runtime=runtime,
                             system_prompt_override=routing_system_override,
+                            system_prompt_merge=routing_system_merge,
                         )
                 # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:end +
                 # session:end. Hermes spec: session:end fires per
@@ -1450,6 +1674,23 @@ class Dispatch:
                     _fc = resolve_footer_config(
                         self._display_cfg, platform=_platform_name,
                     )
+                    # M1 parity telemetry — mechanism #9: the runtime
+                    # footer is "fired" (as a gap) when it is OFF, since
+                    # an off footer is what hides the model/context from
+                    # the user. An empty fields list counts as off too.
+                    if _parity_probe is not None:
+                        try:
+                            _footer_off = not (_fc.enabled and _fc.fields)
+                            _parity_probe.observe(
+                                "runtime_footer_off",
+                                _footer_off,
+                                {} if _footer_off else {"enabled": True},
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "parity probe observe (footer) failed",
+                                exc_info=True,
+                            )
                     if _fc.enabled and _final_text:
                         _model_name = (
                             getattr(getattr(loop, "config", None), "model", None)
@@ -1498,6 +1739,84 @@ class Dispatch:
                             _final_text = f"{_final_text}\n\n_{_line}_"
                 except Exception as _fe:  # noqa: BLE001
                     logger.debug("runtime_footer render failed: %s", _fe)
+                # M3 #6/#8 fix — routing/rebind badge. When a binding,
+                # routing rule or profile-rebind changed this turn's
+                # behaviour, append a one-line badge the FIRST time it
+                # happens for a session, so the user knows they are not
+                # talking to their plain default agent. Shown once per
+                # session (in-memory latch) to avoid cluttering every
+                # reply. Best-effort — a badge failure never replaces
+                # the reply.
+                try:
+                    if (
+                        _routed
+                        and _final_text
+                        and session_id not in self._routing_badge_shown
+                    ):
+                        _badge_bits: list[str] = []
+                        if routing_template_name:
+                            _badge_bits.append(f"agent={routing_template_name}")
+                        if _rebound or _binding_matched:
+                            _badge_bits.append(f"profile={profile_id}")
+                        if _badge_bits:
+                            _final_text = (
+                                f"{_final_text}\n\n_↪ routed: "
+                                f"{', '.join(_badge_bits)}_"
+                            )
+                        self._routing_badge_shown.add(session_id)
+                except Exception:  # noqa: BLE001 — badge never breaks the reply
+                    logger.debug("routing badge render failed", exc_info=True)
+                # M1 parity telemetry — last two mechanisms, decided
+                # from the finished turn. #3 (reply_truncation): the
+                # reply exceeds the adapter's message-length cap.
+                # #10 (compaction_long_session): the session's durable
+                # compaction count rose during this turn.
+                if _parity_probe is not None:
+                    try:
+                        _cap = getattr(adapter, "max_message_length", 0) or 0
+                        _reply_len = len(_final_text or "")
+                        _truncated = bool(_cap and _reply_len > _cap)
+                        _parity_probe.observe(
+                            "reply_truncation",
+                            _truncated,
+                            {"reply_len": _reply_len, "cap": _cap}
+                            if _truncated
+                            else {},
+                        )
+                        _post_compactions = _read_compactions_count(
+                            loop.db, session_id
+                        )
+                        _compacted = _post_compactions > _pre_compactions
+                        _parity_probe.observe(
+                            "compaction_long_session",
+                            _compacted,
+                            {
+                                "compactions_before": _pre_compactions,
+                                "compactions_after": _post_compactions,
+                            }
+                            if _compacted
+                            else {},
+                        )
+                        # #5 — fired iff this turn actually sent an
+                        # async-consent approval prompt. The gateway HAS
+                        # working interactive consent (buttons + text
+                        # reply); #5 marks the turns that paid its
+                        # round-trip latency, not every turn.
+                        _post_consent = self._consent_prompt_counts.get(
+                            session_id, 0
+                        )
+                        _consent_roundtrip = _post_consent > _pre_consent
+                        _parity_probe.observe(
+                            "no_interactive_consent",
+                            _consent_roundtrip,
+                            {"prompts": _post_consent - _pre_consent}
+                            if _consent_roundtrip
+                            else {},
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "parity probe observe (reply) failed", exc_info=True
+                        )
                 return _final_text
             except Exception as e:  # noqa: BLE001
                 # Always log full traceback for debugging; user only
@@ -1510,6 +1829,21 @@ class Dispatch:
                 outcome = ProcessingOutcome.FAILURE
                 return _format_user_facing_error(e)
             finally:
+                # M1 parity telemetry — flush the per-turn probe (10
+                # rows) to the profile's ``audit.db``. Runs in the
+                # ``finally`` so it fires on the error path too (a
+                # failed turn still emits, mostly fired=0). Best-effort:
+                # ``flush`` swallows SQLite errors internally; the outer
+                # guard catches a missing config.home etc.
+                if _parity_probe is not None:
+                    try:
+                        _cfg_home = getattr(
+                            getattr(loop, "config", None), "home", None
+                        )
+                        if _cfg_home is not None:
+                            _parity_probe.flush(_cfg_home / "audit.db")
+                    except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+                        logger.debug("parity probe flush failed", exc_info=True)
                 # Kanban-Goals v2 (2026-05-08) — release the active-run
                 # marker so /goal <text> dispatched in the next moment
                 # is no longer refused.
@@ -1923,6 +2257,12 @@ class Dispatch:
         # otherwise a synchronous failure would leave a dangling entry
         # that a stale click could pick up against a future request.
         self._approval_tokens[token] = (session_id, claim.capability_id)
+        # M3 #5 telemetry — record that this turn paid an async-consent
+        # round-trip, so mechanism #5 fires only when consent actually
+        # happened (not structurally on every turn).
+        self._consent_prompt_counts[session_id] = (
+            self._consent_prompt_counts.get(session_id, 0) + 1
+        )
         return True
 
     async def _maybe_resolve_consent_text_reply(

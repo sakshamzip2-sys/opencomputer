@@ -23,5 +23,14 @@ tools:
   web_search:
     provider: ddg
 
+# M1 gateway-vs-CLI parity (2026-05-17): fresh installs surface the
+# `model · context% · ~/cwd` footer on every gateway reply so users can
+# see which model/profile answered. Existing config.yaml files are
+# never rewritten by `oc config init` (without --force), so upgrades
+# keep the historical OFF default — no surprise for bot scanners.
+display:
+  runtime_footer:
+    enabled: true
+
 # No settings hooks — lax variant trusts the caller. Add your own
 # under `hooks:` if you want log-only observation.

@@ -195,3 +195,38 @@ def test_factory_delegate_factory_closes_over_profile(tmp_path: Path) -> None:
     spawned_b = delegate_b._factory()
     assert spawned_a.config.session.db_path.parent == p1
     assert spawned_b.config.session.db_path.parent == p2
+
+
+def test_tool_filter_wildcard_overrides_profile_allowlist(tmp_path: Path) -> None:
+    """M3 #2: gateway.tool_filter=wildcard forces allowed_tools=None even
+    when the profile has a concrete enabled_plugins allowlist — the
+    gateway then sees the full tool registry exactly like the CLI."""
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "profile.yaml").write_text(
+        "plugins:\n  enabled: ['anthropic-provider']\n"
+    )
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+        "gateway:\n  tool_filter: wildcard\n"
+    )
+
+    loop = build_agent_loop_for_profile("p1", profile_home)
+    # wildcard → no allowlist, despite the concrete enabled_plugins list.
+    assert loop.allowed_tools is None
+
+
+def test_tool_filter_profile_is_the_default(tmp_path: Path) -> None:
+    """Default (no gateway.tool_filter) keeps the historical behaviour:
+    a concrete enabled_plugins list still produces an allowlist."""
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "profile.yaml").write_text(
+        "plugins:\n  enabled: ['anthropic-provider']\n"
+    )
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+
+    loop = build_agent_loop_for_profile("p1", profile_home)
+    assert loop.allowed_tools == frozenset()  # allowlist still active

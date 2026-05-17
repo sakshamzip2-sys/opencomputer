@@ -131,9 +131,18 @@ def build_agent_loop_for_profile(
         # 3. Resolve the profile's enabled plugins → tool allowlist.
         #    ``"*"`` means "no filter" (legacy single-profile shape);
         #    a concrete frozenset becomes the allowed-tools allowlist.
+        #
+        #    M3 #2 fix (gateway-vs-CLI parity): ``gateway.tool_filter``
+        #    overrides this. ``profile`` (default) keeps the behaviour
+        #    below; ``wildcard`` forces ``allowed_tools = None`` so the
+        #    gateway sees the full tool registry exactly like the CLI
+        #    (which never sets an allowlist).
         prof_cfg = load_profile_config(profile_home)
         allowed_tools: frozenset[str] | None
-        if prof_cfg.enabled_plugins == "*":
+        tool_filter = getattr(getattr(cfg, "gateway", None), "tool_filter", "profile")
+        if tool_filter == "wildcard":
+            allowed_tools = None
+        elif prof_cfg.enabled_plugins == "*":
             allowed_tools = None  # unrestricted (all loaded tools)
         else:
             assert isinstance(prof_cfg.enabled_plugins, frozenset)

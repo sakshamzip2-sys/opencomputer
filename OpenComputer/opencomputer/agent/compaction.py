@@ -170,6 +170,14 @@ class CompactionConfig:
     summarize_timeout_s: float = 30.0
     #: Number of messages to drop on aux-LLM failure fallback.
     fallback_drop_count: int = 10
+    #: M3 #10 fix (gateway-vs-CLI parity, 2026-05-17) — keep the
+    #: session's first user message (the conversation's "what this is
+    #: about" anchor) verbatim across every compaction. Without this, a
+    #: long-lived gateway session re-summarises its own summary each
+    #: pass and the origin context degrades. Default True — strictly
+    #: additive (one small message survives); set False to restore the
+    #: pre-M3 summarise-everything behaviour.
+    preserve_anchor: bool = True
 
 
 @dataclass(slots=True)
@@ -471,13 +479,31 @@ class CompactionEngine(ContextEngine):
         old_block = messages[:split_idx]
         recent_block = messages[split_idx:]
 
+        # M3 #10 fix — hold the session anchor (the first user message)
+        # out of the block being summarised so it survives every
+        # compaction verbatim. Only when it IS a user message: a
+        # delegate-seeded history can start with an assistant/tool
+        # message, which must not be anchored. ``len(old_block) > 1``
+        # guarantees there is still something to summarise.
+        anchor: Message | None = None
+        block_to_summarize = old_block
+        if (
+            self.config.preserve_anchor
+            and len(old_block) > 1
+            and old_block[0].role == "user"
+        ):
+            anchor = old_block[0]
+            block_to_summarize = old_block[1:]
+
         # PR-6 T2.2 — extract key facts from providers BEFORE the aux LLM
         # summarises (so facts survive compaction). Failures are isolated;
         # compaction proceeds without facts if the bridge is unavailable.
         key_facts = ""
         if self._memory_bridge is not None:
             try:
-                key_facts = await self._memory_bridge.collect_pre_compress(old_block)
+                key_facts = await self._memory_bridge.collect_pre_compress(
+                    block_to_summarize
+                )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "compaction: collect_pre_compress failed; proceeding without"
@@ -486,7 +512,8 @@ class CompactionEngine(ContextEngine):
         # Try the aux LLM summary
         try:
             summary_text = await asyncio.wait_for(
-                self._summarize(old_block), timeout=self.config.summarize_timeout_s
+                self._summarize(block_to_summarize),
+                timeout=self.config.summarize_timeout_s,
             )
         except Exception as e:  # noqa: BLE001 — fall back on any failure
             logger.warning("compaction aux LLM failed, falling back to truncate: %s", e)
@@ -501,12 +528,17 @@ class CompactionEngine(ContextEngine):
                 + summary_text
             )
 
-        # Success — replace old_block with one synthetic summary message
+        # Success — replace the summarised block with one synthetic
+        # message, keeping the anchor (if any) ahead of it.
         synthetic = Message(
             role="assistant",
             content=f"[compacted-summary]\n\n{summary_text}",
         )
-        new_msgs = [synthetic, *recent_block]
+        new_msgs = (
+            [anchor, synthetic, *recent_block]
+            if anchor is not None
+            else [synthetic, *recent_block]
+        )
         return CompactionResult(messages=new_msgs, did_compact=True, reason="aux-summary")
 
     # ─── internals ────────────────────────────────────────────────
@@ -610,8 +642,19 @@ class CompactionEngine(ContextEngine):
             role="assistant",
             content=f"[compacted-truncated] — {drop} oldest messages removed due to compaction failure",
         )
+        # M3 #10 fix — even on the degraded truncate path, keep the
+        # session anchor (first user message) when it would otherwise be
+        # among the dropped oldest messages.
+        head: list[Message] = [synthetic]
+        if (
+            self.config.preserve_anchor
+            and drop > 0
+            and messages
+            and messages[0].role == "user"
+        ):
+            head = [messages[0], synthetic]
         return CompactionResult(
-            messages=[synthetic, *new_msgs],
+            messages=[*head, *new_msgs],
             did_compact=True,
             degraded=True,
             reason="aux-failed-truncated",
