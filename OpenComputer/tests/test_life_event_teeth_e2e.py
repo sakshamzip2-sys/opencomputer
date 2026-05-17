@@ -318,3 +318,252 @@ async def test_stop_hook_on_surfacing_turn_does_not_judge_the_reply(fake_cron):
     assert entry["verdict_pending"] is True, (
         "still verdict-pending — the real reply (turn N+1) has not been seen yet"
     )
+
+
+# ── Scenarios 5–7: multi-surface teeth, WIRED end-to-end ─────────────────
+#
+# Tasks 4 + 6 extended life-event teeth past the CLI. These scenarios drive
+# the WHOLE wired path — ``register_life_event_injection_provider(surface)``
+# installs a surface-labelled provider on the *real* injection engine; the
+# provider is then pulled back off ``engine._providers`` (exactly the object
+# the InjectionEngine would call mid-prompt) and its ``collect()`` is run.
+# So registration → feature flag → registry drain → provider → cron all
+# fire for real; a regression anywhere on that chain trips here.
+#
+# On the gateway surface the proactive check-in is *origin-targeted*: the
+# gateway parks a ``RequestContext`` (channel + user_id) on the shared
+# ``PluginAPI``; ``collect`` reads it and threads a ``{platform, chat_id}``
+# origin into the cron. These scenarios install that context the same way
+# the gateway dispatch does (via the plugin registry's ``shared_api``) and
+# assert the scheduled cron carries the origin.
+
+
+def _write_multi_surface_flag(home, *, enabled: bool) -> None:
+    """Write ``feature_flags.json`` into ``home`` with the multi-surface
+    life-event flag set to ``enabled``.
+
+    The autouse fixture already points ``OPENCOMPUTER_HOME`` at the test's
+    ``tmp_path``; this drops the ``feature_flags.json`` sibling that
+    :func:`FeatureFlags.read` (and thus the provider's surface gate) picks
+    up. Mirrors the helper of the same name in ``test_life_event_injection``.
+    """
+    import json
+    from pathlib import Path
+
+    (Path(home) / "feature_flags.json").write_text(
+        json.dumps({"life_events": {"multi_surface_life_events": enabled}})
+    )
+
+
+class _FakeRequestContext:
+    """Minimal stand-in carrying just the fields ``_resolve_origin`` reads.
+
+    The real :class:`plugin_sdk.runtime_context.RequestContext` is a frozen
+    slotted dataclass with a required ``request_id``; ``_resolve_origin``
+    only touches ``.channel`` and ``.user_id``, so a tiny attribute holder
+    is enough. Mirrors the helper of the same name in
+    ``test_life_event_injection``.
+    """
+
+    def __init__(self, channel, user_id) -> None:
+        self.channel = channel
+        self.user_id = user_id
+
+
+def _activate_request_context(monkeypatch, ctx) -> None:
+    """Make ``ctx`` the active RequestContext as ``_resolve_origin`` sees it.
+
+    ``_resolve_origin`` reaches the active request through the process-wide
+    plugin registry singleton — ``registry.shared_api.request_context`` —
+    which on the gateway path is the same ``PluginAPI`` the dispatch wrapped
+    in ``in_request(ctx)``. This installs a real ``PluginAPI`` (built via
+    ``PluginRegistry.api()``) on ``registry.shared_api`` and parks ``ctx`` on
+    its private ``_request_context`` slot — the slot ``PluginAPI.in_request``
+    writes — so the public ``request_context`` property returns it.
+    ``monkeypatch`` restores ``shared_api`` afterwards. Mirrors the helper of
+    the same name in ``test_life_event_injection``.
+    """
+    from opencomputer.plugins.registry import registry as _plugin_registry
+
+    api = _plugin_registry.api()
+    api._request_context = ctx
+    monkeypatch.setattr(_plugin_registry, "shared_api", api)
+
+
+@pytest.fixture
+def _clean_life_event_provider():
+    """Bracket a test so the real injection engine has no stale
+    ``life_event_hint`` provider before it and is left clean afterwards.
+
+    These scenarios register the provider on the *process-wide* injection
+    engine via ``register_life_event_injection_provider``; this fixture is
+    the symmetric cleanup so registration never leaks into another test.
+    """
+    from opencomputer.agent.injection import engine
+
+    engine.unregister("life_event_hint")
+    try:
+        yield engine
+    finally:
+        engine.unregister("life_event_hint")
+
+
+async def test_gateway_surface_flag_on_surfaces_hint_and_origin_targeted_cron(
+    fake_cron, _clean_life_event_provider, monkeypatch, tmp_path
+):
+    """WIRED: gateway registration + flag ON + active RequestContext →
+    a <life-event-hint> block AND an origin-targeted check-in cron.
+
+    Drives the full multi-surface path end to end:
+
+    1. ``register_life_event_injection_provider("gateway")`` installs the
+       provider on the real injection engine.
+    2. The multi-surface feature flag is ON in the test profile.
+    3. A gateway ``RequestContext`` (channel ``telegram`` + user ``chat-42``)
+       is active — exactly as the gateway dispatch parks it.
+    4. A burnout firing is fed into the global registry.
+    5. The provider pulled BACK off ``engine._providers`` (the object the
+       InjectionEngine itself would invoke) runs ``collect()``.
+
+    The hint block must surface (flag ON unlocks the non-CLI surface) and
+    the scheduled cron must carry the origin derived from the request
+    context — ``notify="origin"`` + ``origin_platform``/``origin_chat_id``.
+    """
+    from opencomputer.awareness.life_events.injection import (
+        LifeEventInjectionProvider,
+        register_life_event_injection_provider,
+    )
+
+    created, _removed = fake_cron
+    engine = _clean_life_event_provider
+    _write_multi_surface_flag(tmp_path, enabled=True)
+    _activate_request_context(
+        monkeypatch, _FakeRequestContext(channel="telegram", user_id="chat-42")
+    )
+
+    # 1. The gateway surface's boot-time registration.
+    register_life_event_injection_provider(surface="gateway")
+    provider = engine._providers.get("life_event_hint")
+    assert isinstance(provider, LifeEventInjectionProvider), (
+        "the gateway registration must install the provider on the engine"
+    )
+    assert provider._surface == "gateway"
+
+    # 2. A life event fires onto the global registry queue.
+    hint = "your work rhythm looked like it shifted"
+    get_global_registry()._queue.append(_burnout_firing(hint))
+
+    # 3. The InjectionEngine assembles the turn — run the registered provider.
+    block = await provider.collect(_injection_ctx(_SURFACE_TURN))
+
+    # --- The hint surfaced: flag ON unlocks the gateway surface. ---------
+    assert block is not None, "flag ON → the gateway surface must surface the hint"
+    assert block.startswith("<life-event-hint>")
+    assert block.endswith("</life-event-hint>")
+    assert hint in block
+    assert "Respond gently and concisely; do not pile on tasks." in block
+
+    # --- The check-in cron is origin-targeted (gateway path). ------------
+    assert len(created) == 1, "surfacing the hint must schedule exactly one cron"
+    cron_kwargs = created[0]
+    assert cron_kwargs["schedule"] == "3d"
+    assert cron_kwargs["prompt"] == actions._CHECKIN_PROMPT["burnout"]
+    # The origin was derived from the active RequestContext and threaded in.
+    assert cron_kwargs["notify"] == "origin", (
+        "the gateway check-in cron must request origin delivery"
+    )
+    assert cron_kwargs["origin_platform"] == "telegram"
+    assert cron_kwargs["origin_chat_id"] == "chat-42"
+
+    # --- State recorded the surfaced firing. -----------------------------
+    entry = state.load_state()["burnout"]
+    assert entry["cron_id"], "a follow-up cron_id must be recorded"
+    assert entry["verdict_pending"] is True
+    assert entry["surfaced_turn"] == _SURFACE_TURN
+
+
+async def test_gateway_surface_flag_off_surfaces_nothing(
+    fake_cron, _clean_life_event_provider, monkeypatch, tmp_path
+):
+    """WIRED: gateway registration + flag OFF → collect() returns None,
+    no hint, no cron.
+
+    Same wiring as the flag-ON scenario — ``register_life_event_injection_provider
+    ("gateway")``, an active gateway ``RequestContext``, a queued burnout
+    firing — but the ``multi_surface_life_events`` flag is OFF. The gateway
+    surface is opt-in, so the registered provider's ``collect()`` must return
+    ``None``: no ``<life-event-hint>`` block, and (the firing never reaching
+    the surface) no check-in cron scheduled. This is the gate that keeps
+    multi-surface teeth dark until a profile opts in.
+    """
+    from opencomputer.awareness.life_events.injection import (
+        register_life_event_injection_provider,
+    )
+
+    created, removed = fake_cron
+    engine = _clean_life_event_provider
+    _write_multi_surface_flag(tmp_path, enabled=False)
+    _activate_request_context(
+        monkeypatch, _FakeRequestContext(channel="telegram", user_id="chat-42")
+    )
+
+    register_life_event_injection_provider(surface="gateway")
+    provider = engine._providers.get("life_event_hint")
+
+    hint = "your work rhythm looked like it shifted"
+    get_global_registry()._queue.append(_burnout_firing(hint))
+
+    block = await provider.collect(_injection_ctx(_SURFACE_TURN))
+
+    # Flag OFF → the gateway surface is gated: nothing surfaces.
+    assert block is None, "flag OFF → the gateway surface must surface no hint"
+    # No cron was scheduled — the firing never reached cron scheduling.
+    assert created == [], "a gated-off surface must schedule no check-in cron"
+    assert removed == []
+    # And no state entry was recorded for the gated firing.
+    assert "burnout" not in state.load_state(), (
+        "a gated-off firing must record no life_event_state entry"
+    )
+
+
+async def test_cli_surface_unaffected_by_multi_surface_flag(
+    fake_cron, _clean_life_event_provider, tmp_path
+):
+    """WIRED: the CLI surface is always on — the flag does not gate it.
+
+    With the ``multi_surface_life_events`` flag explicitly OFF,
+    ``register_life_event_injection_provider("cli")`` + the registered
+    provider's ``collect()`` must STILL surface the hint: life-event teeth
+    shipped CLI-only and unflagged in #630, and the multi-surface flag only
+    gates the non-CLI surfaces. This pins that the new gating is additive —
+    it never regresses the original CLI behaviour.
+    """
+    from opencomputer.awareness.life_events.injection import (
+        LifeEventInjectionProvider,
+        register_life_event_injection_provider,
+    )
+
+    created, _removed = fake_cron
+    engine = _clean_life_event_provider
+    # Flag OFF — and yet the CLI surface must still surface the hint.
+    _write_multi_surface_flag(tmp_path, enabled=False)
+
+    register_life_event_injection_provider(surface="cli")
+    provider = engine._providers.get("life_event_hint")
+    assert isinstance(provider, LifeEventInjectionProvider)
+    assert provider._surface == "cli"
+
+    hint = "your work rhythm looked like it shifted"
+    get_global_registry()._queue.append(_burnout_firing(hint))
+
+    block = await provider.collect(_injection_ctx(_SURFACE_TURN))
+
+    # CLI is always on — the flag-OFF state does NOT gate it.
+    assert block is not None, "the CLI surface must surface the hint regardless of the flag"
+    assert block.startswith("<life-event-hint>")
+    assert hint in block
+    # The follow-up cron is still scheduled — just untargeted (no
+    # RequestContext on the CLI path).
+    assert len(created) == 1
+    assert created[0].get("notify") != "origin"
+    assert created[0].get("origin_platform") is None

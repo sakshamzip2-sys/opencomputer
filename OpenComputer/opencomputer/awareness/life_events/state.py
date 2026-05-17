@@ -45,6 +45,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from opencomputer.profiles_lock import file_lock
+
 _log = logging.getLogger(__name__)
 
 
@@ -57,6 +59,20 @@ def _state_path() -> Path:
     from opencomputer.agent.config import _home
 
     return _home() / "life_event_state.json"
+
+
+def _lock_path() -> Path:
+    """Return the path to the per-profile ``.life_event_state.lock`` file.
+
+    Mirrors :func:`_state_path` — resolved every call so per-test
+    ``OPENCOMPUTER_HOME`` monkey-patching sees the right tmp path. The
+    lock is a sibling dotfile of ``life_event_state.json``; it is kept
+    separate because ``save_state`` atomic-replaces the json file, which
+    would invalidate any flock held on the original inode.
+    """
+    from opencomputer.agent.config import _home
+
+    return _home() / ".life_event_state.lock"
 
 
 def load_state() -> dict:
@@ -103,11 +119,16 @@ def save_state(state: dict) -> None:
     os.replace(tmp_path, path)
 
 
-# Single-writer assumption: the mutators below (mark_surfaced, clear,
-# clear_verdict_pending) do a non-atomic load→mutate→save. This is safe
-# because per-profile state is written sequentially within one agent loop.
-# A concurrent writer (e.g. gateway + CLI session at once) would need a
-# file lock to avoid lost updates.
+# Concurrency: the mutators below (mark_surfaced, clear,
+# clear_verdict_pending) each do a non-atomic load→mutate→save. To stay
+# correct when several surfaces write at once (e.g. gateway + CLI session
+# concurrently), each mutator holds an exclusive advisory file lock
+# (``.life_event_state.lock``, via ``file_lock``) across the WHOLE
+# load→mutate→save sequence, so concurrent writers serialize instead of
+# clobbering each other's updates. load_state / save_state /
+# verdict_pending_patterns stay lock-free: they are reads, and save_state
+# is already atomic via ``os.replace`` so a concurrent reader never sees a
+# torn file.
 def mark_surfaced(pattern_id: str, cron_id: str, surfaced_turn: int = 0) -> None:
     """Record (or overwrite) a freshly-surfaced life-event hint.
 
@@ -120,16 +141,20 @@ def mark_surfaced(pattern_id: str, cron_id: str, surfaced_turn: int = 0) -> None
     (see module docstring). It is optional — defaulting to ``0`` — so
     existing callers and tests that don't thread a turn index keep working;
     a ``0`` simply means "always judge the next reply".
+
+    The load→mutate→save runs under an exclusive file lock so concurrent
+    writers on other surfaces cannot lose this update.
     """
-    state = load_state()
-    state[pattern_id] = {
-        "firing_ts": time.time(),
-        "cron_id": cron_id,
-        "surfaced": True,
-        "verdict_pending": True,
-        "surfaced_turn": int(surfaced_turn),
-    }
-    save_state(state)
+    with file_lock(_lock_path()):
+        state = load_state()
+        state[pattern_id] = {
+            "firing_ts": time.time(),
+            "cron_id": cron_id,
+            "surfaced": True,
+            "verdict_pending": True,
+            "surfaced_turn": int(surfaced_turn),
+        }
+        save_state(state)
 
 
 def clear(pattern_id: str) -> None:
@@ -137,11 +162,15 @@ def clear(pattern_id: str) -> None:
 
     Used when a verdict refutes the hint — the whole tooth is dropped.
     Contrast with :func:`clear_verdict_pending`, which keeps the entry.
+
+    The load→mutate→save runs under an exclusive file lock so concurrent
+    writers on other surfaces cannot lose this update.
     """
-    state = load_state()
-    if pattern_id in state:
-        del state[pattern_id]
-        save_state(state)
+    with file_lock(_lock_path()):
+        state = load_state()
+        if pattern_id in state:
+            del state[pattern_id]
+            save_state(state)
 
 
 def clear_verdict_pending(pattern_id: str) -> None:
@@ -151,13 +180,17 @@ def clear_verdict_pending(pattern_id: str) -> None:
     reply has been judged, so it is no longer verdict-pending, but the
     entry — and its ``cron_id`` — survive so the scheduled follow-up still
     fires. A missing pattern_id is a no-op (no raise).
+
+    The load→mutate→save runs under an exclusive file lock so concurrent
+    writers on other surfaces cannot lose this update.
     """
-    state = load_state()
-    entry = state.get(pattern_id)
-    if entry is None:
-        return
-    entry["verdict_pending"] = False
-    save_state(state)
+    with file_lock(_lock_path()):
+        state = load_state()
+        entry = state.get(pattern_id)
+        if entry is None:
+            return
+        entry["verdict_pending"] = False
+        save_state(state)
 
 
 def verdict_pending_patterns() -> list[str]:

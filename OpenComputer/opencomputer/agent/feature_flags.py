@@ -43,6 +43,11 @@ DEFAULT_DATA_RETENTION: dict[str, Any] = {
     "turn_outcomes_days": 90,
 }
 
+#: Life-event "teeth" feature flags (top-level ``life_events`` key).
+DEFAULT_LIFE_EVENTS: dict[str, Any] = {
+    "multi_surface_life_events": False,
+}
+
 
 class FeatureFlags:
     def __init__(self, path: Path) -> None:
@@ -79,6 +84,9 @@ class FeatureFlags:
                 if dotted_key.startswith("data_retention."):
                     leaf = parts[-1]
                     return DEFAULT_DATA_RETENTION.get(leaf, default)
+                if dotted_key.startswith("life_events."):
+                    leaf = parts[-1]
+                    return DEFAULT_LIFE_EVENTS.get(leaf, default)
                 return default
             node = node[p]
         return node

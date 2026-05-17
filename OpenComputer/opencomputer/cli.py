@@ -1808,26 +1808,13 @@ def _run_chat_session(
             exc_info=True,
         )
 
-    # life-event teeth (2026-05-16) — register the per-turn life-event hint
-    # provider so surfacing="hint" PatternFirings (job change, exam prep,
-    # burnout, travel) drain into a <life-event-hint> system-prompt block.
-    # Safe to register globally: collect() returns None when the registry
-    # has no pending firings (the normal case), so a registered-but-idle
-    # provider is inert. Idempotent — unregister first to dodge the
-    # "already registered" ValueError on session re-init.
-    try:
-        from opencomputer.awareness.life_events.injection import (
-            LifeEventInjectionProvider,
-        )
-
-        injection_engine.unregister("life_event_hint")
-        injection_engine.register(LifeEventInjectionProvider())
-    except Exception:  # noqa: BLE001 — never break loop boot
-        import logging as _log_mod
-        _log_mod.getLogger("opencomputer.cli").warning(
-            "life-event injection provider registration failed",
-            exc_info=True,
-        )
+    # life-event teeth — register the per-turn life-event hint provider for
+    # the CLI surface (always on; the helper handles idempotent
+    # (re)registration + fail-soft boot).
+    from opencomputer.awareness.life_events.injection import (
+        register_life_event_injection_provider,
+    )
+    register_life_event_injection_provider("cli")
 
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     loop._runtime = runtime
@@ -4104,6 +4091,14 @@ def wire(
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
+
+    # life-event teeth — register the per-turn life-event hint provider for
+    # the wire surface (idempotent + fail-soft).
+    from opencomputer.awareness.life_events.injection import (
+        register_life_event_injection_provider,
+    )
+    register_life_event_injection_provider("wire")
+
     # 2026-05-11 — bind ``loop`` (not the captured ``cfg``/``provider``
     # locals) so any mid-flight mutation to the wire server's loop
     # (e.g. a future wire-protocol /model handler) is honored by

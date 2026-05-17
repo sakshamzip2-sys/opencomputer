@@ -220,3 +220,73 @@ def test_schedule_followup_unknown_pattern_logs_warning_and_skips_cron(tmp_path,
         r.levelno >= logging.WARNING and "relationship_shift" in r.message
         for r in caplog.records
     ), "a WARNING mentioning the pattern_id must be emitted"
+
+
+# ---------------------------------------------------------------------------
+# schedule_followup — compensating remove_job on mark_surfaced failure
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_followup_mark_surfaced_failure_removes_cron_and_reraises(
+    tmp_path, monkeypatch, caplog
+):
+    """If mark_surfaced fails after create_job succeeds, schedule_followup must:
+    1. Call remove_job with the cron_id that was just created (compensation).
+    2. Re-raise the original mark_surfaced exception so the caller can log it.
+
+    This prevents the orphan-cron + duplicate-scheduling failure mode: without
+    compensation, the cron exists in cron.db but state has no cron_id, so the
+    next turn's dedup check passes and schedules a second cron.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    # create_job returns a fake job dict so cron_id is available.
+    monkeypatch.setattr(actions, "create_job", lambda **_: {"id": "cron-orphan-123"})
+
+    # mark_surfaced raises — simulating a state write failure.
+    remove_calls: list[str] = []
+    monkeypatch.setattr(actions, "remove_job", lambda job_id: remove_calls.append(job_id) or True)
+
+    # Patch state.mark_surfaced to raise.
+    def _exploding_mark_surfaced(pattern_id, cron_id, surfaced_turn=0):
+        raise RuntimeError("state write boom")
+
+    monkeypatch.setattr(state, "mark_surfaced", _exploding_mark_surfaced)
+
+    # Make load_state return {} so the dedup check passes (no existing cron_id).
+    monkeypatch.setattr(state, "load_state", lambda: {})
+
+    with caplog.at_level(logging.WARNING, logger="opencomputer.awareness.life_events.actions"):
+        import pytest
+        with pytest.raises(RuntimeError, match="state write boom"):
+            actions.schedule_followup(_firing("burnout"))
+
+    # The compensation path must have called remove_job with the created cron_id.
+    assert remove_calls == ["cron-orphan-123"], (
+        "remove_job must be called with the orphaned cron_id when mark_surfaced fails"
+    )
+
+    # A WARNING mentioning the orphan-removal must be logged.
+    assert any(
+        r.levelno >= logging.WARNING and "cron-orphan-123" in r.message
+        for r in caplog.records
+    ), "a WARNING mentioning the cron_id must be logged after orphan removal"
+
+
+def test_schedule_followup_success_does_not_call_remove_job(tmp_path, monkeypatch):
+    """On the success path, remove_job must NOT be called — only create_job and
+    mark_surfaced run. The cron stays alive for its one-shot check-in.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    monkeypatch.setattr(actions, "create_job", lambda **_: {"id": "cron-good-456"})
+
+    remove_calls: list[str] = []
+    monkeypatch.setattr(actions, "remove_job", lambda job_id: remove_calls.append(job_id) or True)
+
+    # Success path — no patching of mark_surfaced; real state write.
+    actions.schedule_followup(_firing("burnout"))
+
+    assert remove_calls == [], "remove_job must NOT be called on the success path"
+    # The cron_id is recorded in state.
+    assert state.load_state()["burnout"]["cron_id"] == "cron-good-456"
