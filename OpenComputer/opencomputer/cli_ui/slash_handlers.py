@@ -1647,7 +1647,9 @@ def _handle_undo(ctx: SlashContext, args: list[str]) -> SlashResult:
     Bridges to the agent ``UndoCommand`` via the ``on_undo`` callback,
     which the chat loop binds to a closure over the live SessionDB.
     """
-    ctx.console.print(ctx.on_undo())
+    # markup=False — the status text is plain (it can carry an exception
+    # message), so a stray ``[`` must not be parsed as Rich markup.
+    ctx.console.print(ctx.on_undo(), markup=False)
     return SlashResult(handled=True)
 
 
@@ -1760,19 +1762,30 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
 }
 
 
-def dispatch_slash(text: str, ctx: SlashContext) -> SlashResult:
+def dispatch_slash(
+    text: str,
+    ctx: SlashContext,
+    on_unknown: Callable[[str], SlashResult] | None = None,
+) -> SlashResult:
     """Dispatch a slash-command string to its handler.
 
     Returns ``SlashResult(handled=False)`` for non-slash text so the
-    caller can fall back to "treat as normal message". Unknown slash
-    commands are consumed (handled=True) with an error message — we
-    don't want them to leak to the LLM.
+    caller can fall back to "treat as normal message".
+
+    A slash command not in the cli_ui registry routes to ``on_unknown``
+    when one is supplied — the ``oc chat`` REPL wires this to the agent
+    slash registry so commands like ``/copy`` / ``/rollback`` work in
+    chat, not only on gateway/wire/ACP. With no ``on_unknown`` hook the
+    command is consumed (handled=True) with an error message — we don't
+    want a stray slash leaking to the LLM.
     """
     if not is_slash_command(text):
         return SlashResult(handled=False)
     name, args = _split_args(text)
     cmd: CommandDef | None = resolve_command(name)
     if cmd is None:
+        if on_unknown is not None:
+            return on_unknown(text)
         ctx.console.print(f"[red]unknown command:[/red] /{name}  (try /help)")
         return SlashResult(handled=True)
     handler = _HANDLERS[cmd.name]

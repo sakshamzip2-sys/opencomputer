@@ -3045,6 +3045,41 @@ def _run_chat_session(
                     res = fut.result(timeout=10.0)
                 return getattr(res, "output", "") or ""
 
+            def _dispatch_agent_fallthrough(text: str):
+                # `oc chat` dispatches only the cli_ui slash registry;
+                # route a slash it doesn't recognise to the agent
+                # SlashCommand registry (/copy, /rollback, /background,
+                # /agents, …) so every agent command is reachable in
+                # chat, not just on gateway/wire/ACP. Dispatched directly
+                # via the slash dispatcher — NOT run_conversation — so
+                # there is no persist / end-session side effect.
+                # ``session_id`` is nonlocal — read live.
+                from dataclasses import replace as _replace
+
+                from opencomputer.agent.slash_commands import (
+                    try_dispatch_agent_slash,
+                )
+                from opencomputer.cli_ui.slash import SlashResult
+
+                rt = _replace(
+                    runtime,
+                    custom={
+                        **runtime.custom,
+                        "session_id": session_id,
+                        "session_db": loop.db,
+                    },
+                )
+                res = try_dispatch_agent_slash(text, rt)
+                if res is None:
+                    parts = text.lstrip("/").split(maxsplit=1)
+                    name = parts[0] if parts else ""
+                    console.print(
+                        f"[red]unknown command:[/red] /{name}  (try /help)"
+                    )
+                elif res.output:
+                    console.print(res.output, markup=False)
+                return SlashResult(handled=True)
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -3087,7 +3122,9 @@ def _run_chat_session(
                     getattr(loop.config.model, "provider", "?") or "?",
                 ),
             )
-            result = dispatch_slash(user_input, slash_ctx)
+            result = dispatch_slash(
+                user_input, slash_ctx, on_unknown=_dispatch_agent_fallthrough
+            )
             if result.exit_loop:
                 if result.message:
                     console.print(f"[dim]{result.message}[/dim]")

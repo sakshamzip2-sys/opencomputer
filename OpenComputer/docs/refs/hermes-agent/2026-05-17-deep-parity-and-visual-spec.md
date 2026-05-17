@@ -68,12 +68,13 @@ first and concluded 27 commands were missing.
 `/reasoning` and `/sources` appear in *both* registries — the cli_ui
 handler bridges to the agent command via an `on_*_dispatch` callback.
 
-**Reachability nuance (genuine gap — see §4):** the `oc chat` REPL
-routes *every* `/`-prefixed input through the cli_ui registry. A command
-that lives only in `agent/slash_commands_impl/` (e.g. `/copy`,
-`/rollback`, `/background`, `/agents`) is **not reachable from
-`oc chat`** — only from gateway / wire / ACP. It is dispatched there,
-just not in the local chat REPL.
+**Reachability — closed 2026-05-17 (see §3).** The `oc chat` REPL
+historically dispatched *only* the cli_ui registry, so a command living
+only in `agent/slash_commands_impl/` (`/copy`, `/rollback`,
+`/background`, `/agents`, …) produced "unknown command" in chat. The
+REPL now routes a slash it doesn't recognise to the agent registry via
+`try_dispatch_agent_slash`, so every agent command is reachable from
+`oc chat` as well as gateway / wire / ACP.
 
 ---
 
@@ -84,23 +85,16 @@ just not in the local chat REPL.
 | `/paste` — attach a clipboard image | `cli_ui/slash.py`, `cli_ui/slash_handlers.py` | Wraps the existing cross-platform engine `cli_ui/clipboard.py` (`has_clipboard_image` / `save_clipboard_image`); queues the PNG via the `on_image_attach` callback `/image` already uses. cli_ui registry — needs `SlashContext`. |
 | `/undo` — remove the last user/assistant exchange | `agent/slash_commands_impl/undo_cmd.py` (new), `agent/slash_commands.py`, `cli_ui/slash.py`, `cli_ui/slash_handlers.py`, `cli.py` | Hermes-parity conversation-history op (distinct from `/rollback`, which restores filesystem checkpoints). `undo_last_exchange()` truncates the session at the last `role=="user"` message via `SessionDB.replace_session_messages`, removing the whole exchange (prompt + reply + tool messages) atomically. Reachable everywhere: agent `UndoCommand` for gateway/wire/ACP, plus a cli_ui bridge for `oc chat`. |
 | Banner honours the active skin | `cli_banner.py` | See §1, last row. |
+| Agent slash commands reachable from `oc chat` | `cli_ui/slash_handlers.py`, `agent/slash_commands.py`, `cli.py` | `dispatch_slash` gained an `on_unknown` hook; the REPL wires it to `try_dispatch_agent_slash`, which dispatches a slash absent from the cli_ui registry through the agent `SlashCommand` registry. `/copy`, `/rollback`, `/background`, `/agents` and ~35 other agent commands now work in `oc chat`, not only gateway/wire/ACP. Dispatched directly via the slash dispatcher — no persist / end-session side effect. |
 
-All three are TDD-covered: `tests/test_slash_paste.py`,
-`tests/test_slash_undo.py`, `tests/test_banner_skin.py`.
+All four are TDD-covered: `tests/test_slash_paste.py`,
+`tests/test_slash_undo.py`, `tests/test_banner_skin.py`,
+`tests/test_slash_agent_fallthrough.py`.
 
 ---
 
 ## 4. Genuine remaining gaps (honest, short)
 
-- **`oc chat` cannot reach agent-only slash commands.** `/copy`,
-  `/rollback`, `/background`, `/agents`, `/btw`, `/save`, `/branch`,
-  `/history` and other `agent/slash_commands_impl/` commands work on
-  gateway / wire / ACP but not in the local `oc chat` REPL, because the
-  REPL only dispatches the cli_ui registry. Closing this means either a
-  per-command cli_ui bridge (the `/reasoning` pattern, used by `/undo`
-  here) or a REPL fallthrough that hands unknown-to-cli_ui slashes to
-  the agent dispatch. The latter is the higher-leverage fix and is the
-  recommended next piece of work.
 - **Web dashboard polish.** OC's `opencomputer/dashboard/` is slimmer
   than Hermes's React app — no i18n, no theme system, no plugin-tabs.
   Genuine M-L effort; belongs in its own spec.
