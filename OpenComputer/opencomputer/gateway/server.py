@@ -720,11 +720,7 @@ class Gateway:
         plugin_registry.outgoing_queue = queue
         if plugin_registry.shared_api is not None:
             plugin_registry.shared_api._bind_outgoing_queue(queue)
-        self._drainer = OutgoingDrainer(
-            queue,
-            adapters_by_platform,
-            audit_db_path=_home() / "audit.db",
-        )
+        self._drainer = OutgoingDrainer(queue, adapters_by_platform)
         await self._drainer.expire_stale_on_boot()
         self._drainer_task = asyncio.create_task(
             self._drainer.run_forever(),

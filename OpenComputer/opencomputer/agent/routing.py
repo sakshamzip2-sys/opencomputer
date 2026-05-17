@@ -227,6 +227,12 @@ class ResolvedTemplate:
     """M10.3 hook — non-empty means the gateway should rebind to this
     profile for the message. Today's caller (M10.2) ignores this and
     routes against the active profile only; M10.3 will consume it."""
+    merge_with_builder: bool = False
+    """M3 gateway-vs-CLI parity — when ``True`` the dispatcher passes
+    ``system_prompt_merge=True`` to ``run_conversation`` so the template
+    prompt is appended after the PromptBuilder output (skills / memory /
+    SOUL preserved) instead of replacing it. Carries the matched
+    :class:`RoutingRule.merge_with_builder` flag."""
 
 
 def resolve_template_for_event(
@@ -272,4 +278,7 @@ def resolve_template_for_event(
         template_name=outcome.agent,
         system_prompt=system_prompt,
         profile_rebind=outcome.profile,
+        merge_with_builder=(
+            outcome.rule.merge_with_builder if outcome.rule is not None else False
+        ),
     )

@@ -136,6 +136,53 @@ async def test_telemetry_flushes_on_the_error_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_compaction_mechanism_uses_db_delta_not_shared_runtime(
+    tmp_path: Path,
+) -> None:
+    """#10 fires iff sessions.compactions_count rose during the turn.
+
+    Regression for the M1 bug: _build_channel_runtime returns the shared
+    DEFAULT_RUNTIME_CONTEXT, so probing runtime.custom over-reported.
+    Turn 1 bumps the counter (fires); turn 2 does not (must NOT fire,
+    even though the shared runtime may still carry stale state).
+    """
+    loop = _fake_loop(tmp_path)
+    router = AgentRouter(
+        loop_factory=lambda pid, home: loop,
+        profile_home_resolver=lambda pid: tmp_path / pid,
+    )
+    dispatch = Dispatch(router=router)
+
+    bump = {"do": True}
+
+    async def fake_run(user_message: str, session_id: str, **kw):
+        # Real run_conversation creates the session row; the fake must
+        # too, so increment_compaction_count has a row to bump.
+        loop.db.ensure_session(session_id, platform="telegram")
+        if bump["do"]:
+            loop.db.increment_compaction_count(session_id)
+        result = MagicMock()
+        result.final_message = MagicMock(content="ok")
+        result.input_tokens = 0
+        return result
+
+    loop.run_conversation = fake_run
+
+    # Turn 1 — compaction happens.
+    await dispatch.handle_message(_event())
+    # Turn 2 — no compaction.
+    bump["do"] = False
+    await dispatch.handle_message(_event())
+
+    rows = query_parity_log(tmp_path / "audit.db")
+    comp = sorted(
+        (r for r in rows if r["mechanism_id"] == "compaction_long_session"),
+        key=lambda r: r["turn_id"],
+    )
+    assert [r["fired"] for r in comp] == [True, False]
+
+
+@pytest.mark.asyncio
 async def test_prompt_override_fires_with_routing(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -262,66 +262,6 @@ def record_parity_observations(
         return 0
 
 
-#: Sentinel ``turn_id`` for telemetry NOT scoped to a dispatch turn —
-#: e.g. an outgoing-drainer notification truncation. A real dispatch
-#: turn always has ``turn_id >= 1`` (1-indexed by ``_compute_turn_index``).
-NON_TURN_ID: int = 0
-
-
-def record_truncation_event(
-    audit_db_path: Path | str,
-    *,
-    session_id: str,
-    platform: str,
-    body_len: int,
-    cap: int,
-) -> int:
-    """Append a single ``reply_truncation`` row for the drainer path.
-
-    The outgoing drainer truncates notification bodies that exceed an
-    adapter's ``max_message_length``. Those sends are not dispatch turns
-    (no ``turn_id``), so this writes ONE row with :data:`NON_TURN_ID`
-    rather than the full ten-mechanism turn record. Best-effort — a
-    SQLite failure is logged at WARNING and swallowed; returns rows
-    written (1 on success, 0 on failure).
-    """
-    try:
-        from opencomputer.agent.state import apply_migrations
-
-        conn = sqlite3.connect(audit_db_path)
-        try:
-            apply_migrations(conn)
-            conn.execute(
-                "INSERT INTO gateway_parity_log "
-                "(ts, session_id, turn_id, platform, mechanism_id, fired, detail) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    time.time(),
-                    session_id or "",
-                    NON_TURN_ID,
-                    platform or "unknown",
-                    "reply_truncation",
-                    1,
-                    json.dumps(
-                        {"body_len": int(body_len), "cap": int(cap), "via": "drainer"},
-                        separators=(",", ":"),
-                    ),
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        return 1
-    except (sqlite3.Error, OSError):
-        logger.warning(
-            "gateway parity telemetry: failed to record drainer truncation "
-            "to audit.db at %s (the message was still sent)",
-            audit_db_path,
-            exc_info=True,
-        )
-        return 0
-
-
 # ── Readers ───────────────────────────────────────────────────────────
 
 
@@ -446,12 +386,10 @@ def rollup_parity_log(
 __all__ = [
     "MECHANISMS",
     "MECHANISM_IDS",
-    "NON_TURN_ID",
     "Mechanism",
     "ParityProbe",
     "mechanism_label",
     "query_parity_log",
     "record_parity_observations",
-    "record_truncation_event",
     "rollup_parity_log",
 ]

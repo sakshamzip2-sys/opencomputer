@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from .outgoing_queue import OutgoingQueue
@@ -54,16 +53,10 @@ class OutgoingDrainer:
         adapters_by_platform: Mapping[str, Any],
         *,
         poll_interval_seconds: float = 1.0,
-        audit_db_path: Path | None = None,
     ) -> None:
         self.queue = queue
         self.adapters = adapters_by_platform
         self.poll_interval = poll_interval_seconds
-        # M1 gateway-parity telemetry. When wired, a notification whose
-        # body exceeds the adapter cap records a ``reply_truncation``
-        # row (mechanism #3). Optional — legacy callers / tests that
-        # omit it simply skip the telemetry write.
-        self.audit_db_path = audit_db_path
         self._stop = asyncio.Event()
         # Exponential backoff state — protects errors.log from being filled
         # with 100k+ identical tracebacks when the drain pass fails on every
@@ -139,38 +132,8 @@ class OutgoingDrainer:
                     msg.id, f"no live adapter for platform {msg.platform!r}",
                 )
                 continue
-            # Wave 6.E.6 — Hermes parity. Long notification bodies
-            # (kanban completion summaries, build-log dumps) get
-            # platform-truncated so they don't exceed Telegram /
-            # Discord / Matrix message-length caps. The truncate_smart
-            # helper preserves markdown code-fence boundaries.
             body = msg.body
             cap = getattr(adapter, "max_message_length", 0)
-            if cap and len(body) > cap:
-                from opencomputer.gateway._truncate import truncate_smart
-                _orig_len = len(body)
-                body = truncate_smart(body, max_len=cap)
-                # M1 parity telemetry — mechanism #3 (reply_truncation)
-                # on the notification path. Best-effort; never wedges
-                # the send.
-                if self.audit_db_path is not None:
-                    try:
-                        from opencomputer.gateway.parity_probe import (
-                            record_truncation_event,
-                        )
-
-                        record_truncation_event(
-                            self.audit_db_path,
-                            session_id=getattr(msg, "session_id", "") or "",
-                            platform=msg.platform,
-                            body_len=_orig_len,
-                            cap=cap,
-                        )
-                    except Exception as _te:  # noqa: BLE001 — telemetry never wedges send
-                        logger.debug(
-                            "parity truncation telemetry failed, ignoring: %r",
-                            _te,
-                        )
             # Phase 3 (2026-05-06) — MESSAGE_SENDING fire-and-forget hook.
             # Plugins observe outgoing traffic; "skip" decision drops without
             # sending; "rewrite" replaces the body via modified_message.
@@ -206,21 +169,41 @@ class OutgoingDrainer:
                     "MESSAGE_SENDING hook raised, ignoring: %r", _e
                 )
 
-            try:
-                result = await adapter.send(msg.chat_id, body)
-            except Exception as e:  # noqa: BLE001 — capture for the user
-                logger.warning(
-                    "outgoing drainer: send failed for %s — %s", msg.id, e,
-                )
-                self.queue.mark_failed(msg.id, f"{type(e).__name__}: {e}")
-                continue
+            # M3 #3 fix — chunk-and-send instead of truncate. A body
+            # over the adapter's cap (kanban summaries, build-log dumps)
+            # used to be cut by ``truncate_smart`` + ``…[truncated]``,
+            # silently dropping content. Now it is split into ordered
+            # ``(i/N)``-marked messages so nothing is lost. Chunks for
+            # one queue row send sequentially → per-chat order preserved.
+            if cap and len(body) > cap:
+                from opencomputer.gateway.reply_chunker import chunk_text
 
-            success = getattr(result, "success", True)
-            if success:
+                parts = chunk_text(body, cap=cap)
+            else:
+                parts = [body]
+
+            send_failed: str | None = None
+            for part in parts:
+                try:
+                    result = await adapter.send(msg.chat_id, part)
+                except Exception as e:  # noqa: BLE001 — capture for the user
+                    logger.warning(
+                        "outgoing drainer: send failed for %s — %s", msg.id, e,
+                    )
+                    send_failed = f"{type(e).__name__}: {e}"
+                    break
+                if not getattr(result, "success", True):
+                    send_failed = (
+                        getattr(result, "error", None)
+                        or "adapter returned success=False"
+                    )
+                    break
+
+            if send_failed is None:
                 self.queue.mark_sent(msg.id)
             else:
-                err = getattr(result, "error", None) or "adapter returned success=False"
-                self.queue.mark_failed(msg.id, str(err))
+                self.queue.mark_failed(msg.id, str(send_failed))
+                continue
 
             # Phase 3 — MESSAGE_SENT fire-and-forget hook (post-send observability).
             try:

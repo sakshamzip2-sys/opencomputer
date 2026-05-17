@@ -1568,11 +1568,19 @@ class RoutingRule:
 
     ``profile`` is optional cross-profile re-bind (M10.3 — not used by
     M10.1's schema layer; recorded so the rule round-trips through YAML).
+
+    ``merge_with_builder`` (M3 gateway-vs-CLI parity, 2026-05-17): when
+    ``true``, the matched template's system prompt is *appended to* the
+    normal PromptBuilder output (skills / memory / SOUL stay injected)
+    rather than *replacing* it. Default ``false`` preserves the
+    historical replace-everything behaviour, so existing routing rules
+    are unaffected.
     """
 
     match: RoutingMatch = field(default_factory=RoutingMatch)
     agent: str = ""
     profile: str = ""
+    merge_with_builder: bool = False
 
     def __post_init__(self) -> None:
         if not self.agent:

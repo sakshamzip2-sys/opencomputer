@@ -1621,6 +1621,7 @@ class AgentLoop:
         thinking_callback=None,
         tool_callback=None,
         system_prompt_override: str | None = None,
+        system_prompt_merge: bool = False,
         initial_messages: list[Message] | None = None,
         images: list[str] | None = None,
         retry_callback=None,
@@ -1644,6 +1645,16 @@ class AgentLoop:
             named-template path; ``system_override`` remains for direct
             callers that want a raw swap. When both are set,
             ``system_prompt_override`` wins (it's the III.5 semantic).
+        system_prompt_merge:
+            M3 #1 fix — gateway-vs-CLI parity. When ``True``, the
+            ``system_prompt_override`` is *appended to* the normal
+            PromptBuilder output rather than *replacing* it: skills /
+            declarative memory / USER.md / SOUL.md stay injected and the
+            routing template's prompt is added as trailing channel-
+            specific guidance. Default ``False`` preserves the historical
+            replace-everything behaviour. Ignored when
+            ``system_prompt_override`` is ``None`` or when only
+            ``system_override`` is set.
         initial_messages:
             Round 2B P-9 — pre-seed a fresh session's history with these
             messages BEFORE ``user_message`` is appended. Only honoured
@@ -2081,7 +2092,16 @@ class AgentLoop:
         # prompts are treated as rendered-Jinja strings: declarative /
         # skills / memory / SOUL injection OFF — the body is assumed
         # intentional.
-        if system_prompt_override is not None:
+        #
+        # M3 #1 fix: when ``system_prompt_merge`` is set, the override
+        # does NOT replace the builder — the builder path runs (skills /
+        # memory / SOUL injected) and the override is appended afterwards
+        # (see the merge block below). So an override+merge turn falls
+        # through to the ``else`` builder branch here.
+        _override_replaces = (
+            system_prompt_override is not None and not system_prompt_merge
+        )
+        if _override_replaces:
             base_system = system_prompt_override
         elif system_override is not None:
             base_system = system_override
@@ -2303,6 +2323,22 @@ class AgentLoop:
                 # Cache hit — mark this session as most-recently-used
                 self._prompt_snapshots.move_to_end(sid)
             base_system = snapshot
+
+        # M3 #1 fix (gateway-vs-CLI parity) — a routing template that
+        # asked to MERGE rather than replace: the builder path above
+        # already ran (skills / declarative memory / USER.md / SOUL.md
+        # injected), so now append the template's prompt as trailing
+        # channel-specific guidance. Deterministic (the override is
+        # constant for a given chat), so it stays inside the cacheable
+        # ``base_system`` prefix and turn-2+ prefix caching still holds.
+        if system_prompt_override is not None and system_prompt_merge:
+            _merge_body = system_prompt_override.strip()
+            if _merge_body:
+                base_system = (
+                    f"{base_system}\n\n{_merge_body}"
+                    if base_system
+                    else _merge_body
+                )
 
         # Compute the 1-indexed turn number for this session. IV.2: providers
         # use this to throttle heavy content (plan/review reminders flip from
@@ -3514,6 +3550,7 @@ class AgentLoop:
                             thinking_callback=thinking_callback,
                             tool_callback=tool_callback,
                             system_prompt_override=system_prompt_override,
+                            system_prompt_merge=system_prompt_merge,
                             retry_callback=retry_callback,
                         )
                     self.db.end_session(sid)

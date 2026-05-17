@@ -908,6 +908,7 @@ def _parse_routing_block(block: Any) -> Any:  # RoutingConfig | None at runtime
                 match=match_obj,
                 agent=agent,
                 profile=str(raw_rule.get("profile", "")),
+                merge_with_builder=bool(raw_rule.get("merge_with_builder", False)),
             )
         except ValueError as e:
             _log.warning("routing.rules: invalid rule %r: %s", raw_rule, e)
@@ -1135,6 +1136,8 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
                     rule_out["match"] = match_dict
                 if r.profile:
                     rule_out["profile"] = r.profile
+                if r.merge_with_builder:
+                    rule_out["merge_with_builder"] = True
                 rules_out.append(rule_out)
             routing_dict["rules"] = rules_out
         if routing.default != type(routing.default)():

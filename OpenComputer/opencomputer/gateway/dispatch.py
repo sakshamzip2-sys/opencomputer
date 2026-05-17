@@ -75,6 +75,27 @@ def _compute_turn_index(db, session_id: str) -> int:
     return int(row[0])
 
 
+def _read_compactions_count(db, session_id: str) -> int:
+    """Return ``sessions.compactions_count`` for ``session_id`` (0 on miss).
+
+    Used by parity mechanism #10 (``compaction_long_session``) — the
+    dispatcher snapshots this before/after ``run_conversation`` and a
+    rise means CompactionEngine ran this turn. Best-effort: any failure
+    (missing row, no DB, SQL error) yields 0 so a delta of 0 reads as
+    "no compaction" rather than wedging telemetry.
+    """
+    try:
+        row = db.get_session(session_id)
+    except Exception:  # noqa: BLE001 — telemetry read must never raise
+        return 0
+    if not row:
+        return 0
+    try:
+        return int(row.get("compactions_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _build_end_of_turn_signals(
     db,
     *,
@@ -1404,6 +1425,7 @@ class Dispatch:
                 # routing rule must NEVER break message dispatch.
                 routing_system_override: str | None = None
                 routing_template_name: str | None = None
+                routing_system_merge: bool = False
                 try:
                     cfg_obj = getattr(loop, "config", None)
                     routing_cfg = getattr(cfg_obj, "routing", None)
@@ -1420,11 +1442,13 @@ class Dispatch:
                         if resolved is not None:
                             routing_system_override = resolved.system_prompt
                             routing_template_name = resolved.template_name
+                            routing_system_merge = resolved.merge_with_builder
                             logger.info(
-                                "M10.2 routing: %s:%s → agent=%r",
+                                "M10.2 routing: %s:%s → agent=%r (merge=%s)",
                                 event.platform.value if event.platform else "?",
                                 event.chat_id,
                                 resolved.template_name,
+                                resolved.merge_with_builder,
                             )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
@@ -1481,6 +1505,17 @@ class Dispatch:
                             "parity probe observe (routing) failed", exc_info=True
                         )
 
+                # M1/M3 #10 fix — snapshot the session's compaction
+                # count BEFORE the turn. Mechanism #10 must be decided
+                # by a before/after delta on the durable
+                # ``sessions.compactions_count`` column, NOT by probing
+                # ``runtime.custom`` — ``_build_channel_runtime`` returns
+                # the module-shared ``DEFAULT_RUNTIME_CONTEXT`` when
+                # there is no channel_id, so a ``session_compactions``
+                # key written by one turn's ``_record_compaction`` leaks
+                # into every later turn's runtime and would over-report.
+                _pre_compactions = _read_compactions_count(loop.db, session_id)
+
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
@@ -1490,6 +1525,7 @@ class Dispatch:
                                 images=images,
                                 runtime=runtime,
                                 system_prompt_override=routing_system_override,
+                                system_prompt_merge=routing_system_merge,
                             )
                     else:
                         result = await loop.run_conversation(
@@ -1498,6 +1534,7 @@ class Dispatch:
                             images=images,
                             runtime=runtime,
                             system_prompt_override=routing_system_override,
+                            system_prompt_merge=routing_system_merge,
                         )
                 # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:end +
                 # session:end. Hermes spec: session:end fires per
@@ -1647,12 +1684,9 @@ class Dispatch:
                     logger.debug("runtime_footer render failed: %s", _fe)
                 # M1 parity telemetry — last two mechanisms, decided
                 # from the finished turn. #3 (reply_truncation): the
-                # reply will be cut iff it exceeds the adapter's
-                # message-length cap (the outgoing drainer / platform
-                # enforces this). #10 (compaction_long_session):
-                # ``loop._record_compaction`` mirrors a fresh
-                # ``session_compactions`` key onto this turn's runtime
-                # only when CompactionEngine actually ran this turn.
+                # reply exceeds the adapter's message-length cap.
+                # #10 (compaction_long_session): the session's durable
+                # compaction count rose during this turn.
                 if _parity_probe is not None:
                     try:
                         _cap = getattr(adapter, "max_message_length", 0) or 0
@@ -1665,16 +1699,16 @@ class Dispatch:
                             if _truncated
                             else {},
                         )
-                        _compacted = "session_compactions" in (
-                            getattr(runtime, "custom", {}) or {}
+                        _post_compactions = _read_compactions_count(
+                            loop.db, session_id
                         )
+                        _compacted = _post_compactions > _pre_compactions
                         _parity_probe.observe(
                             "compaction_long_session",
                             _compacted,
                             {
-                                "count": (runtime.custom or {}).get(
-                                    "session_compactions"
-                                )
+                                "compactions_before": _pre_compactions,
+                                "compactions_after": _post_compactions,
                             }
                             if _compacted
                             else {},

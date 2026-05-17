@@ -521,7 +521,6 @@ def cmd_diagnose(
     import time as _t
 
     from opencomputer.gateway.parity_probe import (
-        NON_TURN_ID,
         mechanism_label,
         query_parity_log,
         rollup_parity_log,
@@ -610,9 +609,7 @@ def cmd_diagnose(
     table.add_column("Mechanisms fired")
     for t in ordered:
         when = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(t["ts"]))
-        turn_label = (
-            "[dim]drainer[/dim]" if t["turn_id"] == NON_TURN_ID else str(t["turn_id"])
-        )
+        turn_label = str(t["turn_id"])
         if t["fired"]:
             fired = ", ".join(mechanism_label(m) for m in t["fired"])
         else:
