@@ -51,3 +51,22 @@ def decode_stream(data: Any) -> str:
     if isinstance(data, bytes | bytearray):
         return data.decode("utf-8", errors="replace")
     return str(data)
+
+
+def coerce_exit_code(value: Any) -> int:
+    """Best-effort coerce a backend's exit code to ``int``.
+
+    Cloud SDKs return an ``int``; this guards a defensive ``None`` (a
+    partial response, or a process that set no exit code) by mapping it
+    to ``-1`` — matching the host-process strategies' shape for an
+    unknown code. A non-numeric value also maps to ``-1`` rather than
+    raising. Shared by the e2b / daytona / modal cloud strategies.
+    """
+    if isinstance(value, int):
+        return value
+    if value is None:
+        return -1
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return -1

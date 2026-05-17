@@ -81,13 +81,37 @@ logger = logging.getLogger(__name__)
 #: operators edit the persisted ``rates`` value rather than this constant.
 DEFAULT_E2B_RATE_USD_PER_SECOND: float = 0.000028 + 0.0000045
 
-#: Seed per-backend rate table. Only the cloud ``e2b`` backend has a
-#: non-zero rate; ``docker`` / ``linux_bwrap`` / ``macos_sandbox_exec`` /
-#: ``ssh`` / ``none`` run on hardware the operator already owns and are
-#: free — they are intentionally absent so :meth:`SandboxCostGuard.rate_for`
-#: returns ``0.0`` for them.
+#: Daytona's per-second rate for a 2-vCPU + 1 GiB sandbox. Public pricing
+#: at https://www.daytona.io/pricing (2026): ``$0.0504 / vCPU-hour`` +
+#: ``$0.0162 / GiB-hour`` — same per-vCPU rate as E2B. Per-second:
+#: ``2 vCPU * (0.0504 / 3600) + 1 GiB * (0.0162 / 3600) ≈ $0.0000325/s``.
+#: Conservative seed default; operators tune the persisted ``rates`` value
+#: as Daytona adjusts pricing (the cost guard is operator-owned).
+DEFAULT_DAYTONA_RATE_USD_PER_SECOND: float = (
+    2 * (0.0504 / 3600) + (0.0162 / 3600)
+)
+
+#: Modal's per-second rate for a 2-vCPU + 1 GiB sandbox. Public pricing
+#: at https://modal.com/pricing (2026): ``$0.01667 / vCPU-hour`` +
+#: ``$0.00833 / GiB-hour`` — meaningfully cheaper per-vCPU than E2B /
+#: Daytona. Per-second: ``2 vCPU * (0.01667 / 3600) + 1 GiB * (0.00833 /
+#: 3600) ≈ $0.0000116/s``. Conservative seed default; operators tune the
+#: persisted ``rates`` value as Modal adjusts pricing.
+DEFAULT_MODAL_RATE_USD_PER_SECOND: float = (
+    2 * (0.01667 / 3600) + (0.00833 / 3600)
+)
+
+#: Seed per-backend rate table. The cloud backends (``e2b`` / ``daytona``
+#: / ``modal``) have non-zero rates; ``docker`` / ``linux_bwrap`` /
+#: ``macos_sandbox_exec`` / ``ssh`` / ``none`` run on hardware the
+#: operator already owns and are free — intentionally absent so
+#: :meth:`SandboxCostGuard.rate_for` returns ``0.0`` for them. F16 (M2
+#: audit): a paid backend with no entry silently bypasses the session
+#: cap, so every paid backend MUST be listed here.
 DEFAULT_BACKEND_RATES_USD_PER_SECOND: dict[str, float] = {
     "e2b": DEFAULT_E2B_RATE_USD_PER_SECOND,
+    "daytona": DEFAULT_DAYTONA_RATE_USD_PER_SECOND,
+    "modal": DEFAULT_MODAL_RATE_USD_PER_SECOND,
 }
 
 #: Default per-session sandbox spend ceiling, in USD. The parity plan
@@ -468,7 +492,9 @@ def _normalise_backend(backend: str) -> str:
 
 __all__ = [
     "DEFAULT_BACKEND_RATES_USD_PER_SECOND",
+    "DEFAULT_DAYTONA_RATE_USD_PER_SECOND",
     "DEFAULT_E2B_RATE_USD_PER_SECOND",
+    "DEFAULT_MODAL_RATE_USD_PER_SECOND",
     "DEFAULT_SESSION_CAP_USD",
     "SandboxBudgetDecision",
     "SandboxCostGuard",

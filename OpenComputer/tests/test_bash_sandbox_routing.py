@@ -298,8 +298,9 @@ async def test_unreachable_backend_local_fallback_runs_on_host(
 ) -> None:
     """``sandbox.fallback=local`` → an unreachable backend falls to the host.
 
-    The command runs on the host and a WARNING is logged — the
-    downgrade is never silent.
+    The command runs on the host, a WARNING is logged, AND the lost
+    containment is surfaced on the result itself — the downgrade is never
+    silent at any layer.
     """
     monkeypatch.setattr(
         BashTool,
@@ -317,13 +318,18 @@ async def test_unreachable_backend_local_fallback_runs_on_host(
 
     # The command actually ran on the host — its stdout is present.
     assert not result.is_error
-    assert result.content == (
+    assert "ran-on-host" in result.content
+    # The lost containment is SURFACED on the result, not just logged —
+    # the resolver contract is "never silently downgrade".
+    assert "without containment" in result.content
+    # ...and the host framing is preserved below the banner prefix.
+    assert result.content.endswith(
         "$ echo ran-on-host\n"
         "exit=0\n"
         "--- stdout ---\n"
         "ran-on-host\n"
     )
-    # The host downgrade was logged loudly.
+    # The host downgrade was logged loudly too.
     assert any(
         "running the command on the HOST" in r.message for r in caplog.records
     )

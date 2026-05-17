@@ -25,6 +25,15 @@ Strategies
   sandbox. Requires the optional ``e2b`` extra + an ``E2B_API_KEY``.
   Always networked — cannot enforce ``network_allowed=False`` (it warns
   and proceeds). Milestone 2.
+* :class:`DaytonaSandboxStrategy` — runs argv inside an ephemeral
+  Daytona cloud sandbox. Requires the optional ``daytona`` extra + a
+  ``DAYTONA_API_KEY``. Wraps commands with ``2>&1`` to preserve stderr
+  (the SDK's ``ExecuteResponse.result`` captures stdout only). Milestone 2.1.
+* :class:`ModalSandboxStrategy` — runs argv inside an ephemeral Modal
+  cloud sandbox. Requires the optional ``modal`` extra + Modal
+  credentials (``MODAL_TOKEN_ID`` env or ``~/.modal.toml``). argv is
+  passed positionally (Modal's ``create`` takes ``*args``); stdout and
+  stderr captured separately. Milestone 2.5.
 * :class:`NoneSandboxStrategy` — no containment. For trusted internal
   callers and tests. Logs a WARNING on every invocation.
 
@@ -46,19 +55,23 @@ containment is intentionally disabled (tests, CI, single-tenant servers).
 from __future__ import annotations
 
 from opencomputer.sandbox.auto import auto_strategy
+from opencomputer.sandbox.daytona import DaytonaSandboxStrategy
 from opencomputer.sandbox.docker import DockerStrategy
 from opencomputer.sandbox.e2b import E2BSandboxStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
+from opencomputer.sandbox.modal import ModalSandboxStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
 from opencomputer.sandbox.runner import run_sandboxed
 from opencomputer.sandbox.ssh import SSHSandboxStrategy
 
 __all__ = [
+    "DaytonaSandboxStrategy",
     "DockerStrategy",
     "E2BSandboxStrategy",
     "LinuxBwrapStrategy",
     "MacOSSandboxExecStrategy",
+    "ModalSandboxStrategy",
     "NoneSandboxStrategy",
     "SSHSandboxStrategy",
     "auto_strategy",

@@ -531,8 +531,12 @@ DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
 #: II.2 — Tool names that MUST NEVER run in parallel, regardless of their
 #: per-tool ``parallel_safe`` flag. These are tools whose side-effects can
 #: race even when two invocations look independent: arbitrary shell
-#: commands (``Bash``), user-facing prompts (``AskUserQuestion``), plan-mode
-#: state transitions (``ExitPlanMode``), and mutable-state TODO writes.
+#: commands (``Bash``); arbitrary Python execution whose plain mode routes
+#: through a per-call sandbox backend published on the shared
+#: ``runtime.custom`` (``PythonExec`` — concurrent dispatch would clobber
+#: that per-call backend key); user-facing prompts (``AskUserQuestion``);
+#: plan-mode state transitions (``ExitPlanMode``); and mutable-state TODO
+#: writes.
 #:
 #: This is the first of two layers stacked on top of the existing
 #: ``parallel_safe`` flag. The flag is a hint from the plugin author; this
@@ -543,6 +547,7 @@ DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
 #: ``sources/hermes-agent/run_agent.py`` line 217.
 HARDCODED_NEVER_PARALLEL: frozenset[str] = frozenset({
     "Bash",
+    "PythonExec",
     "AskUserQuestion",
     "ExitPlanMode",
     "TodoWrite",
@@ -3720,6 +3725,15 @@ class AgentLoop:
                 except Exception:
                     pass  # bash tool may not be registered in some contexts
 
+                # M5 (sandbox-provider-breadth): PythonExec's plain mode
+                # routes through the same resolved backend — give it the
+                # live runtime too, the same propagation pattern as BashTool.
+                try:
+                    from opencomputer.tools.python_exec import PythonExec
+                    PythonExec.set_runtime(self._runtime)
+                except Exception:
+                    pass  # python_exec tool may not be registered
+
                 # v1.1 plan-2 M5.2 (2026-05-09): snapshot the message
                 # history BEFORE dispatching this tool block so a later
                 # `oc session rewind --mode conv_only` can restore state
@@ -5773,6 +5787,13 @@ class AgentLoop:
     #: resolver chose.
     _SANDBOX_STRATEGY_KEY = "sandbox_backend_strategy"
 
+    #: M3 (T3.3) — ``runtime.custom`` key carrying the pooled-container
+    #: key for a reuse-scoped call (session / agent / shared scope). The
+    #: Bash tool reads it into ``SandboxConfig.container_key`` so the
+    #: Docker strategy reuses one container across same-scope calls.
+    #: Absent for tool / none scope (transient container per call).
+    _SANDBOX_CONTAINER_KEY = "sandbox_container_key"
+
     def _resolve_sandbox_backend(self, call: ToolCall) -> str | None:
         """M2 (T2.6) — resolve the sandbox backend for one tool call.
 
@@ -5804,21 +5825,29 @@ class AgentLoop:
         tool = registry.get(call.name)
         if tool is None:
             return None
-        from opencomputer.sandbox.policy import SandboxScopeContext
+        from opencomputer.sandbox.policy import (
+            SandboxScopeContext,
+            pool_key_for,
+        )
         from opencomputer.sandbox.resolver import resolve_backend
         from plugin_sdk.sandbox import SandboxUnavailable
 
+        # Build the scope context BEFORE the try — the dict reads + the
+        # frozen-dataclass constructor cannot raise, and ``ctx`` is read
+        # again after the try/except (the pool-key publish below), so it
+        # must be unconditionally bound.
+        session_id = ""
+        agent_id = None
+        runtime = self._runtime
+        if runtime is not None and runtime.custom:
+            session_id = str(runtime.custom.get("session_id") or "")
+            agent_id = runtime.custom.get("agent_id")
+        ctx = SandboxScopeContext(
+            session_id=session_id or None,
+            agent_id=str(agent_id) if agent_id else None,
+        )
+
         try:
-            session_id = ""
-            agent_id = None
-            runtime = self._runtime
-            if runtime is not None and runtime.custom:
-                session_id = str(runtime.custom.get("session_id") or "")
-                agent_id = runtime.custom.get("agent_id")
-            ctx = SandboxScopeContext(
-                session_id=session_id or None,
-                agent_id=str(agent_id) if agent_id else None,
-            )
             backend = resolve_backend(tool, self.config, ctx)
         except SandboxUnavailable:
             # A ``required`` tool whose backend can't be resolved under
@@ -5841,10 +5870,21 @@ class AgentLoop:
             # call's backend can't leak into an un-sandboxed tool.
             runtime.custom.pop(self._SANDBOX_BACKEND_KEY, None)
             runtime.custom.pop(self._SANDBOX_STRATEGY_KEY, None)
+            runtime.custom.pop(self._SANDBOX_CONTAINER_KEY, None)
             return None
         name = getattr(backend, "name", None)
         runtime.custom[self._SANDBOX_BACKEND_KEY] = name
         runtime.custom[self._SANDBOX_STRATEGY_KEY] = backend
+        # M3 (T3.3): publish the pooled-container key for a reuse-scoped
+        # call. ``pool_key_for`` returns None for tool / none scope (and
+        # for session / agent scope with the keying id absent) — the
+        # Docker strategy then keeps its transient per-call container.
+        policy = getattr(self.config, "sandbox", None)
+        pool_key = pool_key_for(policy, ctx) if policy is not None else None
+        if pool_key:
+            runtime.custom[self._SANDBOX_CONTAINER_KEY] = pool_key
+        else:
+            runtime.custom.pop(self._SANDBOX_CONTAINER_KEY, None)
         return name
 
     async def _dispatch_tool_calls(

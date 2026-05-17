@@ -43,6 +43,13 @@ Why a thin wrapper, not a fork:
   cheap.
 * The PythonExec tool stays for users who want PTC's read-only safety
   posture; ExecuteCode opts in to writes + Bash explicitly.
+
+Sandbox routing: ExecuteCode is **NOT** routed through a sandbox
+backend. Like ``PythonExec(mode="ptc")`` it is PTC-based — the
+subprocess calls back into the host tool registry over a UDS socket,
+which is incompatible with running inside a remote (or genuinely
+isolated) sandbox. Sandbox routing applies only to ``PythonExec``'s
+plain mode (M5, sandbox-provider-breadth).
 """
 
 from __future__ import annotations

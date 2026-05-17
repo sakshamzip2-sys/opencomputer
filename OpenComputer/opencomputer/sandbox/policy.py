@@ -287,3 +287,32 @@ def scope_key(policy: SandboxPolicy, ctx: SandboxScopeContext | None = None) -> 
         return uuid.uuid4().hex[:12]
     digest = hashlib.sha256(ident.encode("utf-8")).hexdigest()[:12]
     return f"{prefix}-{digest}"
+
+
+def pool_key_for(
+    policy: SandboxPolicy, ctx: SandboxScopeContext | None = None
+) -> str | None:
+    """Stable container-reuse key for ``policy`` / ``ctx`` — or ``None``
+    when the call is not poolable.
+
+    Unlike :func:`scope_key`, this NEVER returns a per-call uuid: a
+    ``None`` result means "use a transient container, do not pool". A
+    call is poolable iff its scope is ``shared``, or ``session`` /
+    ``agent`` AND the keying id (``session_id`` / ``agent_id``) is
+    present. ``none`` / ``tool`` scope — and ``session`` / ``agent``
+    scope with the id absent — are NOT poolable: pooling on a per-call
+    key would create a fresh, never-reused container on every call.
+
+    This is the gate the per-tool-call resolver (via the agent loop) and
+    :func:`opencomputer.sandbox.runner.run_sandboxed` use to decide
+    whether to thread a ``container_key`` onto :class:`SandboxConfig`.
+    """
+    ctx = ctx or SandboxScopeContext()
+    scope = policy.scope
+    if scope is SandboxScope.SHARED:
+        return scope_key(policy, ctx)
+    if scope is SandboxScope.SESSION and ctx.session_id:
+        return scope_key(policy, ctx)
+    if scope is SandboxScope.AGENT and ctx.agent_id:
+        return scope_key(policy, ctx)
+    return None

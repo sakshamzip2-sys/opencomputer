@@ -9,6 +9,8 @@ Subcommands::
     opencomputer sandbox explain            # print the effective policy
     opencomputer sandbox explain -- <argv>  # print the wrapped command (dry-run)
     opencomputer sandbox run -- <argv>      # run argv under the active policy
+    opencomputer sandbox list               # list pooled (reused) containers
+    opencomputer sandbox prune              # remove all pooled containers
 
 ``status`` / ``run`` / ``explain -- <argv>`` are the original Phase-3.E
 commands. ``enable`` / ``disable`` and the bare ``explain`` policy
@@ -46,6 +48,10 @@ from opencomputer.sandbox.policy import (
     SANDBOX_FALLBACK_ERROR,
     SANDBOX_FALLBACK_LOCAL,
     SandboxScope,
+)
+from opencomputer.sandbox.pool import (
+    list_pooled_containers,
+    prune_pooled_containers,
 )
 from opencomputer.sandbox.runner import _named_strategy, run_sandboxed
 from plugin_sdk.sandbox import SandboxConfig, SandboxStrategyName, SandboxUnavailable
@@ -486,3 +492,46 @@ def sandbox_run(
         f"exit={result.exit_code} duration={result.duration_seconds:.2f}s[/dim]"
     )
     raise typer.Exit(result.exit_code if result.exit_code >= 0 else 1)
+
+
+@sandbox_app.command("list")
+def sandbox_list() -> None:
+    """List the pooled (reused) sandbox containers.
+
+    The Docker backend keeps a long-lived container per session / agent /
+    shared scope so repeated tool calls reuse it (M3). This shows every
+    such ``oc-pool-`` container — across all OpenComputer processes, since
+    Docker itself is the registry. Remove them with ``oc sandbox prune``.
+    """
+    rows = list_pooled_containers()
+    if not rows:
+        console.print(
+            "[dim]no pooled sandbox containers — none created yet, or "
+            "Docker is unavailable[/dim]"
+        )
+        return
+    table = Table(title="Pooled sandbox containers")
+    table.add_column("Container", style="cyan")
+    table.add_column("Status")
+    table.add_column("Age", style="dim")
+    for name, status, age in rows:
+        table.add_row(name, status, age)
+    console.print(table)
+    console.print("[dim]remove all with: oc sandbox prune[/dim]")
+
+
+@sandbox_app.command("prune")
+def sandbox_prune() -> None:
+    """Force-remove every pooled sandbox container.
+
+    Cleans up pooled ``oc-pool-`` containers left by any OpenComputer
+    process — including ones orphaned by a crash. An active session simply
+    re-creates its pooled container on the next sandboxed tool call.
+    """
+    removed = prune_pooled_containers()
+    if not removed:
+        console.print("[dim]no pooled sandbox containers to prune[/dim]")
+        return
+    console.print(f"[green]pruned {len(removed)} pooled container(s)[/green]")
+    for name in removed:
+        console.print(f"  [dim]removed[/dim] [cyan]{name}[/cyan]")
