@@ -38,10 +38,10 @@ colors:
   agent_label:      "#EA580C"
 
 spinner:
-  thinking_verbs: [igniting, blazing, soaring, kindling]
+  thinking_verbs: [igniting, blazing, soaring, kindling, scorching, flaring, smouldering, roaring, searing, sparking]
   wings: [["🔥", "🔥"], ["⟆", "⟇"]]
-  waiting_faces: ["(◕‿◕)", "(>‿<)", "(◔ᴗ◔)"]
-  thinking_faces: ["(◉‿◉)", "(✦‿✦)", "(◕ω◕)"]
+  waiting_faces: ["(◕‿◕)", "(>‿<)", "(◔ᴗ◔)", "(^‿^)", "(◠‿◠)", "(¬‿¬)", "(>ᴗ<)", "(ᵔ‿ᵔ)", "(◕ᴗ◕)", "(°‿°)"]
+  thinking_faces: ["(◉‿◉)", "(✦‿✦)", "(◕ω◕)", "(✧‿✧)", "(★‿★)", "(◔ω◔)", "(◉ω◉)", "(✦ω✦)", "(>ω<)", "(◔‿◔)"]
 
 branding:
   agent_name: "Charizard"

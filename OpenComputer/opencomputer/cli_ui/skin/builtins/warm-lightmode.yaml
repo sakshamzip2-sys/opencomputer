@@ -45,10 +45,10 @@ colors:
   dim:              "#A8A29E"
 
 spinner:
-  thinking_verbs: [contemplating, brewing, settling]
+  thinking_verbs: [contemplating, brewing, settling, pondering, musing, considering, reflecting, mulling, simmering, easing-in]
   wings: [["~", "~"]]
-  waiting_faces: ["(◡‿◡)", "(¯‿¯)", "(˘ᴗ˘)"]
-  thinking_faces: ["(◕‿◕)", "(◠‿◠)", "(✿‿✿)"]
+  waiting_faces: ["(◡‿◡)", "(¯‿¯)", "(˘ᴗ˘)", "(◠‿◠)", "(•‿•)", "(ᵕ‿ᵕ)", "(◞‿◟)", "(˘‿˘)", "(◕‿◕)", "(·‿·)"]
+  thinking_faces: ["(◕‿◕)", "(◠ᴗ◠)", "(✿‿✿)", "(◕ᴗ◕)", "(•ᴗ•)", "(˘ᴗ˘)", "(❀‿❀)", "(◔ᴗ◔)", "(♡‿♡)", "(◡ᴗ◡)"]
 
 branding:
   agent_name: "OpenComputer"

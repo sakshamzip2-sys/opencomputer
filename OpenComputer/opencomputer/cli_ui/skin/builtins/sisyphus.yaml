@@ -38,10 +38,10 @@ colors:
   agent_label:      "#9CA3AF"
 
 spinner:
-  thinking_verbs: [pushing, again, again, still-pushing]
+  thinking_verbs: [pushing, heaving, hauling, again, still-pushing, uphill, rolling, once-more, persisting, enduring]
   wings: [["○", "○"]]
-  waiting_faces: ["(¬_¬)", "(¬‿¬)", "(◔_◔)"]
-  thinking_faces: ["(◔‿◔)", "(•_•)", "(˘_˘)"]
+  waiting_faces: ["(¬_¬)", "(¬‿¬)", "(◔_◔)", "(-_-)", "(˘_˘)", "(•_•)", "(=_=)", "(◑_◑)", "(･_･)", "(◔.◔)"]
+  thinking_faces: ["(◔‿◔)", "(•ᴗ•)", "(˘ᴗ˘)", "(◔ᴗ◔)", "(¬ᴗ¬)", "(-ᴗ-)", "(◑ᴗ◐)", "(•‿•)", "(˘‿˘)", "(◞ᴗ◟)"]
 
 branding:
   agent_name: "OpenComputer"

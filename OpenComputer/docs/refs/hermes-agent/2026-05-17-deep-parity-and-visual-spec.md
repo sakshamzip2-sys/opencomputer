@@ -41,7 +41,7 @@ What is genuinely still open is small and listed honestly in §4.
 |---|---|---|
 | Colour-token registry | "OC ships 7 tokens; 22 missing" | **Shipped.** `cli_ui/skin/builtins/default.yaml` ships a full 24-key palette (banner, UI semantics, prompt/input, response box, session label/border, status bar, voice badge, selection, completion-menu panes). `cli_ui/skin/spec.py:SkinSpec.colors` is the registry. |
 | Skin engine | "entirely missing in OC" | **Shipped.** `cli_ui/skin/` = `loader.py` + `apply.py` + `spec.py`, **9 built-in skins** (`default`, `mono`, `daylight`, `ares`, `charizard`, `poseidon`, `sisyphus`, `slate`, `warm-lightmode`). Live runtime swap via `apply_skin()`; `/skin <name>` is wired in `agent/slash_commands_impl/skin_personality_cmd.py`. |
-| Spinner / KawaiiSpinner | "entirely missing; OC uses rich's default" | **Shipped.** `cli_ui/busy_indicator.py` has 5 named styles (`kawaii`, `minimal`, `dots`, `wings`, `none`) with width-uniform frames; `SkinSpec` carries `spinner_waiting_faces` / `spinner_thinking_faces` / `spinner_thinking_verbs` / `spinner_wings`, all populated per skin. The `default` skin's pools were widened to ~10 faces / 12 verbs on 2026-05-18 (§3). |
+| Spinner / KawaiiSpinner | "entirely missing; OC uses rich's default" | **Shipped.** `cli_ui/busy_indicator.py` has 5 named styles (`kawaii`, `minimal`, `dots`, `wings`, `none`) with width-uniform frames; `SkinSpec` carries `spinner_waiting_faces` / `spinner_thinking_faces` / `spinner_thinking_verbs` / `spinner_wings`, all populated per skin. All 9 built-in skins' face/verb pools were widened to ~10 each on 2026-05-18 (§3). |
 | Status bar | "entirely missing in OC" | **Shipped (PR #418).** `cli_ui/status_line.py` renders `◆ model · ctx 12.4K/200K ██████░░░░ 6% · $0.06 · 15m` and grades the context badge green → yellow → orange → red (`status_line.py:163-180`). A `/statusbar` toggle exists (`agent/slash_commands_impl/display_toggles_cmd.py:StatusbarCommand`). |
 | Banner honours the skin | (proposed as Recipe 1's kernel) | **Closed 2026-05-17.** `cli_banner.py` previously hardcoded six hex constants. `cli_banner._palette()` now resolves the palette from the active skin's `banner_*` block; the `default` skin (and no-skin) keep OC pink, byte-identical to the historical splash. |
 
@@ -86,7 +86,7 @@ REPL now routes a slash it doesn't recognise to the agent registry via
 | `/undo` — remove the last user/assistant exchange | `agent/slash_commands_impl/undo_cmd.py` (new), `agent/slash_commands.py`, `cli_ui/slash.py`, `cli_ui/slash_handlers.py`, `cli.py` | Hermes-parity conversation-history op (distinct from `/rollback`, which restores filesystem checkpoints). `undo_last_exchange()` truncates the session at the last `role=="user"` message via `SessionDB.replace_session_messages`, removing the whole exchange (prompt + reply + tool messages) atomically. Reachable everywhere: agent `UndoCommand` for gateway/wire/ACP, plus a cli_ui bridge for `oc chat`. |
 | Banner honours the active skin | `cli_banner.py` | See §1, last row. |
 | Agent slash commands reachable from `oc chat` | `cli_ui/slash_handlers.py`, `agent/slash_commands.py`, `cli.py` | `dispatch_slash` gained an `on_unknown` hook; the REPL wires it to `try_dispatch_agent_slash`, which dispatches a slash absent from the cli_ui registry through the agent `SlashCommand` registry. `/copy`, `/rollback`, `/background`, `/agents` and ~35 other agent commands now work in `oc chat`, not only gateway/wire/ACP. Dispatched directly via the slash dispatcher — no persist / end-session side effect. |
-| Spinner face/verb variety | `cli_ui/skin/builtins/default.yaml` | The `default` skin's spinner pools were 3-4 entries each; widened to ~10 waiting faces / ~10 thinking faces / 12 verbs / 4 wings so the spinner feels varied across a long session. Pinned by `test_default_skin_ships_a_rich_face_pool`. |
+| Spinner face/verb variety | `cli_ui/skin/builtins/*.yaml` | All 9 built-in skins' spinner pools were 3-4 entries each; widened to ~10 waiting / ~10 thinking faces + ~10-12 verbs each, in each skin's own glyph theme (ares keeps warlike brackets, poseidon waves, sisyphus weary, …). Pinned by `test_all_builtin_skins_ship_a_rich_face_pool`. |
 
 All five are TDD-covered: `tests/test_slash_paste.py`,
 `tests/test_slash_undo.py`, `tests/test_banner_skin.py`,
@@ -100,9 +100,6 @@ All five are TDD-covered: `tests/test_slash_paste.py`,
 - **Web dashboard polish.** OC's `opencomputer/dashboard/` is slimmer
   than Hermes's React app — no i18n, no theme system, no plugin-tabs.
   Genuine M-L effort; belongs in its own spec.
-
-(The non-`default` built-in skins keep their own smaller spinner pools —
-opt-in skins, lower priority; widen them the same way if wanted.)
 
 Deliberate non-goals: the commercial memory backends (`holographic` /
 `retaindb` / `supermemory` — SaaS) and `bluebubbles` / `zalo` channels.
