@@ -13,12 +13,12 @@ import pytest
 
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.awareness.life_events.pattern import PatternFiring
-from plugin_sdk.runtime_context import RuntimeContext
 from opencomputer.awareness.life_events.registry import (
     get_global_registry,
     reset_global_registry_for_test,
 )
 from opencomputer.awareness.personas.registry import get_persona
+from plugin_sdk.runtime_context import RuntimeContext
 
 
 @pytest.fixture(autouse=True)
