@@ -426,7 +426,7 @@ CREATE POLICY service_role_bypass ON <table>
 
 ### Phase 2 — Reverse tunnel (VM no public ports)
 
-**Status:** 🟡 2a in review (ocp #4); 2c shipped (scaffolding); 2b pending operator action
+**Status:** 🟡 2a 🟢 (ocp #4), 2b 🟢 (ocp #5), 2c 🟢 (ocp #3 + operator complete). Verification pending — first end-to-end VM deploy still owed.
 **Repos:** `[ocp]` + `[ops]`
 **Blocked by:** Phase 1 — 🟢 (merged 2026-05-18)
 **Estimated effort:** M (2-4 days)
@@ -450,13 +450,15 @@ Changes:
 
 #### 2b · `[ocp]` `service-api`: mint tunnel + token at provision time
 
+**Status:** 🟢 Shipped as ocp #5 (2026-05-19). See notes/decisions log below for follow-up fixes (migration runner, orphan-tunnel race, rate limit, pretend-gate cleanup).
+
 **Files:**
 - `oc-platform/packages/service-api/src/services/provisioner.ts` (new helpers)
 - `oc-platform/packages/service-api/src/services/tunnels.ts` (new module)
 - `oc-platform/packages/service-api/src/db/schema.ts` (new table)
 
 Tasks:
-- ☐ Add `vm_tunnels` table (Drizzle schema):
+- 🟢 Add `vm_tunnels` table (Drizzle schema):
   ```ts
   export const vmTunnels = pgTable("vm_tunnels", {
     id: uuid("id").primaryKey().defaultRandom(),
@@ -468,26 +470,27 @@ Tasks:
     revokedAt: timestamp("revoked_at"),
   });
   ```
-- ☐ Enable RLS on `vm_tunnels` (Phase 1 pattern).
-- ☐ `services/tunnels.ts`:
-  - `createCloudflareTunnel(ownerId)` → calls CF API → returns `{ tunnelId, hostname, token }`.
-  - `revokeCloudflareTunnel(tunnelId)` → revokes via CF API + sets `revoked_at`.
-- ☐ `services/provisioner.ts`:
-  - Generate `ocToken = randomBytes(32).toString("base64url")`.
-  - Call `createCloudflareTunnel(user.id)`.
-  - `db.insert(vmTunnels)` with encrypted `ocToken` (use libsodium or AWS KMS).
-  - Render cloud-init with `{{CF_TUNNEL_TOKEN}}` and `{{OC_DASHBOARD_TOKEN}}` interpolated.
-- ☐ On `DELETE /api/instance`: revoke the tunnel, mark `vm_tunnels.revoked_at`.
-- ☐ Add tunnel cleanup to the existing scheduled cron (`cron.ts`).
+- 🟢 Enable RLS on `vm_tunnels` (Phase 1 pattern). Policies: `vm_tunnels_tenant_isolation` + `vm_tunnels_service_role_bypass`. Migration `drizzle/0002_vm_tunnels.sql` applied to staging.
+- 🟢 `services/tunnels.ts`:
+  - `createCloudflareTunnel(ownerId)` → calls CF API → returns `{ tunnelId, hostname, cloudflaredToken, dnsRecordId, vncDnsRecordId }`. Full rollback on any partial failure.
+  - `revokeCloudflareTunnel(tunnelId, dnsRecordId, vncDnsRecordId?, force=true)` → DELETEs DNS records + tunnel (cascade=force). Idempotent (404 = success).
+- 🟢 `routes/instance.ts`:
+  - `randomBytes(32).toString("hex")` per-VM `ocDashboardToken`.
+  - `createCloudflareTunnel(user.id)` called before lease creation.
+  - DB transaction wraps `users.update` + `vm_tunnels.insert` — full rollback (CF revoke + lease release) if either fails. Closes orphan-tunnel race.
+  - cloud-init rendered with real `cfTunnelToken` + `ocDashboardToken`.
+- 🟢 On `DELETE /api/instance`: revoke the tunnel, mark `vm_tunnels.revoked_at`. Non-fatal — instance cleanup is never blocked by tunnel revocation.
+- 🟡 Tunnel cleanup cron (`cron.ts`) deferred — current flow revokes inline on user-triggered DELETE. Cron-based reaping (for orphans from past failures, e.g., before transaction wrap) revisited in Phase 6 ops hardening.
+- 🟢 Follow-ups shipped same PR: migration runner (`scripts/migrate.ts` + `_oc_migrations` table — closes "0001 silently un-applied" gap), per-user rate limit on `/deploy` (3/min), `force` param on revoke (graceful vs cascade), test-suite gap (`vm_tunnels` added to RLS adversarial suite).
 
 #### 2c · `[ops]` Cloudflare setup (one-time)
 
-**Status:** 🟡 runbook shipped (ocp #3 merged 2026-05-18); operator UI clicks in progress.
+**Status:** 🟢 Complete. Runbook shipped ocp #3; operator clicks verified via `cf:smoke` (2026-05-18).
 
 - 🟢 Document in `oc-platform/docs/cloudflare-setup.md` — 10-section runbook with positive AND negative verification curls.
 - 🟢 Pre-wire `service-api`: `tunnels.ts` config + signatures + `smokeTestCloudflareAccess()` + `cf:smoke` npm script. Implementation deferred to Phase 2b.
-- ☐ **Operator (Archit):** create CF account, register `tryopencomputer.com` via Cloudflare Registrar (~$10.44/yr), capture Account ID + Zone ID, mint API token with the 3 scopes (Tunnel Edit, DNS Edit scoped to zone, Zone Read), set 4 env vars, run `npm run cf:smoke` → OK.
-- ☐ Confirm subdomain `oc-vms.tryopencomputer.com` resolves as expected once first tunnel is minted.
+- 🟢 **Operator (Archit):** CF account created, `tryopencomputer.com` registered via Cloudflare Registrar, Account ID + Zone ID captured, API token minted with 3 scopes (Argo Tunnel Edit, DNS Write scoped to zone, Zone Read), 4 env vars set, `cf:smoke` returns OK.
+- 🟡 Confirm subdomain `oc-vms.tryopencomputer.com` resolves as expected once first tunnel is minted — pending first staging VM deploy.
 
 #### Verification
 - ☐ Provision a test VM in staging. `nmap` its public IP from outside → 0 open ports.
@@ -505,6 +508,9 @@ Tasks:
 #### Notes / decisions log
 - 2026-05-18: Phase 2a shipped as ocp #4. Full cloud-init rewrite: loopback-only binds, cloudflared systemd unit, nftables (input DROP), LLM-proxy env pattern, verify-no-inbound.sh self-audit. `ProvisionConfig` updated; `instance.ts` generates per-VM `ocDashboardToken`. Egress allow-list deferred to Phase 6 (§9). `cfTunnelToken` empty stub — Phase 2b wires the real CF API call.
 - 2026-05-18: Phase 2c scaffolding shipped — runbook + env-var wiring + `tunnels.ts` stub + `cf:smoke` script (ocp #3). Operator clicks remain (account, domain registration, token). Subdomain root confirmed as `oc-vms` (plan default). Registrar decision: direct at Cloudflare Registrar (no third-party).
+- 2026-05-19: Phase 2c operator portion completed. CF account + domain registered, API token minted with correct scopes after debugging (Argo Tunnel Edit + DNS Write scoped to zone + Zone Read), `cf:smoke` returns OK. Operator pain points: CF UI labels "Cloudflare Tunnel" as "Argo Tunnel (Legacy)" in the token policy editor; "full permissions" preset gives only Account API Tokens Write (NOT what's needed) — must compose policies manually.
+- 2026-05-19: Phase 2b shipped as ocp #5. `tunnels.ts` (create/revoke + rollback), `vm_tunnels` schema + 0002 migration with RLS, deploy/delete wiring, GET status returns `tunnelHostname`. Same PR: follow-up fixes for gaps surfaced during staging deploy — (1) custom migration runner `scripts/migrate.ts` with `_oc_migrations` bookkeeping (drizzle-kit migrate can't run hand-authored SQL; 0001 had silently never been applied), (2) DB transaction around post-lease writes + full CF/lease rollback (closes orphan-tunnel race), (3) per-user sliding-window rate limit on `/deploy` (3/min, in-memory — Redis when service-api scales), (4) `force` param on `revokeCloudflareTunnel` (default true for user destroy, false reserved for future graceful admin revoke), (5) `users_self_access` special-case in check_rls.ts (was hardcoded to `users_tenant_isolation`), (6) `vm_tunnels` added to RLS adversarial test loops, (7) dead `clientForJwt()` removed (called nonexistent postgres-js `.options({jwt})` method).
+- 2026-05-19: Known follow-ups not yet done — (a) tunnel cleanup cron deferred to Phase 6, (b) RLS adversarial suite skips silently in CI without `TEST_DATABASE_URL` + test JWTs; provisioning these is a CI/ops task before public launch.
 
 ---
 
