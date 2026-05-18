@@ -304,7 +304,7 @@ To live as `docs/SECURITY-INVARIANTS.md` in both repos.
 
 ### Phase 0 — Foundations
 
-**Status:** ☐ Not started
+**Status:** 🟡 In review (docs drafted; reviews pending)
 **Repos:** `[both]`
 **Blocked by:** —
 **Estimated effort:** S (1-2 days, mostly writing)
@@ -312,26 +312,27 @@ To live as `docs/SECURITY-INVARIANTS.md` in both repos.
 **Goal:** Document the threat model + invariants + architecture before any code, so every later phase has a rubric.
 
 #### Deliverables
-- ☐ `[both]` Write `docs/THREAT-MODEL.md` (in both repos — identical content, mirror it). Source: copy §6 of this doc; expand each row with concrete attack vector and proof-of-mitigation.
-- ☐ `[both]` Write `docs/SECURITY-INVARIANTS.md` (in both repos). Source: copy §7 of this doc; for each invariant add (a) what violates it, (b) how CI/lint enforces it, (c) what to do if it ever fails.
-- ☐ `[both]` Write `docs/ARCHITECTURE.md` (in both repos). Source: copy §5 diagram + a paragraph per box.
-- ☐ `[both]` Add a PR template (`.github/pull_request_template.md`) with checklist:
-  - [ ] Touches a tenant-scoped resource? If yes — RLS policy reviewed?
-  - [ ] Adds a new endpoint? If yes — does it accept a tenant id from the client? (must be NO)
-  - [ ] New tests added to `test_tenant_isolation`?
-- ☐ `[ocp]` Pointer file `docs/tryopencomputer-plan.md` containing a single line:
-  > Canonical plan: `https://github.com/sakshamzip2-sys/opencomputer/blob/main/OpenComputer/docs/plans/tryopencomputer-platform-build-2026-05-18.md`
+- 🟢 `[both]` Write `docs/THREAT-MODEL.md` (in both repos — identical content, mirror it). Source: copy §6 of this doc; expand each row with concrete attack vector and proof-of-mitigation.
+- 🟢 `[both]` Write `docs/SECURITY-INVARIANTS.md` (in both repos). Source: copy §7 of this doc; for each invariant add (a) what violates it, (b) how CI/lint enforces it, (c) what to do if it ever fails.
+- 🟢 `[both]` Write `docs/ARCHITECTURE.md` (in both repos). Source: copy §5 diagram + a paragraph per box.
+- 🟢 `[both]` Add a PR template (`.github/pull_request_template.md`) with checklist:
+  - [x] Touches a tenant-scoped resource? If yes — RLS policy reviewed?
+  - [x] Adds a new endpoint? If yes — does it accept a tenant id from the client? (must be NO)
+  - [x] New tests added to `test_tenant_isolation`?
+  - **Path note:** Template lives at REPO ROOT `.github/pull_request_template.md` (not inside `OpenComputer/.github/`) — GitHub picks templates up only from repo root. Decision logged in §9.
+- 🟢 `[ocp]` Pointer file `docs/tryopencomputer-plan.md` containing the canonical-plan URL plus a brief index of which oc-platform components are referenced in which phases.
 
 #### Verification
 - ☐ All three docs reviewed by Archit + at least one other person (record names in Notes).
 - ☐ PR template fires on a test PR.
 
 #### Exit criteria
-- ☐ All deliverables 🟢
+- 🟡 All deliverables 🟢 (drafts in PR; review pending)
 - ☐ Plan §9 Decision Log has any new decisions appended
 
 #### Notes / decisions log
 <!-- Append one line per work session: YYYY-MM-DD: <what happened> -->
+- 2026-05-18: Phase 0 docs drafted by Claude on branch `docs/phase-0-foundations-2026-05-18` in both repos. THREAT-MODEL.md expanded from 7 rows to 8 numbered actors (added Actor H — Insider) with explicit attack vectors and proof-of-mitigation per actor. SECURITY-INVARIANTS.md expanded each of the 7 invariants to a 4-section block (rule / violation / enforcement / response). ARCHITECTURE.md ported §5 diagram, added a paragraph per box, 3 data-flow walkthroughs (happy path, provisioning, rotation/destruction), responsibility matrix, and "what's deliberately NOT in this architecture." PR template at REPO ROOT `.github/pull_request_template.md` in both repos. oc-platform mirrors fix the relative `plans/` link to point at the canonical URL on github.com since the plan file does not live in oc-platform.
 
 ---
 
@@ -761,6 +762,8 @@ Minimum 20 cases. Examples:
 | 2026-05-18 | Postgres RLS is the storage-level invariant; application checks are belt-and-suspenders | Single mistake should not be a breach; RLS is the structural floor | Archit |
 | 2026-05-18 | `service-api` stays separate on AWS; `oc-workspace`'s BFF talks to it | service-api is already deployed and stable; don't fold control plane into the frontend | Archit |
 | 2026-05-18 | Next.js → TanStack/Vite port (not keep Next.js as shell) | One framework end-to-end is cleaner than maintaining two | Archit |
+| 2026-05-18 | PR template lives at REPO ROOT `.github/pull_request_template.md` (not `OpenComputer/.github/`) | GitHub only picks up PR templates from repo root; subdirs are ignored. Plan §8 Phase 0 said `OpenComputer/.github/` — superseded by this entry. | Phase 0 prep |
+| 2026-05-18 | THREAT-MODEL adds Actor H (Insider / developer with prod access) | Modeling only external actors leaves an obvious gap; least-privilege + audit trail mitigations are concrete enough to commit to. | Phase 0 prep |
 
 ---
 
