@@ -151,8 +151,13 @@
         empty.style.display = 'none';
         tbody.innerHTML = filtered.map(p => {
           const stateKind = p.enabled ? 'on' : 'off';
+          // auth_status canonical: 'configured' | 'missing' | 'none'.
+          // 'unused' is the legacy value retained server-side as
+          // auth_status_legacy for one release; treat it same as 'none'.
           const authKind = p.auth_status === 'configured' ? 'ok' :
-                           p.auth_status === 'missing' ? 'warn' : 'na';
+                           p.auth_status === 'missing' ? 'warn' :
+                           (p.auth_status === 'none' || p.auth_status === 'unused') ? 'na' :
+                           'na';
           const btnLabel = p.enabled ? 'Disable' : 'Enable';
           const btnCls = p.enabled ? 'toggle disable' : 'toggle';
           return `

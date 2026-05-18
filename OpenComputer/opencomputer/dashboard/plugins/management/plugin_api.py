@@ -61,18 +61,35 @@ def _resolved_enabled_set() -> set[str] | str:
 
 
 def _provider_auth_status(env_vars: tuple[str, ...]) -> str:
-    """Return one of ``configured``/``missing``/``unused``.
+    """Return one of ``configured``/``missing``/``none``.
 
     ``configured`` — every declared env var is set (non-empty)
     ``missing``    — at least one declared env var is unset/empty
-    ``unused``     — manifest declares no env vars (no auth needed)
+    ``none``       — manifest declares no env vars (no auth required)
+
+    Renamed from ``unused`` (which read as "this plugin is unused") to
+    ``none`` (which reads as "no auth required"). The legacy ``unused``
+    value is still emitted alongside this one in the ``auth_status_legacy``
+    field for one release; the oc-workspace built bundle and any external
+    API client gets a deprecation window before we remove the alias.
     """
     if not env_vars:
-        return "unused"
+        return "none"
     for name in env_vars:
         if not os.environ.get(name):
             return "missing"
     return "configured"
+
+
+def _legacy_auth_status(canonical: str) -> str:
+    """Map the canonical auth_status to its legacy string for back-compat.
+
+    Same value for configured/missing; ``none`` maps back to the old
+    ``unused`` string so consumers that haven't migrated still parse.
+    Remove once oc-workspace/electron/server-bundle.cjs has been
+    regenerated and any third-party consumers have migrated.
+    """
+    return "unused" if canonical == "none" else canonical
 
 
 @router.get("/list")
@@ -91,7 +108,8 @@ async def list_plugins() -> dict[str, Any]:
               "kind": "tool",
               "description": "...",
               "enabled": true,
-              "auth_status": "configured" | "missing" | "unused",
+              "auth_status": "configured" | "missing" | "none",
+              "auth_status_legacy": "configured" | "missing" | "unused",  # deprecated; one-release alias
               "env_vars": ["KEY1","KEY2"],
               "source_root": "/path/to/extensions/kanban"
             },
@@ -118,6 +136,7 @@ async def list_plugins() -> dict[str, Any]:
                 env_vars = prov.env_vars
                 break
 
+        auth_status = _provider_auth_status(env_vars)
         plugins_out.append({
             "id": m.id,
             "name": m.name,
@@ -125,7 +144,10 @@ async def list_plugins() -> dict[str, Any]:
             "kind": getattr(m, "kind", ""),
             "description": getattr(m, "description", ""),
             "enabled": is_enabled,
-            "auth_status": _provider_auth_status(env_vars),
+            "auth_status": auth_status,
+            # Deprecated alias — remove after oc-workspace bundle rebuilt
+            # and any external API consumer has migrated. See _legacy_auth_status.
+            "auth_status_legacy": _legacy_auth_status(auth_status),
             "env_vars": list(env_vars),
             "source_root": str(cand.root_dir),
         })
