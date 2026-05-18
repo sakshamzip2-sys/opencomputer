@@ -1,8 +1,5 @@
 """Locate the workspace directory on disk.
 
-Mirrors ``oc webui``'s search order (see ``opencomputer.cli:webui``) so
-operators familiar with one command find the other intuitive.
-
 Search order:
 
 1. Explicit ``workspace_dir`` argument (from ``--workspace-dir`` CLI flag)

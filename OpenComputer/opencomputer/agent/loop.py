@@ -2024,8 +2024,8 @@ class AgentLoop:
         # _apply_pending_profile_swap so a FIRED decision queues the
         # pending swap that _apply_pending consumes on this same turn.
         # All failures are caught at the pipeline layer; never blocks
-        # the turn. Applies to ALL surfaces (CLI, webui, workspace,
-        # wire clients, gateway adapters) via the shared AgentLoop.
+        # the turn. Applies to ALL surfaces (CLI, workspace, wire
+        # clients, gateway adapters) via the shared AgentLoop.
         try:
             await self._run_handoff_auto_swap(sid=sid, messages=messages)
         except Exception:  # noqa: BLE001 — never wedge a turn on handoff
@@ -4728,8 +4728,8 @@ class AgentLoop:
         FIRED decision the pipeline generates the handoff, writes it to
         the target profile's inbox, and queues ``pending_profile_id`` so
         the immediately-following :func:`_apply_pending_profile_swap`
-        consumes it. Applies uniformly across CLI / webui / workspace /
-        gateway / wire surfaces — the same AgentLoop drives all of them.
+        consumes it. Applies uniformly across CLI / workspace / gateway /
+        wire surfaces — the same AgentLoop drives all of them.
 
         Disabled by ``config.auto_swap_handoff == "off"`` or when no
         target profile exists. Gateway sessions are disabled unless the
@@ -4777,7 +4777,7 @@ class AgentLoop:
             plan_mode = bool(self._runtime.custom.get("plan_mode"))
 
         # Gateway opt-in: the runtime carries a channel marker on
-        # gateway-bound sessions. CLI / webui / workspace / wire are
+        # gateway-bound sessions. CLI / workspace / wire are
         # NOT gateway sessions.
         is_gateway = bool(self._runtime.custom.get("_is_gateway_session"))
         gateway_optin = bool(

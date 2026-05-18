@@ -47,8 +47,8 @@ workspace_app = typer.Typer(
     name="workspace",
     help=(
         "Launch Hermes Workspace as a browser-based control plane for OC. "
-        "Sibling to `oc webui`; runs hermes-workspace (Node SSR) pointed at "
-        "OC's OpenAI-compat backend."
+        "Runs hermes-workspace (Node SSR) pointed at OC's OpenAI-compat "
+        "backend."
     ),
     no_args_is_help=False,
     invoke_without_command=True,
