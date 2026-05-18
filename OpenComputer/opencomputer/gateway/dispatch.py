@@ -2139,6 +2139,34 @@ class Dispatch:
         except Exception:  # noqa: BLE001
             logger.debug("lifecycle hook raised", exc_info=True)
 
+    @staticmethod
+    def _populate_session_usage(
+        custom: dict[str, Any], db: Any, session_id: str,
+    ) -> None:
+        """Fill per-session usage counters into ``custom`` so ``/usage``
+        and ``/context`` show real data on the gateway.
+
+        A3 — these commands were written CLI-shaped: they read live
+        counters off ``runtime.custom`` that only the single-session CLI
+        loop maintains. ``SessionDB.session_usage_summary`` is the
+        durable per-session source; reading it here lets the gateway
+        bypass path supply the same numbers. Best-effort — a DB error
+        leaves the keys absent and the command degrades gracefully.
+        """
+        try:
+            summary = db.session_usage_summary(session_id)
+        except Exception:  # noqa: BLE001 — usage display must never raise
+            return
+        if summary is None:
+            return
+        custom["session_tokens_in"] = summary.input_tokens
+        custom["session_tokens_out"] = summary.output_tokens
+        custom["session_cache_read"] = summary.cache_read_tokens
+        custom["session_cache_write"] = summary.cache_write_tokens
+        custom["session_compactions"] = summary.compactions_count
+        if summary.cost_usd is not None:
+            custom["session_cost_usd"] = summary.cost_usd
+
     async def _maybe_bypass_running_guard(
         self, event, session_id: str, profile_id: str, loop: Any = None,
     ) -> str | None:
@@ -2215,17 +2243,31 @@ class Dispatch:
                     custom[k] = v
         # A3 — give read-only gateway-safe commands the loop-backed
         # context they need to show real data: ``session_db`` for
-        # /history + /agents, ``model`` for /status. Best-effort — a
-        # missing attribute just leaves the command in its degraded
-        # (placeholder) rendering, never raises.
+        # /history + /agents, ``model`` for /status, and the per-session
+        # usage totals for /usage + /context. Best-effort — a missing
+        # attribute just leaves the command in its degraded (placeholder)
+        # rendering, never raises.
         if loop is not None:
             db = getattr(loop, "db", None)
             if db is not None:
                 custom["session_db"] = db
+                self._populate_session_usage(custom, db, session_id)
             try:
                 custom["model"] = loop.config.model.model
             except Exception:  # noqa: BLE001 — model line is decoration
                 pass
+            # A8 — the handoff doc generator needs a provider adapter;
+            # the loop caches one after its first turn. None is fine —
+            # /handoff falls back to a doc-less swap.
+            adapter_for_handoff = getattr(loop, "_handoff_provider_adapter", None)
+            if adapter_for_handoff is not None:
+                custom["_handoff_provider_adapter"] = adapter_for_handoff
+        # A3 — /platforms reads the live adapter roster. The dispatcher
+        # owns it (``_adapters_by_platform``); surface it so the command
+        # lists real channels instead of "run oc gateway".
+        roster = getattr(self, "_adapters_by_platform", None)
+        if roster:
+            custom["active_platforms"] = sorted(roster.keys())
         runtime = RuntimeContext(custom=custom)
         # 2026-05-08 — Hermes Doc-2 gateway hooks: command:<slug>.
         # Fire-and-forget so a slow handler never delays slash dispatch.

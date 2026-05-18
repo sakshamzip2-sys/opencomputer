@@ -120,52 +120,60 @@ def test_slash_command_base_defaults_gateway_safe_false():
 
 
 def test_audited_builtin_commands_are_tagged_gateway_safe():
-    """The built-ins that actually function with the runtime the gateway
-    builds must carry the flag so they answer on Telegram/Discord.
+    """Every built-in that functions with the runtime the gateway builds
+    must carry the flag so it answers on Telegram/Discord.
 
-    /status, /history, /agents — work once the dispatcher plumbs
-    session_db/model into runtime.custom. /capabilities self-imports the
+    /status, /history, /agents — need session_db/model, plumbed by the
+    dispatcher. /context, /usage — need per-session counters, plumbed by
+    Dispatch._populate_session_usage. /platforms — needs the adapter
+    roster, surfaced as active_platforms. /capabilities self-imports the
     plugin registry, so it never needed runtime context.
     """
     from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
     from opencomputer.agent.slash_commands_impl.capabilities_cmd import (
         CapabilitiesCommand,
     )
+    from opencomputer.agent.slash_commands_impl.context_cmd import ContextCommand
     from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
+    from opencomputer.agent.slash_commands_impl.platforms_cmd import (
+        PlatformsCommand,
+    )
     from opencomputer.agent.slash_commands_impl.status_cmd import StatusCommand
+    from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
 
     for cmd_cls in (
         StatusCommand,
         AgentsCommand,
         CapabilitiesCommand,
         HistoryCommand,
+        ContextCommand,
+        UsageCommand,
+        PlatformsCommand,
     ):
         assert cmd_cls.gateway_safe is True, f"{cmd_cls.__name__} not tagged"
 
 
-def test_counter_dependent_commands_are_not_gateway_safe():
-    """/context, /usage, /platforms read live counters / adapter roster
-    the gateway bypass path cannot supply — tagging them would ship a
-    command that shows misleading zeros. /handoff needs persist-then-
-    inject machinery (A8 deferred). They must stay untagged."""
-    from opencomputer.agent.slash_commands_impl.context_cmd import ContextCommand
-    from opencomputer.agent.slash_commands_impl.handoff_cmd import HandoffCommand
-    from opencomputer.agent.slash_commands_impl.platforms_cmd import (
-        PlatformsCommand,
-    )
-    from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
+class _FakeUsageRow:
+    input_tokens = 1200
+    output_tokens = 340
+    cache_read_tokens = 80
+    cache_write_tokens = 20
+    compactions_count = 2
+    cost_usd = 0.0157
 
-    for cmd_cls in (ContextCommand, UsageCommand, PlatformsCommand, HandoffCommand):
-        assert cmd_cls.gateway_safe is False, (
-            f"{cmd_cls.__name__} is tagged but cannot work on the gateway"
-        )
+
+class _FakeDB:
+    """SessionDB stand-in — only session_usage_summary is exercised."""
+
+    def session_usage_summary(self, session_id: str):  # noqa: ARG002
+        return _FakeUsageRow()
 
 
 class _FakeLoop:
     """Minimal AgentLoop stand-in exposing what the dispatcher reads."""
 
     def __init__(self) -> None:
-        self.db = object()  # sentinel — only identity is checked
+        self.db = _FakeDB()
 
         class _M:
             model = "claude-opus-4-7"
@@ -224,3 +232,34 @@ async def test_no_loop_still_dispatches_without_loop_keys():
     assert _CaptureRuntimeCmd.seen is not None
     assert "session_db" not in _CaptureRuntimeCmd.seen
     assert _CaptureRuntimeCmd.seen["active_profile_id"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_session_usage_counters_are_plumbed():
+    """A3 — /usage + /context need per-session token / cache / cost /
+    compaction counters; the dispatcher reads them from
+    SessionDB.session_usage_summary and threads them into the runtime."""
+    from opencomputer.plugins.registry import registry as reg
+
+    cmd = _CaptureRuntimeCmd()
+    _CaptureRuntimeCmd.seen = None
+    reg.slash_commands["fakecapture"] = cmd
+    try:
+        d = _bare_dispatch()
+        d._adapters_by_platform = {"telegram": object(), "discord": object()}
+        await d._maybe_bypass_running_guard(
+            _event("/fakecapture"), "sess-9", "default", _FakeLoop(),
+        )
+    finally:
+        reg.slash_commands.pop("fakecapture", None)
+
+    seen = _CaptureRuntimeCmd.seen
+    assert seen is not None
+    assert seen["session_tokens_in"] == 1200
+    assert seen["session_tokens_out"] == 340
+    assert seen["session_cache_read"] == 80
+    assert seen["session_cache_write"] == 20
+    assert seen["session_compactions"] == 2
+    assert seen["session_cost_usd"] == 0.0157
+    # /platforms — the live adapter roster is surfaced, sorted.
+    assert seen["active_platforms"] == ["discord", "telegram"]

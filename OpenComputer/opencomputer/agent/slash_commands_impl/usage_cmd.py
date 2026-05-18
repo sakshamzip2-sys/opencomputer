@@ -54,11 +54,12 @@ def _fmt_cache_count(n) -> str:
 class UsageCommand(SlashCommand):
     name = "usage"
     description = "Show session token usage + rate-limit state"
-    # NOT gateway_safe: /usage reads ~8 live counter keys (token in/out,
-    # cache read/write, cost, rate-limit) that only the agent loop keeps
-    # on its own runtime. On the gateway bypass path they are absent, so
-    # the command would show all zeros. Deferred until the gateway
-    # plumbs per-session usage from the SessionDB (parity follow-up).
+    # gateway_safe: Dispatch._populate_session_usage fills the token /
+    # cache / cost counters from SessionDB.session_usage_summary. The
+    # rate-limit lines are live provider telemetry not kept in the DB —
+    # on the gateway they render as "unknown" (the command is defensive
+    # about absent keys), the token/cost figures are real.
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         in_t = runtime.custom.get("session_tokens_in")

@@ -19,11 +19,10 @@ from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 class PlatformsCommand(SlashCommand):
     name = "platforms"
     description = "Show active channel platforms (gateway adapter status)"
-    # NOT gateway_safe: /platforms reads ``active_platforms`` from the
-    # runtime; the gateway bypass path does not surface the live adapter
-    # roster, so the command would wrongly print "run oc gateway" while
-    # ON the gateway. Deferred until the server→dispatch adapter roster
-    # is plumbed through (parity follow-up).
+    # gateway_safe: the dispatcher surfaces its live adapter roster
+    # (_adapters_by_platform) as runtime.custom["active_platforms"], so
+    # /platforms lists the real channels on the gateway.
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         active = runtime.custom.get("active_platforms")
