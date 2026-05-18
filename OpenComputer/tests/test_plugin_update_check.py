@@ -99,3 +99,53 @@ def test_fresh_empty_cache_returns_empty_list_not_none(tmp_path: Path) -> None:
     path = tmp_path / "update_cache.json"
     write_cache([], path, now=1000.0)
     assert read_cache(path, now=1000.0 + 60) == []
+
+
+# ── _build_catalog_versions (cli_plugin.py) ──────────────────────────
+
+
+def test_default_catalog_failure_is_surfaced(monkeypatch) -> None:  # noqa: ANN001
+    """F5 (review followup) — when the default catalog fetch fails,
+    ``_build_catalog_versions`` must SURFACE the failure (yellow log
+    line). The previous ``except CatalogError: pass`` swallowed every
+    subclass under a "no default catalog configured" comment that was
+    true for only one subclass; a real network 5xx, signature failure,
+    or parse error would silently leave ``oc plugin update-check``
+    reporting "all up to date" — the worst class of bug in a notifier.
+    """
+    from opencomputer import cli_plugin
+    from opencomputer.plugins import remote_install
+
+    captured: list[str] = []
+
+    class _SpyConsole:
+        def print(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            captured.append(" ".join(str(a) for a in args))
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise remote_install.CatalogError(
+            "synthetic 5xx from default catalog"
+        )
+
+    from opencomputer.plugins import marketplaces as mp_mod
+
+    monkeypatch.setattr(remote_install, "fetch_catalog", _boom)
+    monkeypatch.setattr(
+        remote_install,
+        "resolve_catalog_url",
+        lambda: "https://example.test/c.json",
+    )
+    # ``load_marketplaces`` is imported lazily inside
+    # ``_build_catalog_versions`` — patch at the source module, not at
+    # the cli_plugin reference (which would never resolve until import).
+    monkeypatch.setattr(mp_mod, "load_marketplaces", lambda: [])
+    monkeypatch.setattr(cli_plugin, "_console", _SpyConsole())
+
+    versions = cli_plugin._build_catalog_versions()
+
+    assert versions == {}, "nothing should be recovered when default catalog fails"
+    surfaced = [c for c in captured if "default catalog" in c]
+    assert surfaced, (
+        f"default-catalog failure must surface a log line; got {captured!r}"
+    )
+    assert "synthetic 5xx" in surfaced[0]

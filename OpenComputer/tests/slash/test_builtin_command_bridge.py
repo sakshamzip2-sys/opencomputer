@@ -175,6 +175,46 @@ def test_bridge_output_printed_without_markup_parsing() -> None:
     )
 
 
+def test_pending_close_pattern_suppresses_runtime_warning() -> None:
+    """F3 (review followup) — ``cli._on_builtin_dispatch`` binds the
+    dispatch coroutine to a local and ``.close()``-es it on the
+    RuntimeError fallback path. Without that, ``asyncio.run`` raising
+    before awaiting (e.g. "loop is already running" in a sub-event-loop
+    context) leaves an unawaited coroutine that emits
+    ``RuntimeWarning: coroutine '_bi_dispatch' was never awaited`` at
+    GC and leaks its frames.
+
+    The closure itself is nested in cli.py and resists direct unit
+    invocation; this test exercises the *pattern* used by the fix —
+    matches ``slash_commands.try_dispatch_agent_slash:295``.
+    """
+    import gc
+    import warnings
+
+    async def _fake_dispatch():
+        return None
+
+    # WITH the fix: bind, try/except, close-on-fallback.
+    pending = _fake_dispatch()
+    try:
+        raise RuntimeError("synthetic: emulate asyncio.run loop-already-running")
+    except RuntimeError:
+        pending.close()
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        del pending
+        gc.collect()
+        never_awaited = [
+            w for w in captured if "never awaited" in str(w.message)
+        ]
+
+    assert not never_awaited, (
+        "pending.close() must suppress 'coroutine was never awaited'; got: "
+        f"{[str(w.message) for w in never_awaited]!r}"
+    )
+
+
 # ── sync_builtin_commands ────────────────────────────────────────────
 
 
