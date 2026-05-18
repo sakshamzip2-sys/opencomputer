@@ -1081,6 +1081,22 @@ class Dispatch:
             self._resolver.resolve(event) if self._resolver is not None else "default"
         )
 
+        # A8 (gateway-vs-CLI parity) — apply a /handoff profile override.
+        # /handoff records its target in the runtime-state store; the
+        # override is persistent (mirrors the CLI persisting the active
+        # profile on disk), so it wins over the binding-resolved profile
+        # on this turn and every turn after, until another /handoff.
+        try:
+            _override = self._runtime_state.get_profile_override(session_id)
+            if _override and _override != profile_id:
+                logger.info(
+                    "gateway /handoff: %s → %s for session %s",
+                    profile_id, _override, session_id,
+                )
+                profile_id = _override
+        except Exception:  # noqa: BLE001 — a swap glitch must not break dispatch
+            logger.debug("profile-override apply failed", exc_info=True)
+
         # A6 (gateway-vs-CLI parity) — per-chat working directory. The
         # daemon's process cwd is its launch directory (usually the
         # profile home), not the user's project. A binding may pin

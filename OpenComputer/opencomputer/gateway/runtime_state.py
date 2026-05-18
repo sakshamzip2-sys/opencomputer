@@ -21,6 +21,7 @@ import json
 import logging
 import threading
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("opencomputer.gateway.runtime_state")
 
@@ -31,8 +32,8 @@ class GatewayRuntimeState:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path
         self._lock = threading.Lock()
-        # {session_id: {"plan_mode": bool}}
-        self._state: dict[str, dict[str, bool]] = {}
+        # {session_id: {"plan_mode": bool, "profile_override": str|None}}
+        self._state: dict[str, dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -43,8 +44,12 @@ class GatewayRuntimeState:
             if isinstance(raw, dict):
                 for sid, entry in raw.items():
                     if isinstance(sid, str) and isinstance(entry, dict):
+                        override = entry.get("profile_override")
                         self._state[sid] = {
                             "plan_mode": bool(entry.get("plan_mode", False)),
+                            "profile_override": (
+                                override if isinstance(override, str) else None
+                            ),
                         }
         except Exception:  # noqa: BLE001 — a corrupt file must not crash boot
             logger.warning(
@@ -73,6 +78,32 @@ class GatewayRuntimeState:
         with self._lock:
             self._state.setdefault(session_id, {})["plan_mode"] = bool(enabled)
             self._persist()
+
+    def get_profile_override(self, session_id: str) -> str | None:
+        """Return the profile this chat has been handed off to, if any.
+
+        A8 — ``/handoff`` on the gateway records the target here (its own
+        command runtime is ephemeral). Unlike a one-shot flag this is a
+        *persistent* override: the dispatcher applies it on every turn,
+        the same way the CLI persists the active profile on disk. A later
+        ``/handoff`` overwrites it.
+        """
+        with self._lock:
+            return self._state.get(session_id, {}).get("profile_override")
+
+    def set_profile_override(self, session_id: str, profile_id: str) -> None:
+        with self._lock:
+            self._state.setdefault(session_id, {})["profile_override"] = (
+                profile_id
+            )
+            self._persist()
+
+    def clear_profile_override(self, session_id: str) -> None:
+        with self._lock:
+            entry = self._state.get(session_id)
+            if entry is not None and entry.get("profile_override") is not None:
+                entry["profile_override"] = None
+                self._persist()
 
 
 # ─── Process-wide active store ──────────────────────────────────────────
