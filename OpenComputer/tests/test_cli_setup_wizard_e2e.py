@@ -83,4 +83,4 @@ def test_e2e_first_run_picks_first_provider_and_skips_messaging(
     assert written["model"]["provider"] == "anthropic"
     assert "platforms" not in (written.get("gateway") or {})
     # S1 wrote recommended loop defaults.
-    assert written["loop"]["max_iterations"] == 90
+    assert written["loop"]["max_iterations"] == 100
