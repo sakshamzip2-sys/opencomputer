@@ -54,6 +54,7 @@ def _fmt_cache_count(n) -> str:
 class UsageCommand(SlashCommand):
     name = "usage"
     description = "Show session token usage + rate-limit state"
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         in_t = runtime.custom.get("session_tokens_in")

@@ -1984,16 +1984,25 @@ class Dispatch:
     async def _maybe_bypass_running_guard(
         self, event, session_id: str, profile_id: str,
     ) -> str | None:
-        """Detect + execute a bypass-running-guard slash command.
+        """Detect + execute a slash command inline on the gateway.
 
-        Wave 6.E.6 — Hermes parity. ``/kanban`` (and any future slash
-        command with ``bypass_running_guard = True``) skips the
-        per-session lock so a board read/write reaches the DB even
-        when a long-running agent reply is mid-flight.
+        Two class attributes opt a slash command into gateway execution:
 
-        Returns the command's text output if dispatched, or None if
-        the message is not a bypass-marked slash command (caller
-        proceeds with the normal locked path).
+        - ``bypass_running_guard = True`` (Wave 6.E.6, Hermes parity) —
+          ``/kanban`` and friends skip the per-session lock so a board
+          read/write reaches the DB even mid-flight.
+        - ``gateway_safe = True`` (A3, gateway-vs-CLI parity Wave 1) —
+          the command is safe to run inline on the gateway. Without
+          this flag a slash command falls through to the model as plain
+          text — which is why ``/status``, ``/plan``, ``/handoff`` etc.
+          silently no-op'd on Telegram before A3.
+
+        Either flag routes the command here. Both run pre-lock; spec
+        requires gateway-safe commands to be quick.
+
+        Returns the command's text output if dispatched, or None if the
+        message is not a gateway-runnable slash command (caller proceeds
+        with the normal locked path).
         """
         text = event.text or ""
         if not text.startswith("/"):
@@ -2019,7 +2028,10 @@ class Dispatch:
             )
             if refused is not None:
                 return refused
-        if not getattr(cmd, "bypass_running_guard", False):
+        if not (
+            getattr(cmd, "bypass_running_guard", False)
+            or getattr(cmd, "gateway_safe", False)
+        ):
             return None
         # Build a runtime context with channel info so the command can
         # read platform / chat_id / thread_id for things like

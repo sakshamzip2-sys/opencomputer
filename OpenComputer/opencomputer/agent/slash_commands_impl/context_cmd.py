@@ -52,6 +52,7 @@ class ContextCommand(SlashCommand):
 
     name = "context"
     description = "Show context window usage + compaction count this session"
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         custom = runtime.custom if runtime is not None else {}

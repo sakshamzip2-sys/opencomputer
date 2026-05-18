@@ -43,6 +43,7 @@ def _format_message_preview(role: str, content) -> str:
 class HistoryCommand(SlashCommand):
     name = "history"
     description = "Show recent turns of the current session inline"
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         sid = runtime.custom.get("session_id")

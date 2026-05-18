@@ -19,6 +19,7 @@ from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 class PlatformsCommand(SlashCommand):
     name = "platforms"
     description = "Show active channel platforms (gateway adapter status)"
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         active = runtime.custom.get("active_platforms")
