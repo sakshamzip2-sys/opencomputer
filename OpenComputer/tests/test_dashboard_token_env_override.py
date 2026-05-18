@@ -24,9 +24,7 @@ module-level value is what gets propagated is part of the contract.
 from __future__ import annotations
 
 import importlib
-import os
 import sys
-
 
 _DASHBOARD_SERVER_MODULE = "opencomputer.dashboard.server"
 
