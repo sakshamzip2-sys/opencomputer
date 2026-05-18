@@ -50,8 +50,8 @@ Three named profiles (`coding`, `saksham`, `stock`) exist, none enable `coding-h
 4. `coding-harness` plugin's `register(api)` runs ONLY if it's in `enabled_plugins`.
 5. That `register()` call (verified at `extensions/coding-harness/plugin.py:92-258`) adds:
    - **10 tools**: `Edit`, `MultiEdit`, `TodoWrite`, `ExitPlanMode`, `StartProcess`, `CheckOutput`, `KillProcess`, `Rewind`, `CheckpointDiff`, `RunTests`
-   - **4 injection providers**: coder-identity, plan-mode, accept-edits-mode, review-mode (plus link-understanding)
-   - **7 hooks**: scope-check, plan-block, auto-checkpoint, post-edit-review, session-bootstrap, cleanup-session, accept-edits, bg-notify-subscriber
+   - **5 injection providers**: coder-identity, plan-mode, accept-edits-mode, review-mode, link-understanding
+   - **8 hooks**: scope-check, plan-block, accept-edits, auto-checkpoint, post-edit-review, session-bootstrap, cleanup-session, bg-notify-subscriber
    - **9 slash commands**: `/plan`, `/plan-off`, `/accept-edits`, `/checkpoint`, `/diff`, `/undo`, `/rollback`, `/approve`, `/deny`
    - **5 optional introspection tools** (macOS native): `screenshot`, `extract_screen_text`, `list_app_usage`, `read_clipboard_once`, `list_recent_files`
 
