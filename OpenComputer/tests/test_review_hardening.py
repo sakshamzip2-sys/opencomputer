@@ -11,7 +11,6 @@ import logging
 
 from typer.testing import CliRunner
 
-
 # ── M1 — _current_skin warns on a broken profile config ──────────────
 
 

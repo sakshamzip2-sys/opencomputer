@@ -144,10 +144,11 @@ def preview_skin(
         # Rich-markup parse happens later at ``_console.print(table)``,
         # outside the guard. A malformed hex (or a hostile user-skin
         # value like "red [bold]") would have crashed the whole preview.
-        if _hex_ok.match(hv):
-            swatch = f"[{hv}]████████[/{hv}]"
-        else:
-            swatch = "[dim]?[/dim]"
+        swatch = (
+            f"[{hv}]████████[/{hv}]"
+            if _hex_ok.match(hv)
+            else "[dim]?[/dim]"
+        )
         table.add_row(token, hv, swatch)
     _console.print(table)
     if spec.description:
