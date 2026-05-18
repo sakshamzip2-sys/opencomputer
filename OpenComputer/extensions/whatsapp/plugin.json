@@ -6,6 +6,7 @@
   "author": "OpenComputer Contributors",
   "license": "MIT",
   "kind": "channel",
+  "activation": {"on_channels": ["whatsapp"]},
   "entry": "plugin",
   "single_instance": true,
   "enabled_by_default": false,

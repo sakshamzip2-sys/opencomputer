@@ -24,6 +24,7 @@ from opencomputer.plugins.discovery import PluginCandidate
 
 __all__ = [
     "ActivationTriggers",
+    "channel_narrowed_ids",
     "plan_activations",
 ]
 
@@ -89,3 +90,33 @@ def plan_activations(
                     activated.add(manifest.id)
                     break
     return sorted(activated)
+
+
+def channel_narrowed_ids(candidates: list[PluginCandidate]) -> list[str]:
+    """Return plugin ids minus the pure channel-adapter plugins.
+
+    Best-of-three Recipe 3 channel-narrowing. A plugin that declares a
+    non-empty ``activation.on_channels`` is a pure channel adapter — it
+    bridges a messaging platform (Telegram, Discord, …) into the gateway
+    daemon and is dead weight on a surface that serves no channels, i.e.
+    interactive ``oc chat``.
+
+    Every other plugin is kept: tools, providers, memory, skills, and —
+    importantly — channel-*kind* plugins that do NOT declare
+    ``on_channels`` because they also register chat-usable surface
+    (e.g. homeassistant, which registers tools). The opt-in
+    ``on_channels`` annotation, not the manifest ``kind``, is what makes
+    a plugin narrowable, so a tool-providing channel plugin is never
+    dropped by accident.
+
+    Result is alphabetically sorted for determinism. This is the
+    deny-list half of activation; :func:`plan_activations` is the
+    allow-list half used for trigger-driven activation.
+    """
+    kept: list[str] = []
+    for cand in candidates:
+        activation = cand.manifest.activation
+        if activation is not None and activation.on_channels:
+            continue  # annotated channel adapter — narrowed out
+        kept.append(cand.manifest.id)
+    return sorted(kept)

@@ -2,6 +2,7 @@
   "id": "wecom-callback",
   "name": "WeCom Callback Channel",
   "kind": "channel",
+  "activation": {"on_channels": ["wecom-callback"]},
   "version": "0.1.0",
   "entry": "plugin",
   "description": "WeCom (Enterprise WeChat / 企业微信) outbound via Group Chat Bot webhook. Simpler than full WeCom (no corp/agent/secret triple). Inbound + full WeCom support deferred.",

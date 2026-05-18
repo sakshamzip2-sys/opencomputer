@@ -66,6 +66,31 @@ Skills are a separate category — they live under
 `kind=skill` plugins (that enum value exists for forward-compat but no
 plugin currently uses it).
 
+### Channel-narrowing (`activation.on_channels`)
+
+A `channel` plugin that is a *pure adapter* — it only bridges a
+messaging platform and registers no tools — should declare an
+`activation` block naming the channel(s) it serves:
+
+```json
+"kind": "channel",
+"activation": {"on_channels": ["telegram"]},
+```
+
+This opts the plugin into **channel-narrowing**. With the
+`OPENCOMPUTER_PLUGIN_ACTIVATION=plan` environment flag set, channel-free
+surfaces — interactive `oc chat` and headless one-shot turns — skip
+loading every `on_channels`-annotated adapter, since those surfaces
+never serve a messaging platform. It is a cold-start win and is
+opt-in per plugin: a `channel`-kind plugin that *also* registers tools
+(e.g. `homeassistant`) must **not** declare `on_channels`, so its tools
+stay available in `oc chat`.
+
+The flag is **off by default** — behaviour is unchanged until a user
+sets it. `oc gateway` (the surface that *does* serve channels) always
+loads every adapter regardless of the flag. A user-curated
+`profile.yaml` plugin filter is never second-guessed by narrowing.
+
 ## 4. The `register(api)` contract
 
 Every plugin's entry module (`entry` field in the manifest) exports a

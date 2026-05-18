@@ -910,17 +910,21 @@ def _activation_mode() -> str:
 
 
 def _activation_narrowed_enabled_ids(search_paths):  # type: ignore[no-untyped-def]
-    """Build a narrowed ``enabled_ids`` set from the activation planner.
+    """Build a channel-narrowed ``enabled_ids`` set.
 
-    Best-of-three Recipe 3. Only consulted when the user has NO explicit
-    ``profile.yaml`` plugin filter and ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan``.
-    Reads each plugin's ``manifest.activation`` block and the current
-    provider/model triggers, then returns the deterministic set of
-    plugin ids whose triggers fire.
+    Best-of-three Recipe 3 (channel-narrowing). Only consulted when the
+    user has NO explicit ``profile.yaml`` plugin filter, the surface
+    serves no channels, and ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan``.
 
-    The result is intentionally a *seed* set: ``load_all`` still unions
-    in ``enabled_by_default`` plugins (Layer D) and model-matched
-    plugins (Layer C), so a session never loses its provider.
+    Returns every discovered plugin id EXCEPT the pure channel-adapter
+    plugins — those declaring a non-empty ``activation.on_channels``.
+    Channel adapters bridge a messaging platform into the gateway
+    daemon; on interactive ``oc chat`` (which serves no channels) they
+    are dead weight. Every tool / provider / memory / skill plugin —
+    and every channel-*kind* plugin that registers chat-usable surface
+    instead of declaring ``on_channels`` — is kept. ``coding-harness``
+    in particular always survives, so OC's "install coding-harness →
+    coding agent" positioning is unaffected.
 
     Returns ``None`` on any failure — the caller then falls back to
     loading everything. Narrowing must never wedge startup.
@@ -929,57 +933,55 @@ def _activation_narrowed_enabled_ids(search_paths):  # type: ignore[no-untyped-d
 
     log = logging.getLogger("opencomputer.cli")
     try:
-        from opencomputer.agent.config import _home, load_config_for_profile
         from opencomputer.plugins.activation_planner import (
-            ActivationTriggers,
-            plan_activations,
+            channel_narrowed_ids,
         )
         from opencomputer.plugins.discovery import discover
 
         candidates = discover(search_paths)
-        try:
-            cfg = load_config_for_profile(_home())
-            provider = getattr(cfg.model, "provider", "") or ""
-            model = getattr(cfg.model, "model", "") or ""
-        except Exception as exc:  # noqa: BLE001
-            log.warning("activation planner: config read failed (%s)", exc)
-            provider, model = "", ""
-        triggers = ActivationTriggers(
-            active_providers=frozenset(p for p in (provider,) if p),
-            active_model=model,
-        )
-        planned = plan_activations(candidates, triggers)
+        narrowed = channel_narrowed_ids(candidates)
+        dropped = len(candidates) - len(narrowed)
         log.info(
-            "plugin activation planner: %d/%d plugins triggered "
-            "(provider=%r model=%r); load_all then unions in "
-            "enabled_by_default + model-matched plugins",
-            len(planned),
+            "channel-narrowing: dropped %d channel-adapter plugin(s) "
+            "from this channel-free surface; %d/%d plugins eligible",
+            dropped,
+            len(narrowed),
             len(candidates),
-            provider,
-            model,
         )
-        return frozenset(planned)
+        return frozenset(narrowed)
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "activation planner failed — loading all plugins: %s", exc
+            "channel-narrowing failed — loading all plugins: %s", exc
         )
         return None
 
 
-def _discover_plugins() -> int:
+def _discover_plugins(*, narrow_channels: bool = False) -> int:
     """Discover + load plugins from the canonical search paths. Returns count loaded.
 
     See ``opencomputer.plugins.discovery.standard_search_paths`` for the
     shared search-order contract (profile-local → global → bundled).
+
+    ``narrow_channels`` (best-of-three Recipe 3): when ``True`` AND the
+    user has no explicit ``profile.yaml`` filter AND
+    ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan``, pure channel-adapter
+    plugins are dropped — a cold-start win for a surface that serves no
+    channels (interactive ``oc chat``). Defaults to ``False`` so the
+    gateway, which IS the channel surface, keeps loading every adapter.
     """
     from opencomputer.plugins.discovery import standard_search_paths
 
     search_paths = standard_search_paths()
     enabled = _resolve_plugin_filter()
-    # Best-of-three Recipe 3 — activation narrowing. Only when the user
-    # has no explicit filter (``enabled is None``) and the flag opts in.
-    # A user-curated profile.yaml is never second-guessed.
-    if enabled is None and _activation_mode() == "plan":
+    # Best-of-three Recipe 3 — channel-narrowing. Only when the caller
+    # opts in (a channel-free surface), the user has NO explicit filter,
+    # and the flag is set. ``_resolve_plugin_filter`` expresses "no
+    # filter" as either ``None`` (config missing/malformed) or ``"*"``
+    # (wildcard) — both must enable narrowing. A real frozenset means
+    # the user curated a profile.yaml filter; that is never
+    # second-guessed.
+    no_user_filter = enabled is None or enabled == "*"
+    if narrow_channels and no_user_filter and _activation_mode() == "plan":
         narrowed = _activation_narrowed_enabled_ids(search_paths)
         if narrowed is not None:
             enabled = narrowed
@@ -1825,7 +1827,9 @@ def _run_chat_session(
     from opencomputer.mcp.client import MCPManager
 
     _register_builtin_tools()
-    _discover_plugins()
+    # Best-of-three Recipe 3 — interactive chat serves no channels, so
+    # channel-adapter plugins are dropped under the activation flag.
+    _discover_plugins(narrow_channels=True)
     _apply_model_overrides()
     _discover_and_register_agents()
     n_settings_hooks = _register_settings_hooks(cfg)
@@ -3563,7 +3567,9 @@ def _run_oneshot_turn(
     _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
-    _discover_plugins()
+    # Best-of-three Recipe 3 — a headless one-shot turn serves no
+    # channels either; narrow channel adapters out for a faster start.
+    _discover_plugins(narrow_channels=True)
     _apply_model_overrides()
     _discover_and_register_agents()
     _register_settings_hooks(cfg)

@@ -6,6 +6,7 @@
   "author": "Saksham",
   "license": "MIT",
   "kind": "channel",
+  "activation": {"on_channels": ["telegram"]},
   "entry": "plugin",
   "tool_names": [],
   "setup": {

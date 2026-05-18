@@ -2,6 +2,7 @@
   "id": "teams",
   "name": "Microsoft Teams Channel",
   "kind": "channel",
+  "activation": {"on_channels": ["teams"]},
   "version": "0.1.0",
   "entry": "plugin",
   "description": "Microsoft Teams via Incoming Webhook (outbound only). Inbound message receive needs Bot Framework registration — deferred to a follow-up.",

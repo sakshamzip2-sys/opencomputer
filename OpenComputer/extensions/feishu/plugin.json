@@ -2,6 +2,7 @@
   "id": "feishu",
   "name": "Feishu / Lark Channel",
   "kind": "channel",
+  "activation": {"on_channels": ["feishu"]},
   "version": "0.1.0",
   "entry": "plugin",
   "description": "Feishu / Lark (飞书) outbound via Custom Robot webhook with optional HMAC-SHA256 signing. Inbound deferred.",
