@@ -116,8 +116,8 @@ class PromptCheckpoint:
 #: v16 = delegate-lineage (2026-05-10) — ``sessions.parent_session_id``
 #: + ``subagents`` table for cross-process registry persistence and
 #: ``oc sessions tree`` lineage walks.
-#: v17 = source-column (2026-05-10) — ``sessions.source`` so oc-webui's
-#: hermes-port sidebar can distinguish CLI/messaging/webui rows. Existing
+#: v17 = source-column (2026-05-10) — ``sessions.source`` so the
+#: workspace sidebar can distinguish CLI/messaging/browser rows. Existing
 #: rows are backfilled with ``'cli'`` (the historical de-facto source).
 #: v18 = compactions-count (2026-05-10) — ``sessions.compactions_count``
 #: tracks the number of times :class:`CompactionEngine` rewrote the
@@ -145,7 +145,11 @@ class PromptCheckpoint:
 #: turn. Operational telemetry feeding ``oc gateway diagnose``; plain
 #: append table in ``audit.db`` (no HMAC chain, no append-only trigger
 #: — mirrors v20 ``tool_loop_trips``).
-SCHEMA_VERSION = 21
+#: v22 = source-rename (2026-05-18) — retag ``sessions.source`` rows from
+#: the removed ``oc webui`` command's legacy ``'webui'`` label to
+#: ``'workspace'`` (the surviving browser surface). Pure UPDATE of an
+#: existing column; no schema-shape change.
+SCHEMA_VERSION = 22
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -178,9 +182,9 @@ CREATE TABLE IF NOT EXISTS sessions (
                                          -- spawned by a delegate() call, this points at the
                                          -- parent's session id; NULL for root sessions.
     source            TEXT,              -- source-column (2026-05-10): origin of the row,
-                                         -- one of 'cli' | 'webui' | 'discord' | 'telegram' |
+                                         -- one of 'cli' | 'workspace' | 'discord' | 'telegram' |
                                          -- 'slack' | 'cron' | 'tool' | 'api_server'. Used by
-                                         -- oc-webui's sidebar to filter/group rows.
+                                         -- the workspace sidebar to filter/group rows.
     compactions_count INTEGER DEFAULT 0, -- compactions-count (v18, 2026-05-10): number of
                                          -- times CompactionEngine rewrote this session's
                                          -- message history. Bumped by AgentLoop after
@@ -386,6 +390,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (18, 19): "_migrate_v18_to_v19",
     (19, 20): "_migrate_v19_to_v20",
     (20, 21): "_migrate_v20_to_v21",
+    (21, 22): "_migrate_v21_to_v22",
 }
 
 
@@ -1045,10 +1050,10 @@ def _migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
-    """source-column (2026-05-10) — add ``sessions.source`` for oc-webui sidebar.
+    """source-column (2026-05-10) — add ``sessions.source`` for the workspace sidebar.
 
-    Hermes-webui's ``api/agent_sessions.py`` filters and groups sidebar
-    rows by ``sessions.source`` (``'cli' | 'webui' | 'discord' | ...``).
+    The workspace's ``api/agent_sessions.py`` filters and groups sidebar
+    rows by ``sessions.source`` (``'cli' | 'workspace' | 'discord' | ...``).
     Without the column, the helper returns ``[]`` and the sidebar can
     never show CLI-imported sessions. This migration:
 
@@ -1195,6 +1200,24 @@ def _migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_gateway_parity_log_mechanism
             ON gateway_parity_log(mechanism_id, ts);
         """
+    )
+
+
+def _migrate_v21_to_v22(conn: sqlite3.Connection) -> None:
+    """source-rename (2026-05-18) — retag ``sessions.source`` 'webui' → 'workspace'.
+
+    The ``oc webui`` command was removed; ``oc workspace`` is the only
+    browser surface. Sessions created through the dashboard's Hermes-shape
+    API were tagged ``source='webui'`` — a name that now points at nothing.
+    This migration retags historical rows so the workspace sidebar groups
+    them under the accurate label.
+
+    Idempotent: a plain UPDATE that matches nothing once every row is
+    already 'workspace'. The column itself is untouched — no schema-shape
+    change, O(rows-matched) cost.
+    """
+    conn.execute(
+        "UPDATE sessions SET source = 'workspace' WHERE source = 'webui'"
     )
 
 
