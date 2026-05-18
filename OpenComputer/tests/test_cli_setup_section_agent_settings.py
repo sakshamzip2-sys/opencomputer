@@ -24,10 +24,12 @@ def test_recommended_defaults_writes_loop_config(monkeypatch, tmp_path):
 
     assert result == SectionResult.CONFIGURED
     loop = ctx.config["loop"]
-    assert loop["max_iterations"] == 90
+    assert loop["max_iterations"] == 100
     assert loop["parallel_tools"] is True
-    assert loop["inactivity_timeout_s"] == 300
-    assert loop["iteration_timeout_s"] == 1800
+    assert loop["inactivity_timeout_s"] == 1800
+    assert loop["iteration_timeout_s"] == 7200
+    assert loop["delegation_max_iterations"] == 100
+    assert loop["max_delegation_depth"] == 4
 
 
 def test_skip_keeps_existing_loop_config(monkeypatch, tmp_path):
@@ -54,7 +56,7 @@ def test_apply_overwrites_partial_existing_config(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path, config={"loop": {"max_iterations": 20}})
     ag.run_agent_settings_section(ctx)
 
-    assert ctx.config["loop"]["max_iterations"] == 90
+    assert ctx.config["loop"]["max_iterations"] == 100
 
 
 def test_apply_summary_printed(monkeypatch, tmp_path, capsys):
@@ -66,8 +68,8 @@ def test_apply_summary_printed(monkeypatch, tmp_path, capsys):
     ag.run_agent_settings_section(ctx)
 
     out = capsys.readouterr().out
-    assert "90" in out, "summary should mention max_iterations"
-    assert "300" in out or "5 min" in out, "summary mentions inactivity timeout"
+    assert "100" in out, "summary should mention max_iterations"
+    assert "1800" in out or "30 min" in out, "summary mentions inactivity timeout"
 
 
 def test_is_configured_returns_true_when_loop_block_exists(tmp_path):

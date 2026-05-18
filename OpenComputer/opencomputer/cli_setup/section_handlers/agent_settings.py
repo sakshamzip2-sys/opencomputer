@@ -4,13 +4,16 @@ from __future__ import annotations
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, radiolist
 
+# Mirrors the live LoopConfig defaults (opencomputer/agent/config.py).
+# Keep in sync when those caps change — these values get pinned into the
+# user's config.yaml, so stale entries here become stale user configs.
 _RECOMMENDED: dict[str, object] = {
-    "max_iterations": 90,
+    "max_iterations": 100,
     "parallel_tools": True,
-    "inactivity_timeout_s": 300,
-    "iteration_timeout_s": 1800,
-    "delegation_max_iterations": 50,
-    "max_delegation_depth": 2,
+    "inactivity_timeout_s": 1800,
+    "iteration_timeout_s": 7200,
+    "delegation_max_iterations": 100,
+    "max_delegation_depth": 4,
     "context_engine": "compressor",
 }
 
@@ -110,7 +113,7 @@ def run_agent_settings_section(ctx: WizardCtx) -> SectionResult:
         "Configure agent settings?",
         choices,
         default=0,
-        description="Recommended: 90 iterations, all tool progress, compression at 0.5.",
+        description="Recommended: 100 iterations, all tool progress, compression at 0.5.",
     )
     action = choices[idx].value
     if action == "skip":
@@ -118,9 +121,9 @@ def run_agent_settings_section(ctx: WizardCtx) -> SectionResult:
     if action == "apply":
         _apply_recommended(ctx)
         print("  ✓ Applied recommended defaults:")
-        print("      Max iterations: 90")
+        print("      Max iterations: 100")
         print("      Tool progress: all")
-        print("      Inactivity timeout: 300s (5 min)")
+        print("      Inactivity timeout: 1800s (30 min)")
         print("      Compression threshold: 0.50")
         print("      Session reset: inactivity + daily")
         return SectionResult.CONFIGURED
