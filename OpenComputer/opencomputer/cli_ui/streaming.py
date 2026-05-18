@@ -92,6 +92,29 @@ def _skin_color(key: str, fallback: str) -> str:
     return val
 
 
+_INDICATOR_OVERRIDE_WARNED = False
+
+
+def _warn_indicator_override_once(exc: BaseException) -> None:
+    """Log a busy-indicator-override failure exactly once per process.
+
+    MEDIUM (review followup): ``_skin_spinner_text`` runs on the
+    streaming render hot path, so per-frame logging would spam — but a
+    silent ``pass`` hides a genuinely broken ``/indicator`` override
+    (gotcha 13). Once per process is debuggable without being noise.
+    """
+    global _INDICATOR_OVERRIDE_WARNED
+    if _INDICATOR_OVERRIDE_WARNED:
+        return
+    _INDICATOR_OVERRIDE_WARNED = True
+    import logging
+
+    logging.getLogger("opencomputer.cli_ui.streaming").warning(
+        "busy-indicator override failed (%s) — falling back to the "
+        "skin's spinner faces", exc
+    )
+
+
 def _skin_spinner_text(*, phase: Literal["waiting", "thinking"]) -> str:
     """Build the spinner text using the active skin's face/verb cycles.
 
@@ -144,8 +167,8 @@ def _skin_spinner_text(*, phase: Literal["waiting", "thinking"]) -> str:
         if current_indicator_style():
             face = current_indicator_face()
             return f"{face} {verb}…" if face else f"{verb.capitalize()}…"
-    except Exception:  # noqa: BLE001 — never break the render path
-        pass
+    except Exception as exc:  # noqa: BLE001 — never break the render path
+        _warn_indicator_override_once(exc)
     if not faces:
         # No face cycle configured — fall back to the legacy verb-only
         # spinner so user-authored skins that omit faces still get the

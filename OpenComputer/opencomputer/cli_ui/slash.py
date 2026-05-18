@@ -380,3 +380,20 @@ def register_extra_commands(defs: list[CommandDef]) -> None:
     SLASH_REGISTRY.extend(defs)
     global _LOOKUP
     _LOOKUP = _build_lookup()
+
+
+def unregister_extra_commands(names: list[str]) -> None:
+    """Remove CommandDefs by name — the inverse of
+    :func:`register_extra_commands`.
+
+    Used by the markdown-command loader to drop the entries a prior
+    discovery registered, so a deleted ``*.md`` file's command actually
+    disappears on re-discovery. ``register_extra_commands`` only upserts
+    incoming names; it never removes a command that is now absent.
+    """
+    if not names:
+        return
+    drop = set(names)
+    SLASH_REGISTRY[:] = [c for c in SLASH_REGISTRY if c.name not in drop]
+    global _LOOKUP
+    _LOOKUP = _build_lookup()

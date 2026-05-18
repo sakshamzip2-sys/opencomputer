@@ -249,3 +249,40 @@ class TestReloadAll:
         # p1 swapped, p2 left in place (failed)
         assert reg.loaded[0] is not p1
         assert reg.loaded[1] is p2
+
+    @pytest.mark.asyncio
+    async def test_reload_all_multi_failure_count_is_correct(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I7 (review followup) — the existing test covers 1-of-2; this
+        pins the counter for N failures of M: 3 of 4 fail, the summary
+        must report 'reloaded 1/4 plugins, 3 failed' and name every
+        failed plugin, with only the one success swapped in place."""
+        plugins = [
+            _FakeLoadedPlugin(_FakeCandidate(_FakeManifest(f"p{i}")))
+            for i in range(1, 5)
+        ]
+        reg = _FakeRegistry(loaded=list(plugins), shared_api=object())
+
+        from opencomputer.plugins import loader as loader_mod
+
+        def _fake_reload(loaded, api, **_kw):  # noqa: ANN001, ANN002, ANN003
+            pid = loaded.candidate.manifest.id
+            if pid in ("p2", "p3", "p4"):
+                return (None, f"boom-{pid}")
+            return (_FakeLoadedPlugin(loaded.candidate), f"reloaded {pid}")
+
+        monkeypatch.setattr(loader_mod, "reload_plugin", _fake_reload)
+
+        result = await PluginReloadCommand().execute(
+            "reload all", _runtime(reg)
+        )
+        assert "reloaded 1/4 plugins" in result.output
+        assert "3 failed" in result.output
+        for pid in ("p2", "p3", "p4"):
+            assert pid in result.output
+        # only p1 swapped; the 3 failures left in place
+        assert reg.loaded[0] is not plugins[0]
+        assert reg.loaded[1] is plugins[1]
+        assert reg.loaded[2] is plugins[2]
+        assert reg.loaded[3] is plugins[3]

@@ -105,17 +105,36 @@ def read_cache(
     """
     p = path or cache_path()
     if not p.is_file():
-        return None
+        return None  # missing cache — normal, silent
+    _log = logging.getLogger("opencomputer.plugins.update_check")
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        # MEDIUM (review followup): a corrupted/unreadable cache is
+        # distinct from a missing one. Surface it — a truncated write or
+        # a post-handoff permission flip would otherwise look like a
+        # healthy cache and silently re-poll the network every call.
+        _log.warning(
+            "plugin update cache at %s is unreadable (%s) — refetching",
+            p, exc,
+        )
         return None
-    ts = raw.get("checked_at", 0) if isinstance(raw, dict) else 0
+    if not isinstance(raw, dict):
+        _log.warning(
+            "plugin update cache at %s is malformed (not an object) — "
+            "refetching", p,
+        )
+        return None
+    ts = raw.get("checked_at", 0)
     now_ts = now if now is not None else time.time()
     if not isinstance(ts, (int, float)) or now_ts - ts > CACHE_TTL_SECONDS:
         return None
     entries = raw.get("updates", [])
     if not isinstance(entries, list):
+        _log.warning(
+            "plugin update cache at %s has a malformed 'updates' field "
+            "— refetching", p,
+        )
         return None
     out: list[PluginUpdate] = []
     for e in entries:

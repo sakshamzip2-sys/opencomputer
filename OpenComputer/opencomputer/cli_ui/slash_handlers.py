@@ -28,6 +28,7 @@ from opencomputer.cli_ui.slash import (
     is_slash_command,
     register_extra_commands,
     resolve_command,
+    unregister_extra_commands,
 )
 from plugin_sdk.runtime_context import RuntimeContext
 
@@ -1812,7 +1813,24 @@ def dispatch_slash(
     # a stray ``[`` would lose data to Rich markup parsing. Mirrors
     # ``dispatch_agent_slash_to_console``.
     bridge_name = cmd.name if cmd is not None else name.lower()
-    found, output = ctx.on_builtin_dispatch(bridge_name, " ".join(args))
+    # HIGH (review followup): the bridge runs an arbitrary System-A
+    # command and can raise — most importantly ``TimeoutError`` from the
+    # ``_on_builtin_dispatch`` 30s ``result()`` wait on a slow command
+    # (and ``CancelledError`` on a Ctrl+C arriving mid-dispatch). An
+    # uncaught raise here kills the whole ``oc chat`` REPL turn. Catch,
+    # log at WARNING, surface the error to the user, and consume the
+    # command — a slow/broken built-in must degrade gracefully, never
+    # crash the input loop.
+    try:
+        found, output = ctx.on_builtin_dispatch(bridge_name, " ".join(args))
+    except Exception as exc:  # noqa: BLE001 — a bridge fault must not kill the REPL
+        import logging
+
+        logging.getLogger("opencomputer.cli_ui.slash_handlers").warning(
+            "built-in command bridge failed for /%s: %s", bridge_name, exc
+        )
+        ctx.console.print(f"[red]/{bridge_name} failed:[/red] {exc}")
+        return SlashResult(handled=True)
     if found:
         if output:
             ctx.console.print(output, markup=False)
@@ -1888,6 +1906,13 @@ def _make_markdown_handler(
     return _handler
 
 
+# Names of markdown commands the last ``install_markdown_commands()``
+# call registered — tracked so a re-run can drop the ones whose ``.md``
+# file was deleted since (``register_extra_commands`` only upserts the
+# incoming set; it never removes a now-absent command).
+_INSTALLED_MARKDOWN_NAMES: list[str] = []
+
+
 def install_markdown_commands(
     profile_home: Path,
     *,
@@ -1898,11 +1923,25 @@ def install_markdown_commands(
     Called once at chat-session boot. Returns the discovered
     :class:`~opencomputer.agent.markdown_commands.MarkdownCommand` list
     (empty when there are none) so the caller can report a count.
-    Idempotent — re-running replaces prior markdown registrations.
+
+    Idempotent — re-running fully replaces the prior markdown set: a
+    command whose ``.md`` file was deleted since the last call is
+    removed from both ``_HANDLERS`` and the slash registry, not left as
+    a ghost that still autocompletes and dispatches.
     """
+    global _INSTALLED_MARKDOWN_NAMES
     from opencomputer.agent.markdown_commands import (
         discover_markdown_commands,
     )
+
+    # MEDIUM (review followup): drop the prior run's markdown commands
+    # before re-discovering — a .md file deleted between calls must make
+    # its /command disappear.
+    if _INSTALLED_MARKDOWN_NAMES:
+        for stale in _INSTALLED_MARKDOWN_NAMES:
+            _HANDLERS.pop(stale, None)
+        unregister_extra_commands(_INSTALLED_MARKDOWN_NAMES)
+        _INSTALLED_MARKDOWN_NAMES = []
 
     cmds = discover_markdown_commands(profile_home, project_cwd=project_cwd)
     if not cmds:
@@ -1921,6 +1960,7 @@ def install_markdown_commands(
             )
         )
         _HANDLERS[md.name] = _make_markdown_handler(md)
+        _INSTALLED_MARKDOWN_NAMES.append(md.name)
     register_extra_commands(defs)
     return cmds
 
@@ -1949,7 +1989,17 @@ def sync_builtin_commands() -> list[str]:
     """
     try:
         from opencomputer.agent.slash_commands import get_registered_commands
-    except Exception:  # noqa: BLE001 — never block boot on import drift
+    except Exception as exc:  # noqa: BLE001 — never block boot on import drift
+        import logging
+
+        # MEDIUM (review followup): never block boot on import drift —
+        # but a silent return hides that every System-A built-in just
+        # vanished from /help. Surface it at WARN.
+        logging.getLogger("opencomputer.cli_ui.slash_handlers").warning(
+            "System-A command sync skipped — could not import the agent "
+            "slash registry (%s); built-in commands will be missing from "
+            "/help and autocomplete", exc
+        )
         return []
 
     # Dedup System-A entries: aliases register the same instance under
