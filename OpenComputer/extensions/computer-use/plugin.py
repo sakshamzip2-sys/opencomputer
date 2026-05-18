@@ -6,11 +6,13 @@ macOS-only feature. On non-macOS hosts the plugin still loads cleanly (so
 reports a clean ``skip`` and the tool is not surfaced to the model.
 
 Sibling-import discipline: the OC plugin loader puts the plugin root on
-``sys.path[0]``, so flat imports (``from tool import ComputerUseTool``)
-resolve against THIS directory. To dodge the ``sys.modules`` collision other
-plugins burned on (multiple plugins shipping ``backend.py`` / ``schema.py``),
-we load the entry's own siblings via ``importlib`` with synthetic
-plugin-scoped module names — the same defensive pattern ``open-design`` uses.
+``sys.path[0]``, so flat imports (``from cu_tool import ComputerUseTool``)
+resolve against THIS directory. Every internal module is prefixed ``cu_``
+(``cu_backend.py`` / ``cu_schema.py`` / …) so no bare name can collide in
+``sys.modules`` with another plugin shipping a generic ``backend.py`` /
+``schema.py`` — the same unique-filename pattern ``browser-harness`` uses.
+The entry itself additionally loads its siblings via ``importlib`` with
+synthetic plugin-scoped module names for belt-and-braces isolation.
 """
 
 from __future__ import annotations
@@ -43,8 +45,8 @@ def _load_local(mod_name: str, file_name: str) -> Any:
 
 def register(api: Any) -> None:  # PluginAPI duck-typed
     """Register the ComputerUseTool, the CLI verb, and the doctor row."""
-    # Ensure the plugin root is importable so ``tool.py``'s own
-    # ``from backend import ...`` siblings resolve (the loader normally
+    # Ensure the plugin root is importable so ``cu_tool.py``'s own
+    # ``from cu_backend import ...`` siblings resolve (the loader normally
     # does this; belt-and-braces for the test conftest path).
     root = str(_PLUGIN_ROOT)
     if root not in sys.path:
@@ -53,7 +55,7 @@ def register(api: Any) -> None:  # PluginAPI duck-typed
     # ── CLI: `oc computer-use …` ───────────────────────────────────
     if hasattr(api, "register_cli_command"):
         try:
-            cli_mod = _load_local("cli", "cli.py")
+            cli_mod = _load_local("cli", "cu_cli.py")
             api.register_cli_command("computer-use", cli_mod.app)
         except Exception as exc:  # noqa: BLE001
             _log.warning("computer-use: CLI registration failed: %s", exc)
@@ -61,7 +63,7 @@ def register(api: Any) -> None:  # PluginAPI duck-typed
     # ── Tool: `computer_use` (macOS only) ──────────────────────────
     if sys.platform == "darwin":
         try:
-            tool_mod = _load_local("tool", "tool.py")
+            tool_mod = _load_local("tool", "cu_tool.py")
             api.register_tool(tool_mod.ComputerUseTool())
         except Exception as exc:  # noqa: BLE001
             _log.warning("computer-use: tool registration failed: %s", exc)
@@ -73,7 +75,7 @@ def register(api: Any) -> None:  # PluginAPI duck-typed
         # the guidance is only present when the tool actually is.
         if hasattr(api, "register_injection_provider"):
             try:
-                injection_mod = _load_local("injection", "injection.py")
+                injection_mod = _load_local("injection", "cu_injection.py")
                 api.register_injection_provider(
                     injection_mod.ComputerUseGuidanceProvider()
                 )
@@ -95,7 +97,7 @@ def register(api: Any) -> None:  # PluginAPI duck-typed
         try:
             from plugin_sdk.doctor import HealthContribution
 
-            doctor_mod = _load_local("doctor", "doctor.py")
+            doctor_mod = _load_local("doctor", "cu_doctor.py")
             api.register_doctor_contribution(
                 HealthContribution(
                     id="computer-use",

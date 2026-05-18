@@ -2,7 +2,7 @@
   "id": "computer-use",
   "name": "Computer Use",
   "version": "0.1.0",
-  "description": "macOS-only — universal background desktop control via cua-driver. Registers a single `computer_use` tool (capture / click / type / scroll / key / set_value / list_apps / focus_app) that drives any macOS app WITHOUT stealing the user's cursor, keyboard focus, or Space. Vision models get set-of-mark captures with numbered element overlays; text-only models drive via the accessibility tree. Requires the cua-driver binary: `oc computer-use install`.",
+  "description": "macOS-only — universal background desktop control via cua-driver. Registers a single `computer_use` tool (capture / click / type / scroll / key / set_value / list_apps / focus_app) that drives any macOS app WITHOUT stealing the user's cursor, keyboard focus, or Space. Vision models get set-of-mark captures — a plain screenshot plus an indexed element list (numbers NOT drawn on the image); text-only models drive via the accessibility tree. Requires the cua-driver binary: `oc computer-use install`.",
   "author": "OpenComputer",
   "license": "MIT",
   "kind": "tool",

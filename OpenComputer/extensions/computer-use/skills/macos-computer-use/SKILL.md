@@ -25,13 +25,14 @@ no provider-native schema to learn.
 computer_use(action="capture", mode="som", app="Safari")
 ```
 
-Returns a screenshot with numbered overlays on every interactable element
-AND an accessibility-tree index like:
+Returns a plain screenshot AND an indexed list of every interactable
+element. The index numbers are NOT drawn onto the screenshot — match each
+element to what you see in the image by its role and label:
 
 ```
-#1  AXButton 'Back' @ (12, 80, 28, 28) [Safari]
-#2  AXTextField 'Address and Search' @ (80, 80, 900, 32) [Safari]
-#7  AXLink 'Sign In' @ (900, 420, 80, 24) [Safari]
+#1  AXButton 'Back' [Safari]
+#2  AXTextField 'Address and Search' [Safari]
+#7  AXLink 'Sign In' [Safari]
 ...
 ```
 
@@ -57,9 +58,9 @@ computer_use(action="click", element=7, capture_after=True)
 
 | `mode` | Returns | Best for |
 |---|---|---|
-| `som` (default) | Screenshot + numbered overlays + AX index | Vision models; preferred default |
-| `vision` | Plain screenshot | When the SOM overlay interferes with what you want to verify |
-| `ax` | AX tree only, no image | Text-only models, or when you don't need to see pixels |
+| `som` (default) | Plain screenshot + indexed element list (no numbers drawn on image) | Vision models; preferred default |
+| `vision` | Plain screenshot, no element list | When you only need pixels and will click by coordinate |
+| `ax` | Element list only, no image | Text-only models, or when you don't need to see pixels |
 
 ## Actions
 
@@ -68,8 +69,8 @@ capture           mode=som|vision|ax   app=…  (default: current app)
 click             element=N     OR     coordinate=[x, y]
 double_click      element=N     OR     coordinate=[x, y]
 right_click       element=N     OR     coordinate=[x, y]
-middle_click      element=N     OR     coordinate=[x, y]
-drag              from_element=N, to_element=M        (or from/to_coordinate)
+middle_click      UNSUPPORTED — no macOS middle-click primitive; fails cleanly
+drag              from_coordinate=[x,y], to_coordinate=[x,y]   (pixel-only)
 scroll            direction=up|down|left|right   amount=3 (ticks)
 type              text="…"
 key               keys="cmd+s" | "return" | "escape" | "ctrl+alt+t"
@@ -108,13 +109,9 @@ held keys.
 
 ## Drag and drop
 
-Prefer element indices:
-
-```
-computer_use(action="drag", from_element=3, to_element=17)
-```
-
-For a rubber-band selection on empty canvas, use coordinates:
+`drag` is **pixel-only** — macOS accessibility has no semantic drag action,
+so element-indexed drag is not supported. Pass window-local screenshot
+pixels for both endpoints (the coordinate space of the capture image):
 
 ```
 computer_use(action="drag",
@@ -122,19 +119,23 @@ computer_use(action="drag",
              to_coordinate=[400, 500])
 ```
 
+Works for rubber-band selection, drag-and-drop, resizing via a handle, and
+scrubbing a slider. To drag an element you saw in a `som` capture, read its
+position off the screenshot image and pass those pixels.
+
 ## Scroll
 
-Scroll the viewport under an element (most common):
+Scroll is driven by synthesized arrow / page keystrokes (`amount` is the
+keystroke repeat count, clamped 1–50). Pass `element=N` to focus a specific
+scrollable element first so the keys land in the right region:
 
 ```
 computer_use(action="scroll", direction="down", amount=5, element=12)
 ```
 
-Or at a specific point:
-
-```
-computer_use(action="scroll", direction="down", amount=3, coordinate=[500, 400])
-```
+Without `element`, scrolling targets whatever the app currently has focused
+(e.g. after a prior click). There is no pixel-addressed scroll mode — a
+`coordinate` passed to `scroll` is ignored.
 
 ## Managing what's focused
 
@@ -195,5 +196,4 @@ your conversation context.
 - File edits — use `Read` / `Write` / `Edit`, not `type` into an editor
   window.
 - Shell commands — use `Bash`, not `type` into Terminal.app.
-</content>
-</invoke>
+

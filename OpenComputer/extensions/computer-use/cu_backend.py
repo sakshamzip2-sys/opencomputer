@@ -21,7 +21,10 @@ class UIElement:
     index: int                       # 1-based SOM index
     role: str                        # AX role (AXButton, AXTextField, ...)
     label: str = ""                  # AXTitle / AXDescription / AXValue snippet
-    bounds: tuple[int, int, int, int] = (0, 0, 0, 0)  # x, y, w, h (logical px)
+    # x, y, w, h in window-local screenshot pixels. The cua-driver backend's
+    # AX-tree Markdown carries no per-element bounds, so it stays (0,0,0,0)
+    # there — element-indexed actions address by `index`, never by `bounds`.
+    bounds: tuple[int, int, int, int] = (0, 0, 0, 0)
     app: str = ""                    # owning bundle ID or app name
     pid: int = 0                     # owning process PID
     window_id: int = 0               # SkyLight / CG window ID
@@ -39,13 +42,17 @@ class CaptureResult:
     At least one of png_b64 / elements is populated depending on capture mode:
       * mode="vision" → png_b64 only
       * mode="ax"     → elements only
-      * mode="som"    → both (default): PNG already has numbered overlays
-                         drawn by the backend, and `elements` holds the
-                         matching index → element mapping.
+      * mode="som"    → both (default): a plain screenshot PNG plus the
+                         `elements` index list. The backend does NOT draw
+                         numbered overlays onto the PNG — `elements` carries
+                         the 1-based index → (role, label) mapping and the
+                         model correlates by role/label. Element-indexed
+                         actions resolve the index server-side, never by
+                         reading a number off the image.
     """
 
     mode: str
-    width: int                      # screenshot width (logical px)
+    width: int                      # screenshot-pixel width (NOT logical pts)
     height: int
     png_b64: str | None = None
     elements: list[UIElement] = field(default_factory=list)
@@ -54,6 +61,11 @@ class CaptureResult:
     window_title: str = ""
     # Raw byte length of the decoded image, for token estimation.
     png_bytes_len: int = 0
+    # Non-empty when the backend could not complete the capture cleanly
+    # (no window found, MCP-side ``isError``, screenshot refused, …). The
+    # tool layer surfaces this so the agent retries instead of silently
+    # treating a failed capture as "0 interactable elements".
+    error: str = ""
 
 
 @dataclass

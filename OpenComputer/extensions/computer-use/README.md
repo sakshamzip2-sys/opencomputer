@@ -48,18 +48,26 @@ One consolidated tool with an `action` discriminator:
 | `capture` | none | screenshot + element index (`mode`: `som` / `vision` / `ax`) |
 | `list_apps` | none | enumerate running apps |
 | `wait` | none | sleep up to 30 s |
-| `click` / `double_click` / `right_click` / `middle_click` | mutating | click by `element` index or `coordinate` |
+| `click` / `double_click` / `right_click` | mutating | click by `element` index or `coordinate` |
+| `middle_click` | — | unsupported — cua-driver 0.1.9 has no middle-click primitive; fails cleanly with an explanatory message |
 | `scroll` | mutating | wheel scroll |
 | `type` | mutating | type text (dangerous shell patterns hard-blocked) |
 | `key` | mutating | key combo, e.g. `cmd+s` (destructive system combos hard-blocked) |
 | `set_value` | mutating | set a popup / slider value directly (no menu open) |
 | `focus_app` | mutating | route input to an app without raising its window |
-| `drag` | mutating | not supported by the cua-driver backend |
+| `drag` | mutating | press-drag-release between pixel coordinates (`from_coordinate`/`to_coordinate`); element-indexed drag is not supported |
 
-Preferred workflow for vision models: `capture(mode='som')` returns a
-screenshot with numbered overlays on every interactable element plus an
-accessibility tree — then `click(element=N)`. Far more reliable than pixel
-coordinates. Text-only models can drive via `mode='ax'` (tree only, no image).
+Preferred workflow for vision models: `capture(mode='som')` returns a plain
+screenshot plus an indexed list of every interactable element (1-based
+index, AX role, label) — then `click(element=N)`. Far more reliable than
+pixel coordinates. The index numbers are not drawn onto the image; the model
+correlates an element to the screenshot by its role and label. Text-only
+models can drive via `mode='ax'` (element list only, no image).
+
+Raw coordinates (`coordinate`, `from_coordinate`, `to_coordinate`) are in
+**window-local screenshot pixels** — the space of the capture image, not
+logical screen points. On a Retina display screenshot pixels are 2x the
+logical points, so always measure off the returned capture image.
 
 ### Screenshot return shape
 
@@ -90,19 +98,23 @@ uses. Captures older than 24 h are pruned automatically.
 |---|---|---|
 | `OPENCOMPUTER_COMPUTER_USE_BACKEND` | `cua` | `cua` or `noop` (tests) |
 | `OPENCOMPUTER_CUA_DRIVER_CMD` | `cua-driver` | binary name / path |
-| `OPENCOMPUTER_CUA_DRIVER_VERSION` | `0.5.0` | version pin reference |
+| `OPENCOMPUTER_CUA_DRIVER_VERSION` | `0.1.9` | version pin reference |
 
 ## Architecture
 
 ```
-plugin.py      register() — surfaces ComputerUseTool + `oc computer-use` CLI + doctor row
-tool.py        ComputerUseTool(BaseTool) — dispatch, safety guards, capture persistence
-backend.py     ComputerUseBackend ABC + UIElement / CaptureResult / ActionResult
-cua_backend.py CuaDriverBackend — MCP stdio client + background asyncio bridge
-schema.py      the OpenAI function-calling schema for `computer_use`
-installer.py   install_cua_driver() — the cua-driver curl-piped installer
-doctor.py      health check (macOS gate, binary present, mcp SDK importable)
-cli.py         `oc computer-use install|status`
+plugin.py         register() — surfaces ComputerUseTool + `oc computer-use` CLI + doctor row
+cu_tool.py        ComputerUseTool(BaseTool) — dispatch, safety guards, capture persistence
+cu_backend.py     ComputerUseBackend ABC + UIElement / CaptureResult / ActionResult
+cu_cua_backend.py CuaDriverBackend — MCP stdio client + background asyncio bridge
+cu_schema.py      the OpenAI function-calling schema for `computer_use`
+cu_installer.py   install_cua_driver() — the cua-driver curl-piped installer
+cu_doctor.py      health check (macOS gate, binary present, mcp SDK importable)
+cu_cli.py         `oc computer-use install|status`
+cu_injection.py   ComputerUseGuidanceProvider — system-prompt workflow + safety guidance
+
+All internal modules carry the `cu_` prefix so no bare module name can collide
+with another plugin in `sys.modules` (the OC unique-filename convention).
 ```
 
 The cua-driver SPIs are not Apple-public and can break on OS updates. Pin a

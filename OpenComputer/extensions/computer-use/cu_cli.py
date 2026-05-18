@@ -10,13 +10,13 @@ loading the heavy MCP machinery.
 from __future__ import annotations
 
 import platform
-import shutil
 
 import typer
 
 # Plugin loader puts the plugin root on sys.path[0] — flat sibling import.
-from installer import (  # type: ignore[import-not-found]  # noqa: E402
+from cu_installer import (  # type: ignore[import-not-found]  # noqa: E402
     cua_driver_version,
+    find_cua_driver,
     install_cua_driver,
 )
 
@@ -46,11 +46,14 @@ def install(
 
 @app.command("status")
 def status() -> None:
-    """Show whether cua-driver is installed and on PATH."""
+    """Show whether cua-driver is installed and resolvable."""
     if platform.system() != "Darwin":
         typer.echo("computer-use is macOS only — unavailable on this platform.")
         raise typer.Exit(code=1)
-    binary = shutil.which("cua-driver")
+    # Resolve via ``find_cua_driver`` — same path the backend / doctor use, so
+    # ``status`` stays accurate when the binary is reachable only via the
+    # upstream installer's ``~/.local/bin`` symlink (not yet on ``$PATH``).
+    binary = find_cua_driver()
     if not binary:
         typer.echo("cua-driver: NOT installed. Run `oc computer-use install`.")
         raise typer.Exit(code=1)

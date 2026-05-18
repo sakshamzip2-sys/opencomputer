@@ -40,7 +40,7 @@ import uuid
 from pathlib import Path
 from typing import Any, ClassVar
 
-from backend import (  # type: ignore[import-not-found]
+from cu_backend import (  # type: ignore[import-not-found]
     ActionResult,
     CaptureResult,
     ComputerUseBackend,
@@ -79,11 +79,14 @@ _BLOCKED_KEY_COMBOS = {
 
 _KEY_ALIASES = {"command": "cmd", "control": "ctrl", "alt": "option", "⌘": "cmd", "⌥": "option"}
 
-# Dangerous text patterns for the `type` action.
+# Dangerous text patterns for free-text-entry actions (`type`, `set_value`).
+# The curl/wget remote-pipe patterns cover BOTH ``| bash`` and ``| sh``
+# (and ``| zsh``) — an attacker piping a fetched script to ``sh`` is exactly
+# as dangerous as piping it to ``bash``, so a ``bash``-only wget rule was a
+# blocklist gap.
 _BLOCKED_TYPE_PATTERNS = [
-    re.compile(r"curl\s+[^|]*\|\s*bash", re.IGNORECASE),
-    re.compile(r"curl\s+[^|]*\|\s*sh", re.IGNORECASE),
-    re.compile(r"wget\s+[^|]*\|\s*bash", re.IGNORECASE),
+    re.compile(r"curl\s+[^|]*\|\s*(?:bash|sh|zsh)\b", re.IGNORECASE),
+    re.compile(r"wget\s+[^|]*\|\s*(?:bash|sh|zsh)\b", re.IGNORECASE),
     re.compile(r"\bsudo\s+rm\s+-[rf]", re.IGNORECASE),
     re.compile(r"\brm\s+-rf\s+/\s*$", re.IGNORECASE),
     re.compile(r":\s*\(\)\s*\{\s*:\|:\s*&\s*\}", re.IGNORECASE),  # fork bomb
@@ -112,21 +115,41 @@ _backend: ComputerUseBackend | None = None
 
 
 def _get_backend() -> ComputerUseBackend:
-    """Return the per-process cached backend, instantiating + starting it once."""
+    """Return the per-process cached backend, instantiating + starting it once.
+
+    The backend is cached ONLY after ``start()`` succeeds. A transient
+    ``start()`` failure (slow ``cua-driver mcp`` init that overruns the 15s
+    session-start timeout, a daemon hiccup) must NOT leave a half-started
+    backend wedged in the module global — every later call would then return
+    that dead instance and surface "session not started" forever, with no
+    recovery short of a process restart. On a start failure the partially
+    constructed backend is stopped (best-effort) and the global stays
+    ``None``, so the very next call retries cleanly.
+    """
     global _backend
     with _backend_lock:
         if _backend is None:
             backend_name = os.environ.get("OPENCOMPUTER_COMPUTER_USE_BACKEND", "cua").lower()
             if backend_name in {"cua", "cua-driver", ""}:
-                from cua_backend import CuaDriverBackend  # type: ignore[import-not-found]
-                _backend = CuaDriverBackend()
+                from cu_cua_backend import CuaDriverBackend  # type: ignore[import-not-found]
+                candidate: ComputerUseBackend = CuaDriverBackend()
             elif backend_name == "noop":
-                _backend = NoopBackend()
+                candidate = NoopBackend()
             else:
                 raise RuntimeError(
                     f"Unknown OPENCOMPUTER_COMPUTER_USE_BACKEND={backend_name!r}"
                 )
-            _backend.start()
+            try:
+                candidate.start()
+            except Exception:
+                # Roll back — never cache a backend whose session failed to
+                # come up. A later call (or the daemon settling) can succeed.
+                try:
+                    candidate.stop()
+                except Exception:
+                    pass
+                raise
+            _backend = candidate
         return _backend
 
 
@@ -200,12 +223,14 @@ class NoopBackend(ComputerUseBackend):
 # Screenshot persistence
 # ---------------------------------------------------------------------------
 
-def _screenshots_dir() -> Path:
-    """Directory where capture PNGs are persisted.
+def _screenshots_dir() -> Path | None:
+    """Directory where capture PNGs are persisted, or ``None`` if uncreatable.
 
     Honors ``OPENCOMPUTER_PROFILE_HOME`` (set by the hook env / runtime) so
     captures land inside the active profile; falls back to the system
-    temp dir when no profile home is known.
+    temp dir when no profile home is known. Returns ``None`` (rather than
+    raising) when the directory cannot be created — a non-writable cache
+    must degrade to "no screenshot path", never kill the whole capture.
     """
     base = os.environ.get("OPENCOMPUTER_PROFILE_HOME")
     if base:
@@ -213,22 +238,33 @@ def _screenshots_dir() -> Path:
     else:
         import tempfile
         out = Path(tempfile.gettempdir()) / "opencomputer_computer_use_screenshots"
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("computer_use screenshot dir uncreatable (%s): %s", out, e)
+        return None
     return out
 
 
 def _cleanup_old_screenshots(directory: Path, max_age_hours: float = 24.0) -> None:
-    """Prune capture PNGs older than ``max_age_hours`` to bound disk usage."""
+    """Prune capture images older than ``max_age_hours`` to bound disk usage.
+
+    Globs both ``.png`` and ``.jpg`` — ``_persist_png`` writes either,
+    depending on whether cua-driver returned PNG or JPEG bytes.
+    """
     cutoff = time.time() - max_age_hours * 3600.0
     try:
-        for p in directory.glob("computer_use_*.png"):
-            try:
-                if p.stat().st_mtime < cutoff:
-                    p.unlink()
-            except OSError:
-                pass
+        stale = [p for p in directory.iterdir()
+                 if p.name.startswith("computer_use_")
+                 and p.suffix in (".png", ".jpg")]
     except OSError:
-        pass
+        return
+    for p in stale:
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
 
 
 def _persist_png(png_b64: str) -> str | None:
@@ -237,9 +273,13 @@ def _persist_png(png_b64: str) -> str | None:
         raw = base64.b64decode(png_b64, validate=False)
     except Exception:
         return None
+    if not raw:
+        return None
     # Detect format from magic bytes — cua-driver may return JPEG or PNG.
     ext = "jpg" if raw[:3] == b"\xff\xd8\xff" else "png"
     directory = _screenshots_dir()
+    if directory is None:
+        return None
     _cleanup_old_screenshots(directory)
     path = directory / f"computer_use_{uuid.uuid4().hex}.{ext}"
     try:
@@ -258,7 +298,12 @@ def _format_elements(elements: list[UIElement], max_lines: int = 40) -> list[str
     out: list[str] = []
     for e in elements[:max_lines]:
         label = e.label.replace("\n", " ")[:60]
-        out.append(f"  #{e.index} {e.role} {label!r} @ {e.bounds}"
+        # The cua-driver backend's AX-tree rendering carries no per-element
+        # pixel bounds — `bounds` is the (0,0,0,0) sentinel there. Emitting
+        # ``@ (0, 0, 0, 0)`` for every row would falsely suggest every
+        # element sits at the origin; only show bounds when they are real.
+        bounds = "" if e.bounds == (0, 0, 0, 0) else f" @ {e.bounds}"
+        out.append(f"  #{e.index} {e.role} {label!r}{bounds}"
                    + (f" [{e.app}]" if e.app else ""))
     if len(elements) > max_lines:
         out.append(f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)")
@@ -298,6 +343,15 @@ def _capture_payload(cap: CaptureResult) -> dict[str, Any]:
         "summary": summary,
         "png_bytes": cap.png_bytes_len,
     }
+    # A failed capture must not masquerade as a clean "0 elements" result —
+    # surface the backend's error so the agent retries (re-list windows,
+    # switch capture mode) instead of acting on stale assumptions.
+    if cap.error:
+        payload["error"] = cap.error
+        payload["hint"] = (
+            "capture did not complete — re-run capture (optionally with a "
+            "different app=) or, for screenshot failures, try mode='ax'."
+        )
     if cap.png_b64 and cap.mode != "ax":
         screenshot_path = _persist_png(cap.png_b64)
         if screenshot_path:
@@ -318,33 +372,57 @@ def _action_payload(res: ActionResult) -> dict[str, Any]:
     return payload
 
 
-def _summarize_action(action: str, args: dict[str, Any]) -> str:
-    if action in {"click", "double_click", "right_click", "middle_click"}:
-        if args.get("element") is not None:
-            return f"{action} element #{args['element']}"
-        coord = args.get("coordinate")
-        if coord:
-            return f"{action} at {tuple(coord)}"
-        return action
-    if action == "drag":
-        src = args.get("from_element") or args.get("from_coordinate")
-        dst = args.get("to_element") or args.get("to_coordinate")
-        return f"drag {src} → {dst}"
-    if action == "scroll":
-        return f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}"
-    if action == "type":
-        text = args.get("text", "")
-        return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "")
-    if action == "key":
-        return f"key {args.get('keys', '')!r}"
-    if action == "focus_app":
-        return f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else "")
-    return action
-
-
 # ---------------------------------------------------------------------------
 # Dispatch — pure functions, exercised directly by tests
 # ---------------------------------------------------------------------------
+
+def _coerce_element(raw: Any) -> int | None:
+    """Coerce an ``element`` / ``from_element`` / ``to_element`` arg to an int.
+
+    The schema types these ``integer``, but ``strict_mode`` is off (the
+    action discriminator makes most params conditionally-unused), so the API
+    does NOT enforce it. A model can hand us ``"14"`` (string), ``14.0``
+    (float), or ``[14]`` (list). cua-driver's MCP ``element_index`` arg is a
+    strict ``integer`` — a mistyped value is a bad-typed MCP call exactly
+    like a mistyped coordinate. Coerce to a clean ``int`` or ``None`` (the
+    "no element index" sentinel) so the backend never forwards a bad type.
+    A bare ``bool`` is rejected: ``True``/``False`` are not element indices
+    even though ``isinstance(True, int)`` holds.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw.is_integer():
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_xy(raw: Any) -> tuple[int, int] | None:
+    """Coerce a ``coordinate``-shaped arg into an ``(x, y)`` int pair.
+
+    ``strict_mode`` is off (the action discriminator makes most params
+    conditionally-unused), so the API does NOT enforce the schema's
+    ``[integer, integer]`` ``minItems/maxItems`` on coordinate fields. A
+    model can therefore hand us a scalar, a one-element list, or strings.
+    Coerce defensively: return a clean ``(x, y)`` or ``None`` — never let a
+    malformed coordinate raise inside ``_dispatch`` or reach the backend as
+    a bad-typed MCP arg.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list | tuple) or len(raw) != 2:
+        return None
+    try:
+        return int(raw[0]), int(raw[1])
+    except (TypeError, ValueError):
+        return None
+
 
 def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) -> dict[str, Any]:
     """Route one action to the backend and return a JSON-serialisable dict."""
@@ -354,11 +432,19 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         mode = str(args.get("mode", "som"))
         if mode not in {"som", "vision", "ax"}:
             return {"error": f"bad mode {mode!r}; use som|vision|ax"}
-        cap = backend.capture(mode=mode, app=args.get("app"))
+        raw_app = args.get("app")
+        # strict_mode is off, so the schema's ``string`` type on ``app`` is
+        # not API-enforced — normalise a non-string/empty form to None so the
+        # backend's ``app.lower()`` filter never trips on a bad type.
+        app = str(raw_app) if isinstance(raw_app, str) and raw_app.strip() else None
+        cap = backend.capture(mode=mode, app=app)
         return _capture_payload(cap)
 
     if action == "wait":
-        seconds = float(args.get("seconds", 1.0))
+        try:
+            seconds = float(args.get("seconds", 1.0))
+        except (TypeError, ValueError):
+            return {"error": "wait `seconds` must be a number"}
         return _action_payload(backend.wait(seconds))
 
     if action == "list_apps":
@@ -366,10 +452,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         return {"apps": apps, "count": len(apps)}
 
     if action == "focus_app":
-        app = args.get("app")
-        if not app:
-            return {"error": "focus_app requires `app`"}
-        res = backend.focus_app(app, raise_window=bool(args.get("raise_window")))
+        raw_app = args.get("app")
+        if not isinstance(raw_app, str) or not raw_app.strip():
+            return {"error": "focus_app requires `app` (a non-empty app name or bundle ID)"}
+        res = backend.focus_app(raw_app, raise_window=bool(args.get("raise_window")))
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action in {"click", "double_click", "right_click", "middle_click"}:
@@ -383,11 +469,11 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
             button = "middle"
         else:
             button = button or "left"
-        element = args.get("element")
-        coord = args.get("coordinate") or (None, None)
-        x, y = (coord[0], coord[1]) if coord and coord[0] is not None else (None, None)
+        element = _coerce_element(args.get("element"))
+        xy = _coerce_xy(args.get("coordinate"))
+        x, y = xy if xy is not None else (None, None)
         res = backend.click(
-            element=element if element is not None else None,
+            element=element,
             x=x, y=y, button=button or "left", click_count=click_count,
             modifiers=args.get("modifiers"),
         )
@@ -395,23 +481,27 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
 
     if action == "drag":
         res = backend.drag(
-            from_element=args.get("from_element"),
-            to_element=args.get("to_element"),
-            from_xy=tuple(args["from_coordinate"]) if args.get("from_coordinate") else None,
-            to_xy=tuple(args["to_coordinate"]) if args.get("to_coordinate") else None,
+            from_element=_coerce_element(args.get("from_element")),
+            to_element=_coerce_element(args.get("to_element")),
+            from_xy=_coerce_xy(args.get("from_coordinate")),
+            to_xy=_coerce_xy(args.get("to_coordinate")),
             button=args.get("button", "left"),
             modifiers=args.get("modifiers"),
         )
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "scroll":
-        coord = args.get("coordinate") or (None, None)
+        xy = _coerce_xy(args.get("coordinate"))
+        try:
+            amount = int(args.get("amount", 3))
+        except (TypeError, ValueError):
+            amount = 3
         res = backend.scroll(
             direction=args.get("direction", "down"),
-            amount=int(args.get("amount", 3)),
-            element=args.get("element"),
-            x=coord[0] if coord and coord[0] is not None else None,
-            y=coord[1] if coord and coord[1] is not None else None,
+            amount=amount,
+            element=_coerce_element(args.get("element")),
+            x=xy[0] if xy is not None else None,
+            y=xy[1] if xy is not None else None,
             modifiers=args.get("modifiers"),
         )
         return _maybe_follow_capture(backend, res, capture_after)
@@ -432,7 +522,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: dict[str, Any]) ->
         set_value = getattr(backend, "set_value", None)
         if set_value is None:
             return {"error": "set_value is not supported by the active backend"}
-        res = set_value(value=str(value), element=args.get("element"))
+        res = set_value(value=str(value), element=_coerce_element(args.get("element")))
         return _maybe_follow_capture(backend, res, capture_after)
 
     return {"error": f"unknown action {action!r}"}
@@ -444,8 +534,18 @@ def _maybe_follow_capture(
     payload = _action_payload(res)
     if not do_capture:
         return payload
+    # The follow-up MUST verify the window the action just touched — not
+    # whatever is frontmost. ``backend.capture(mode='som')`` re-runs
+    # frontmost-first window selection, so a ``type``+``capture_after``
+    # against a backgrounded app would silently come back showing the
+    # frontmost window instead — the model would "verify" the wrong UI.
+    # ``recapture_active`` pins to the sticky pid/window_id the action
+    # addressed. It is a CuaDriverBackend extension; backends without it
+    # (NoopBackend) fall back to the plain frontmost capture.
+    recapture = getattr(backend, "recapture_active", None)
     try:
-        cap = backend.capture(mode="som")
+        cap = recapture(mode="som") if recapture is not None \
+            else backend.capture(mode="som")
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return payload
@@ -463,22 +563,44 @@ def run_computer_use(args: dict[str, Any]) -> dict[str, Any]:
     This is the synchronous core; ``ComputerUseTool.execute`` wraps it in the
     async ``ToolCall``/``ToolResult`` contract.
     """
-    action = (args.get("action") or "").strip().lower()
+    # ``strict_mode`` is off (the action discriminator makes most params
+    # conditionally-unused), so the API does NOT enforce the schema's
+    # ``string`` type on ``action``. A model can hand us ``123``, a list,
+    # or a dict — ``(123 or "").strip()`` raises a raw ``AttributeError``.
+    # ``execute`` would catch that as defence-in-depth, but ``run_computer_use``
+    # is also a direct entry point (tests, and any future caller); it must
+    # never leak a raw exception. Coerce a non-string ``action`` to str so
+    # the validation below (and the unknown-action branch) handles it cleanly.
+    raw_action = args.get("action")
+    if raw_action is None:
+        return {"error": "missing `action`"}
+    action = (raw_action if isinstance(raw_action, str) else str(raw_action)).strip().lower()
     if not action:
         return {"error": "missing `action`"}
 
     # Safety: validate destructive payloads before touching the backend.
-    if action == "type":
-        text = args.get("text", "")
-        pat = _is_blocked_type(text)
+    # Both `type` (text=) and `set_value` (value=) inject arbitrary free
+    # text into a UI element — a Terminal text field accepts a piped-curl
+    # payload just as readily through `set_value` as through `type`, so the
+    # dangerous-shell-pattern guard MUST cover both. Checking only `type`
+    # would leave `set_value` as an open bypass of the hard block.
+    if action in {"type", "set_value"}:
+        injected = args.get("text" if action == "type" else "value", "")
+        pat = _is_blocked_type("" if injected is None else str(injected))
         if pat:
+            field = "type text" if action == "type" else "set_value value"
             return {
-                "error": f"blocked pattern in type text: {pat!r}",
-                "hint": "Dangerous shell patterns cannot be typed via computer_use.",
+                "error": f"blocked pattern in {field}: {pat!r}",
+                "hint": "Dangerous shell patterns cannot be entered via computer_use.",
             }
 
     if action == "key":
-        keys = args.get("keys", "")
+        # strict_mode is off — coerce a non-string ``keys`` to str so the
+        # combo parse (here and in the backend) never trips on a bad type
+        # and the hard-block check still runs on the security-critical path.
+        raw_keys = args.get("keys", "")
+        keys = raw_keys if isinstance(raw_keys, str) else str(raw_keys or "")
+        args["keys"] = keys
         combo = _canon_key_combo(keys)
         for blocked in _BLOCKED_KEY_COMBOS:
             if blocked.issubset(combo) and len(blocked) <= len(combo):
@@ -493,8 +615,15 @@ def run_computer_use(args: dict[str, Any]) -> dict[str, Any]:
     try:
         backend = _get_backend()
     except Exception as e:
+        # Some backend-start failures (a closed stdio pipe, a bare
+        # ``McpError``, a cancelled async context) stringify to "" —
+        # ``f"...: {e}"`` would then leave the model an unactionable
+        # "backend unavailable: " with nothing after the colon. Fall
+        # back to ``repr`` (always carries the exception type) so the
+        # error is never empty.
+        detail = str(e) or repr(e)
         return {
-            "error": f"computer_use backend unavailable: {e}",
+            "error": f"computer_use backend unavailable: {detail}",
             "hint": "Run `oc doctor --fix` and accept the cua-driver repair, "
                     "or `oc computer-use install`.",
         }
@@ -527,7 +656,7 @@ COMPUTER_USE_CAPABILITY = CapabilityClaim(
 
 
 def _import_schema() -> dict[str, Any]:
-    from schema import COMPUTER_USE_SCHEMA  # type: ignore[import-not-found]
+    from cu_schema import COMPUTER_USE_SCHEMA  # type: ignore[import-not-found]
     return COMPUTER_USE_SCHEMA
 
 
@@ -560,7 +689,7 @@ class ComputerUseTool(BaseTool):
         if sys.platform != "darwin":
             return False
         try:
-            from cua_backend import (  # type: ignore[import-not-found]
+            from cu_cua_backend import (  # type: ignore[import-not-found]
                 cua_driver_binary_available,
             )
         except Exception:
@@ -585,7 +714,16 @@ class ComputerUseTool(BaseTool):
             logger.exception("computer_use execute failed")
             result = {"error": f"computer_use failed: {e}"}
 
-        is_error = "error" in result
+        # A result is an error if it carries an ``error`` key (bad args,
+        # blocked pattern, failed capture) OR if it is an action payload
+        # whose backend ``ActionResult.ok`` came back ``False`` — a click
+        # that AXPress-failed, a type with no active window, a focus_app
+        # that matched nothing. Without the ``ok is False`` arm a failed
+        # mutating action would reach the model as a clean (non-error)
+        # tool result, and the model's error-handling path (re-capture,
+        # retry, switch strategy) would never fire — the exact silent
+        # failure that makes a multi-step desktop workflow flail.
+        is_error = ("error" in result) or (result.get("ok") is False)
         return ToolResult(
             tool_call_id=call.id,
             content=json.dumps(result, ensure_ascii=False),

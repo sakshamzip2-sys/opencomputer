@@ -199,6 +199,7 @@ def test_list_skills_attaches_unmet_for_unsatisfied_skill(tmp_path, monkeypatch)
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     by_id = {s.id: s for s in mm.list_skills()}
     assert by_id["needs-missing-bin"].unmet_requirements != ()
@@ -218,6 +219,7 @@ def test_list_skills_satisfied_skill_has_empty_unmet(tmp_path, monkeypatch):
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     skill = next(s for s in mm.list_skills() if s.id == "ok-skill")
     assert skill.unmet_requirements == ()
@@ -241,6 +243,7 @@ def test_list_skills_malformed_requires_does_not_break_loading(tmp_path):
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     skills_out = mm.list_skills()
     assert any(s.id == "garbled" for s in skills_out)
@@ -259,6 +262,7 @@ def test_existing_skill_priority_test_still_passes(tmp_path):
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=skills,
         bundled_skills_paths=[],
+        extensions_path=None,
     )
     skills_out = mm.list_skills()
     ids = sorted(s.id for s in skills_out)
