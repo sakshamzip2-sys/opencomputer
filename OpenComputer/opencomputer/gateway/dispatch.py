@@ -363,6 +363,12 @@ class Dispatch:
         # acceptable semantics).
         self._known_sessions: set[str] = set()
 
+        # A7 (gateway-vs-CLI parity) — one-line session banner. Shown
+        # once per session (process-lifetime latch) prepended to the
+        # first reply, so the user can see which profile / model / cwd
+        # answered. Suppressed by display.gateway_banner.enabled=false.
+        self._banner_shown: set[str] = set()
+
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
         # two must be set.
@@ -522,6 +528,27 @@ class Dispatch:
         self._last_seen_dirty_count = 0
         self._last_seen_persist_every = 10
         self._load_last_seen()
+
+        # A2 (gateway-vs-CLI parity) — per-chat plan-mode store. Persisted
+        # alongside last_seen.json under <profile>/gateway/. The /plan
+        # slash command toggles it; __do_dispatch_inner injects plan_mode
+        # onto the runtime each turn. Registered process-wide so /plan
+        # (which only sees a RuntimeContext) reaches this same instance.
+        from pathlib import Path as _Path
+
+        from opencomputer.gateway.runtime_state import (
+            GatewayRuntimeState,
+            set_active_runtime_state,
+        )
+
+        _rs_path = None
+        if last_seen_path is not None:
+            try:
+                _rs_path = _Path(last_seen_path).parent / "runtime_state.json"
+            except Exception:  # noqa: BLE001 — fall back to in-memory only
+                _rs_path = None
+        self._runtime_state = GatewayRuntimeState(path=_rs_path)
+        set_active_runtime_state(self._runtime_state)
         # PR-1 follow-up — drain coordination. ``_drain_active`` is set by
         # ``Gateway.serve_forever`` when ``oc gateway restart`` writes the
         # drain flag; new arrivals while drain is active return None
@@ -1054,6 +1081,70 @@ class Dispatch:
             self._resolver.resolve(event) if self._resolver is not None else "default"
         )
 
+        # A8 (gateway-vs-CLI parity) — apply a /handoff profile override.
+        # /handoff records its target in the runtime-state store; the
+        # override is persistent (mirrors the CLI persisting the active
+        # profile on disk), so it wins over the binding-resolved profile
+        # on this turn and every turn after, until another /handoff.
+        try:
+            _override = self._runtime_state.get_profile_override(session_id)
+            if _override and _override != profile_id:
+                logger.info(
+                    "gateway /handoff: %s → %s for session %s",
+                    profile_id, _override, session_id,
+                )
+                profile_id = _override
+        except Exception:  # noqa: BLE001 — a swap glitch must not break dispatch
+            logger.debug("profile-override apply failed", exc_info=True)
+
+        # A6 (gateway-vs-CLI parity) — per-chat working directory. The
+        # daemon's process cwd is its launch directory (usually the
+        # profile home), not the user's project. A binding may pin
+        # ``cwd:`` so file / Bash tools operate where the user expects.
+        # Bound around ``run_conversation`` below via a ContextVar so it
+        # propagates to the tool-dispatch tasks without an os.chdir
+        # (which would race across concurrent gateway sessions).
+        chat_cwd: str | None = None
+        _binding_queue_mode: str | None = None
+        if self._resolver is not None:
+            try:
+                _winning = self._resolver.resolve_binding(event)
+                _raw_cwd = _winning.cwd if _winning is not None else None
+                if _raw_cwd:
+                    if os.path.isdir(_raw_cwd):
+                        chat_cwd = _raw_cwd
+                    else:
+                        logger.warning(
+                            "binding cwd %r is not a directory; "
+                            "ignoring (file tools use the daemon cwd)",
+                            _raw_cwd,
+                        )
+                _binding_queue_mode = (
+                    _winning.queue_mode if _winning is not None else None
+                )
+            except Exception:  # noqa: BLE001 — routing must never break dispatch
+                logger.debug("binding cwd resolution failed", exc_info=True)
+
+        # A9 (gateway-vs-CLI parity) — seed a binding's pinned
+        # ``queue_mode`` exactly once per session. ``has_session_mode``
+        # guards against clobbering a later ``/queue-mode`` from the
+        # user: the binding is the *default*, not an every-turn force.
+        if _binding_queue_mode and not self._queue_manager.has_session_mode(
+            session_id
+        ):
+            try:
+                # load_bindings already validated the literal; the cast
+                # keeps the type checker honest on the str→QueueMode hop.
+                self._queue_manager.set_session_mode(
+                    session_id,
+                    _binding_queue_mode,  # pyright: ignore[reportArgumentType]
+                )
+            except ValueError:
+                logger.warning(
+                    "binding queue_mode %r invalid; ignoring",
+                    _binding_queue_mode,
+                )
+
         # Pass-1 G9: structured per-dispatch logging. ``binding_match``
         # is "matched" when the resolver picked a non-default profile;
         # "default" otherwise. Logged BEFORE lock acquisition so even a
@@ -1238,7 +1329,7 @@ class Dispatch:
         # agent reply. The class attribute ``bypass_running_guard``
         # opts the command into this fast path.
         bypass_result = await self._maybe_bypass_running_guard(
-            event, session_id, profile_id,
+            event, session_id, profile_id, loop,
         )
         if bypass_result is not None:
             return bypass_result
@@ -1362,6 +1453,19 @@ class Dispatch:
                 else:
                     _rt_custom["persona_id_override"] = _persona_override
                 runtime = RuntimeContext(custom=_rt_custom)
+            # A2 (gateway-vs-CLI parity) — per-chat plan mode. /plan
+            # persists the toggle in <profile>/gateway/runtime_state.json;
+            # inject plan_mode onto the runtime so the loop's plan-mode
+            # path applies, parity with `oc --plan` on the CLI.
+            # dataclasses.replace returns a NEW RuntimeContext — it never
+            # mutates the module-shared DEFAULT_RUNTIME_CONTEXT.
+            try:
+                if self._runtime_state.get_plan_mode(session_id):
+                    import dataclasses as _dc
+
+                    runtime = _dc.replace(runtime, plan_mode=True)
+            except Exception:  # noqa: BLE001 — never break dispatch
+                logger.debug("plan-mode injection failed", exc_info=True)
             # M1 parity telemetry — mechanisms decidable from the
             # per-turn runtime: #4 (channel_prompt_overlay) fired iff
             # _build_channel_runtime stuffed a channel-scoped prompt or
@@ -1573,7 +1677,12 @@ class Dispatch:
                 # async-consent round-trip.
                 _pre_consent = self._consent_prompt_counts.get(session_id, 0)
 
-                with set_profile(profile_home):
+                # A6 — bind the per-chat cwd for the duration of the
+                # turn. ``working_directory(None)`` is a no-op, so the
+                # default (no binding cwd) path is unchanged.
+                from plugin_sdk.working_directory import working_directory
+
+                with set_profile(profile_home), working_directory(chat_cwd):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
                             result = await loop.run_conversation(
@@ -1662,6 +1771,22 @@ class Dispatch:
                 # deployments see no UX change. Wrapped defensively — a
                 # footer-render failure must never replace the actual reply.
                 _final_text = result.final_message.content or None
+                # A7 — prepend the one-line session banner on the first
+                # reply of a session so the user knows which profile /
+                # model / cwd answered. Defensive — never replaces the
+                # reply on failure.
+                try:
+                    _banner = self._maybe_session_banner(
+                        session_id, profile_id, loop, chat_cwd,
+                    )
+                    if _banner:
+                        _final_text = (
+                            f"_{_banner}_\n\n{_final_text}"
+                            if _final_text
+                            else f"_{_banner}_"
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.debug("session banner prepend failed", exc_info=True)
                 try:
                     from opencomputer.gateway.runtime_footer import (
                         format_runtime_footer,
@@ -1733,7 +1858,9 @@ class Dispatch:
                             model=_model_str,
                             tokens_used=getattr(result, "input_tokens", 0) or 0,
                             context_length=_ctx_len,
-                            cwd=os.getcwd(),
+                            # A6 — show the per-chat cwd when a binding
+                            # pinned one; else the daemon's process cwd.
+                            cwd=chat_cwd or os.getcwd(),
                         )
                         if _line:
                             _final_text = f"{_final_text}\n\n_{_line}_"
@@ -1968,6 +2095,54 @@ class Dispatch:
         )
         return RuntimeContext(custom=custom)
 
+    def _maybe_session_banner(
+        self, session_id: str, profile_id: str, loop: Any, chat_cwd: str | None,
+    ) -> str:
+        """Return a one-line session banner the first time a session is
+        seen this process, ``""`` afterwards or when not enabled.
+
+        A7 (gateway-vs-CLI parity). The CLI prints model / profile / cwd
+        at session start; the gateway sent nothing. This banner is
+        prepended (italic) to the first reply.
+
+        Opt-in: shown only when ``display.gateway_banner.enabled = true``
+        (or the shorthand ``display.gateway_banner: true``). Default off
+        is a deliberate product call — a banner on every bot's first
+        reply is noise for customer-facing deployments, so the operator
+        enables it for the personal-assistant use case. Best-effort: a
+        banner failure must never replace the reply.
+        """
+        try:
+            display = (self._display_cfg or {}).get("display") or {}
+            gb = display.get("gateway_banner")
+            enabled = gb is True or (
+                isinstance(gb, dict) and gb.get("enabled") is True
+            )
+            if not enabled:
+                return ""
+            if session_id in self._banner_shown:
+                return ""
+            self._banner_shown.add(session_id)
+            model = str(
+                getattr(getattr(loop, "config", None), "model", "") or ""
+            )
+            cwd = chat_cwd or os.getcwd()
+            parts = [f"OpenComputer · profile={profile_id}"]
+            if model:
+                parts.append(f"model={model}")
+            parts.append(f"cwd={cwd}")
+            banner = " · ".join(parts)
+            try:
+                mem = getattr(loop, "memory", None)
+                if mem is not None:
+                    banner += f" · skills={len(mem.list_skills())}"
+            except Exception:  # noqa: BLE001 — skill count is decoration
+                pass
+            return banner
+        except Exception:  # noqa: BLE001 — banner must never break dispatch
+            logger.debug("session banner render failed", exc_info=True)
+            return ""
+
     async def _safe_lifecycle_hook(self, coro) -> None:
         """Fire-and-forget lifecycle hook with error swallowing.
 
@@ -1981,19 +2156,61 @@ class Dispatch:
         except Exception:  # noqa: BLE001
             logger.debug("lifecycle hook raised", exc_info=True)
 
+    @staticmethod
+    def _populate_session_usage(
+        custom: dict[str, Any], db: Any, session_id: str,
+    ) -> None:
+        """Fill per-session usage counters into ``custom`` so ``/usage``
+        and ``/context`` show real data on the gateway.
+
+        A3 — these commands were written CLI-shaped: they read live
+        counters off ``runtime.custom`` that only the single-session CLI
+        loop maintains. ``SessionDB.session_usage_summary`` is the
+        durable per-session source; reading it here lets the gateway
+        bypass path supply the same numbers. Best-effort — a DB error
+        leaves the keys absent and the command degrades gracefully.
+        """
+        try:
+            summary = db.session_usage_summary(session_id)
+        except Exception:  # noqa: BLE001 — usage display must never raise
+            return
+        if summary is None:
+            return
+        custom["session_tokens_in"] = summary.input_tokens
+        custom["session_tokens_out"] = summary.output_tokens
+        custom["session_cache_read"] = summary.cache_read_tokens
+        custom["session_cache_write"] = summary.cache_write_tokens
+        custom["session_compactions"] = summary.compactions_count
+        if summary.cost_usd is not None:
+            custom["session_cost_usd"] = summary.cost_usd
+
     async def _maybe_bypass_running_guard(
-        self, event, session_id: str, profile_id: str,
+        self, event, session_id: str, profile_id: str, loop: Any = None,
     ) -> str | None:
-        """Detect + execute a bypass-running-guard slash command.
+        """Detect + execute a slash command inline on the gateway.
 
-        Wave 6.E.6 — Hermes parity. ``/kanban`` (and any future slash
-        command with ``bypass_running_guard = True``) skips the
-        per-session lock so a board read/write reaches the DB even
-        when a long-running agent reply is mid-flight.
+        Two class attributes opt a slash command into gateway execution:
 
-        Returns the command's text output if dispatched, or None if
-        the message is not a bypass-marked slash command (caller
-        proceeds with the normal locked path).
+        - ``bypass_running_guard = True`` (Wave 6.E.6, Hermes parity) —
+          ``/kanban`` and friends skip the per-session lock so a board
+          read/write reaches the DB even mid-flight.
+        - ``gateway_safe = True`` (A3, gateway-vs-CLI parity Wave 1) —
+          the command is safe to run inline on the gateway. Without
+          this flag a slash command falls through to the model as plain
+          text — which is why ``/status``, ``/plan`` etc. silently
+          no-op'd on Telegram before A3.
+
+        Either flag routes the command here. Both run pre-lock; spec
+        requires gateway-safe commands to be quick.
+
+        ``loop`` is the resolved per-profile :class:`AgentLoop`; it lets
+        the runtime built here carry ``session_db`` / ``model`` /
+        ``active_profile_id`` so read-only commands (``/history``,
+        ``/agents``, ``/status``) show real data instead of placeholders.
+
+        Returns the command's text output if dispatched, or None if the
+        message is not a gateway-runnable slash command (caller proceeds
+        with the normal locked path).
         """
         text = event.text or ""
         if not text.startswith("/"):
@@ -2019,7 +2236,10 @@ class Dispatch:
             )
             if refused is not None:
                 return refused
-        if not getattr(cmd, "bypass_running_guard", False):
+        if not (
+            getattr(cmd, "bypass_running_guard", False)
+            or getattr(cmd, "gateway_safe", False)
+        ):
             return None
         # Build a runtime context with channel info so the command can
         # read platform / chat_id / thread_id for things like
@@ -2029,12 +2249,42 @@ class Dispatch:
             "chat_id": event.chat_id,
             "session_id": session_id,
             "profile_id": profile_id,
+            # A3 — ``active_profile_id`` is the key profile-aware commands
+            # read; the gateway resolves the same value as ``profile_id``.
+            "active_profile_id": profile_id,
         }
         if event.metadata:
             for k in ("thread_id", "user_id", "message_id"):
                 v = event.metadata.get(k)
                 if v is not None:
                     custom[k] = v
+        # A3 — give read-only gateway-safe commands the loop-backed
+        # context they need to show real data: ``session_db`` for
+        # /history + /agents, ``model`` for /status, and the per-session
+        # usage totals for /usage + /context. Best-effort — a missing
+        # attribute just leaves the command in its degraded (placeholder)
+        # rendering, never raises.
+        if loop is not None:
+            db = getattr(loop, "db", None)
+            if db is not None:
+                custom["session_db"] = db
+                self._populate_session_usage(custom, db, session_id)
+            try:
+                custom["model"] = loop.config.model.model
+            except Exception:  # noqa: BLE001 — model line is decoration
+                pass
+            # A8 — the handoff doc generator needs a provider adapter;
+            # the loop caches one after its first turn. None is fine —
+            # /handoff falls back to a doc-less swap.
+            adapter_for_handoff = getattr(loop, "_handoff_provider_adapter", None)
+            if adapter_for_handoff is not None:
+                custom["_handoff_provider_adapter"] = adapter_for_handoff
+        # A3 — /platforms reads the live adapter roster. The dispatcher
+        # owns it (``_adapters_by_platform``); surface it so the command
+        # lists real channels instead of "run oc gateway".
+        roster = getattr(self, "_adapters_by_platform", None)
+        if roster:
+            custom["active_platforms"] = sorted(roster.keys())
         runtime = RuntimeContext(custom=custom)
         # 2026-05-08 — Hermes Doc-2 gateway hooks: command:<slug>.
         # Fire-and-forget so a slow handler never delays slash dispatch.

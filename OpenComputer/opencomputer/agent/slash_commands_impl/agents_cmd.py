@@ -23,6 +23,7 @@ def _truncate(text: str, n: int = 80) -> str:
 class AgentsCommand(SlashCommand):
     name = "agents"
     description = "List active detached tasks (queued + running)"
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         db = runtime.custom.get("session_db")

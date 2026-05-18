@@ -52,6 +52,11 @@ class ContextCommand(SlashCommand):
 
     name = "context"
     description = "Show context window usage + compaction count this session"
+    # gateway_safe: Dispatch._populate_session_usage fills
+    # session_tokens_in / session_compactions / model into the runtime
+    # from SessionDB.session_usage_summary, so /context shows real data
+    # on the gateway, not a placeholder 0%.
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         custom = runtime.custom if runtime is not None else {}

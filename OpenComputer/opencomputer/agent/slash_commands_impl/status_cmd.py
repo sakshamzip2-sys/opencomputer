@@ -15,6 +15,7 @@ from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 class StatusCommand(SlashCommand):
     name = "status"
     description = "Show session info (platform, chat, model, queue mode, last activity)"
+    gateway_safe = True
 
     async def execute(
         self, args: str, runtime: RuntimeContext

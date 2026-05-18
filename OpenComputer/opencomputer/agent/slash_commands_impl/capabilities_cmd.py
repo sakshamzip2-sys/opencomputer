@@ -86,6 +86,7 @@ class CapabilitiesCommand(SlashCommand):
         "List what the current provider supports + which other providers "
         "have which features"
     )
+    gateway_safe = True
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         del args, runtime  # no inputs

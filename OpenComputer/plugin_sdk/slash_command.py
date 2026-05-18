@@ -66,6 +66,17 @@ class SlashCommand(ABC):
     #: Defaults to empty tuple — backwards compatible.
     aliases: tuple[str, ...] = ()
 
+    #: When True, this command is safe to execute on the gateway
+    #: (Telegram / Discord / Slack / …). The gateway dispatcher runs it
+    #: inline and returns its output as the reply. When False (default)
+    #: the command is CLI/TUI-only — on the gateway the ``/<name>`` text
+    #: falls through to the model as a plain message. Gateway-safe
+    #: commands must be quick (no long-running work), must not assume a
+    #: TUI / terminal, and must read all channel context from
+    #: ``runtime.custom`` (``platform``, ``chat_id``, ``session_id``,
+    #: ``profile_id``). See ``opencomputer/gateway/dispatch.py``.
+    gateway_safe: bool = False
+
     @abstractmethod
     async def execute(
         self, args: str, runtime: RuntimeContext

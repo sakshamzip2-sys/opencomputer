@@ -45,11 +45,21 @@ class BindingMatch:
 
 @dataclass(frozen=True, slots=True)
 class Binding:
-    """One routing rule: ``match`` predicate -> ``profile`` id, with priority."""
+    """One routing rule: ``match`` predicate -> ``profile`` id, with priority.
+
+    Optional per-chat overrides (A6 / A9, gateway-vs-CLI parity Wave 1):
+
+    - ``cwd`` — working directory for file/Bash tools on turns matching
+      this binding. ``None`` means the daemon's process cwd (legacy).
+    - ``queue_mode`` — inbound queue mode for matching chats. ``None``
+      means the gateway's per-platform default.
+    """
 
     match: BindingMatch
     profile: str
     priority: int = 0
+    cwd: str | None = None
+    queue_mode: str | None = None
 
 
 class AgentBinding(Binding):
@@ -72,6 +82,12 @@ class BindingsConfig:
     default_profile: str = "default"
     bindings: tuple[Binding, ...] = field(default_factory=tuple)
 
+
+#: Queue modes a binding may pin. Mirrors ``plugin_sdk.queue.ALL_QUEUE_MODES``
+#: — kept as a literal here so ``bindings_config`` stays import-light.
+_ALLOWED_QUEUE_MODES: frozenset[str] = frozenset(
+    {"followup", "interrupt", "collect", "steer"}
+)
 
 _ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({"default_profile", "bindings"})
 _ALLOWED_MATCH_KEYS: frozenset[str] = frozenset(
@@ -139,7 +155,34 @@ def load_bindings(path: Path) -> BindingsConfig:
         priority_raw = b.get("priority", 0)
         if not isinstance(priority_raw, int):
             raise ValueError(f"{path}: bindings[{i}].priority must be an int")
-        bindings.append(Binding(match=match, profile=profile, priority=priority_raw))
+
+        cwd_raw = b.get("cwd")
+        if cwd_raw is not None and not (isinstance(cwd_raw, str) and cwd_raw):
+            raise ValueError(
+                f"{path}: bindings[{i}].cwd must be a non-empty string"
+            )
+
+        queue_mode_raw = b.get("queue_mode")
+        if queue_mode_raw is not None:
+            if not isinstance(queue_mode_raw, str):
+                raise ValueError(
+                    f"{path}: bindings[{i}].queue_mode must be a string"
+                )
+            if queue_mode_raw not in _ALLOWED_QUEUE_MODES:
+                raise ValueError(
+                    f"{path}: bindings[{i}].queue_mode {queue_mode_raw!r} is "
+                    f"invalid; allowed: {sorted(_ALLOWED_QUEUE_MODES)}"
+                )
+
+        bindings.append(
+            Binding(
+                match=match,
+                profile=profile,
+                priority=priority_raw,
+                cwd=cwd_raw,
+                queue_mode=queue_mode_raw,
+            )
+        )
 
     return BindingsConfig(default_profile=default_profile, bindings=tuple(bindings))
 

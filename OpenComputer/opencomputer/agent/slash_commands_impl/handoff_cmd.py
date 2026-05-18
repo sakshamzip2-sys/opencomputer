@@ -33,6 +33,13 @@ class HandoffCommand(SlashCommand):
         "(use --no-content to skip the handoff)"
     )
     aliases: tuple[str, ...] = ("profile-handoff",)
+    # A8 — runs inline on the gateway. The gateway's command runtime is
+    # ephemeral, so the swap is queued durably via the runtime-state
+    # store (_queue_swap); the dispatcher consumes the pending profile
+    # on the next turn. bypass_running_guard lets a swap be requested
+    # even mid-turn (the swap itself lands on the next turn).
+    gateway_safe = True
+    bypass_running_guard = True
 
     async def execute(
         self, args: str, runtime: RuntimeContext,
@@ -81,8 +88,18 @@ class HandoffCommand(SlashCommand):
                 handled=True,
             )
 
-        if skip_handoff:
-            return self._queue_swap_no_handoff(runtime, target)
+        # A8 — handoff-doc generation needs a provider adapter. The
+        # gateway loop supplies one once it has run a turn; absent it
+        # (e.g. /handoff is the very first message) fall back to a
+        # doc-less swap rather than aborting — the user asked to swap.
+        doc_unavailable = (
+            not skip_handoff
+            and runtime.custom.get("_handoff_provider_adapter") is None
+        )
+        if skip_handoff or doc_unavailable:
+            return self._queue_swap_no_handoff(
+                runtime, target, doc_unavailable=doc_unavailable,
+            )
 
         # Full path: generate + write + queue.
         try:
@@ -93,12 +110,19 @@ class HandoffCommand(SlashCommand):
                 target_home=target_home,
             )
         except _ManualHandoffError as e:
+            # Doc generation failed — still honour the swap request
+            # (doc-less) rather than abort; that is what the user asked
+            # for and the new profile simply starts without a handoff.
+            self._queue_swap(runtime, target)
             return SlashCommandResult(
-                output=f"Handoff generation failed: {e}. Swap aborted.",
+                output=(
+                    f"Swap queued to {target!r}. Handoff doc skipped "
+                    f"({e})."
+                ),
                 handled=True,
             )
 
-        runtime.custom["pending_profile_id"] = target
+        self._queue_swap(runtime, target)
 
         if handoff_path is None:
             note = (
@@ -132,14 +156,44 @@ class HandoffCommand(SlashCommand):
         body = "\n".join(f"  - {n}" for n in ["default", *names]) or "  (none)"
         return SlashCommandResult(output=usage + body, handled=True)
 
+    @staticmethod
+    def _queue_swap(runtime: RuntimeContext, target: str) -> None:
+        """Record a profile swap durably.
+
+        ``runtime.custom["pending_profile_id"]`` carries the CLI path.
+        On the gateway the command runtime is ephemeral, so the target
+        is ALSO written to the per-chat runtime-state store as a
+        *persistent* profile override; the gateway dispatcher applies it
+        from the next turn on (A8). Outside the gateway the store is an
+        in-memory no-op, so this is safe on every surface.
+        """
+        runtime.custom["pending_profile_id"] = target
+        sid = runtime.custom.get("session_id")
+        if sid:
+            try:
+                from opencomputer.gateway.runtime_state import (
+                    get_runtime_state,
+                )
+
+                get_runtime_state().set_profile_override(sid, target)
+            except Exception:  # noqa: BLE001 — CLI path already queued
+                _log.warning(
+                    "could not persist profile override", exc_info=True,
+                )
+
     def _queue_swap_no_handoff(
         self, runtime: RuntimeContext, target: str,
+        *, doc_unavailable: bool = False,
     ) -> SlashCommandResult:
-        runtime.custom["pending_profile_id"] = target
-        return SlashCommandResult(
-            output=f"Swap queued to {target!r} (no handoff generated).",
-            handled=True,
-        )
+        self._queue_swap(runtime, target)
+        if doc_unavailable:
+            note = (
+                f"Swap queued to {target!r}. Handoff doc skipped (no "
+                "provider on this surface) — the new profile starts fresh."
+            )
+        else:
+            note = f"Swap queued to {target!r} (no handoff generated)."
+        return SlashCommandResult(output=note, handled=True)
 
     async def _generate_and_write(
         self,

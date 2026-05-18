@@ -63,6 +63,9 @@ from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_matcher import ToolPattern as _ToolPattern
 from plugin_sdk.tool_matcher import matches as _pattern_matches
 from plugin_sdk.tool_matcher import parse as _parse_pattern
+from plugin_sdk.working_directory import (
+    get_working_directory as _working_directory,
+)
 
 _log = logging.getLogger("opencomputer.agent.loop")
 
@@ -2318,6 +2321,12 @@ class AgentLoop:
                         self, "_active_persona_preferred_tone", ""
                     ),
                     pinned_files_block=_pinned_files_block,
+                    # A6 (gateway-vs-CLI parity) — render the prompt
+                    # against the per-turn working directory so the
+                    # agent knows the user's project root. Unbound on
+                    # the CLI → get_working_directory() returns the
+                    # process cwd, identical to the prior default.
+                    cwd=_working_directory(),
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.

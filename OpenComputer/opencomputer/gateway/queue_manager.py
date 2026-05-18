@@ -109,6 +109,15 @@ class QueueManager:
         """Resolve the active mode for ``session_id`` (override → default)."""
         return self._session_modes.get(session_id, self._default_mode)
 
+    def has_session_mode(self, session_id: str) -> bool:
+        """True if ``session_id`` has an explicit per-session override.
+
+        A9 — the gateway seeds a binding's ``queue_mode`` exactly once
+        per session (only when no override exists yet) so a later
+        ``/queue-mode`` from the user is never clobbered.
+        """
+        return session_id in self._session_modes
+
     def set_session_mode(self, session_id: str, mode: QueueMode) -> None:
         if mode not in ALL_QUEUE_MODES:
             raise ValueError(f"unknown queue mode {mode!r}")
