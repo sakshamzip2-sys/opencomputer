@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 from opencomputer.gateway import dispatch as disp
 
-
 #: Config that opts the (default-off) banner in.
 _BANNER_ON = {"display": {"gateway_banner": {"enabled": True}}}
 

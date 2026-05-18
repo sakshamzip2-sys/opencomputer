@@ -17,7 +17,6 @@ from opencomputer.gateway.runtime_state import GatewayRuntimeState
 from plugin_sdk.core import MessageEvent, Platform
 from plugin_sdk.runtime_context import RuntimeContext
 
-
 # ─── GatewayRuntimeState ────────────────────────────────────────────────
 
 
