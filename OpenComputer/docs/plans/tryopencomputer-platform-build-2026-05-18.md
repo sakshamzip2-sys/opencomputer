@@ -426,7 +426,7 @@ CREATE POLICY service_role_bypass ON <table>
 
 ### Phase 2 — Reverse tunnel (VM no public ports)
 
-**Status:** 🟡 2c shipped (scaffolding); 2a in flight; 2b pending operator action
+**Status:** 🟡 2a in review (ocp #4); 2c shipped (scaffolding); 2b pending operator action
 **Repos:** `[ocp]` + `[ops]`
 **Blocked by:** Phase 1 — 🟢 (merged 2026-05-18)
 **Estimated effort:** M (2-4 days)
@@ -438,25 +438,15 @@ CREATE POLICY service_role_bypass ON <table>
 **File:** `oc-platform/templates/cloud-init.yaml.tmpl`
 
 Changes:
-- ☐ Replace `oc dashboard --host 0.0.0.0 --port 9119 --insecure` → `oc workspace backend --host 127.0.0.1 --port 9119` (uses post-#651 OC CLI). Add `Environment=OC_DASHBOARD_TOKEN={{OC_DASHBOARD_TOKEN}}` to the systemd unit.
-- ☐ Change noVNC: `--listen 6080` → `--listen 127.0.0.1:6080`.
-- ☐ Install `cloudflared` (apt or upstream pkg) in `packages:` list.
-- ☐ Add `/etc/systemd/system/cloudflared.service`:
-  ```yaml
-  [Unit]
-  After=network-online.target
-  Wants=network-online.target
-  [Service]
-  Type=simple
-  ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token {{CF_TUNNEL_TOKEN}}
-  Restart=always
-  RestartSec=5
-  [Install]
-  WantedBy=multi-user.target
-  ```
-- ☐ In `runcmd:` — enable+start cloudflared *before* `oc-dashboard.service`.
-- ☐ Remove the public Anthropic key env var; the agent will use the user's LLM-proxy creds instead (matches our auth decision — see §9).
-- ☐ Tighten egress: nftables rule to allow outbound only to `*.cloudflare.com`, the user's LLM-proxy domain, and Supabase. Drop everything else.
+- 🟢 Replace `oc dashboard --host 0.0.0.0 --port 9119 --insecure` → `oc workspace backend --host 127.0.0.1 --port 9119`. `OC_DASHBOARD_TOKEN={{OC_DASHBOARD_TOKEN}}` in systemd unit.
+- 🟢 noVNC: `--listen 6080` → `--listen 127.0.0.1:6080`.
+- 🟢 Install `cloudflared` via Cloudflare apt repo; `cloudflared.service` reads token from `/etc/cloudflared/env` (0600).
+- 🟢 `cloudflared.service` added; enabled+started *before* `oc-workspace.service` in `runcmd:`.
+- 🟢 Remove `ANTHROPIC_API_KEY`; add `/etc/opencomputer/llm-proxy.env` (0600) with `ANTHROPIC_BASE_URL={{LLM_PROXY_URL}}`, `ANTHROPIC_AUTH_MODE=bearer`, `ANTHROPIC_API_KEY={{LLM_PROXY_JWT}}`.
+- 🟡 Egress allow-list deferred to Phase 6 (nftables `policy accept` for outbound at MVP; see §9 decision 2026-05-18).
+- 🟢 `verify-no-inbound.sh` post-provision self-audit: exits 1 + error callback if any non-loopback listener detected.
+- 🟢 `ProvisionConfig` updated: `anthropicApiKey` removed; `ocDashboardToken`, `cfTunnelToken`, `llmProxyUrl`, `llmProxyJwt` added. `instance.ts` generates `randomBytes(32)` per VM as `ocDashboardToken`; `cfTunnelToken` is empty stub (Phase 2b wires `createCloudflareTunnel()`).
+- 🟢 `VALID_STEPS` in `instance.ts` extended with `"cloudflared"` and `"error"` progress callbacks.
 
 #### 2b · `[ocp]` `service-api`: mint tunnel + token at provision time
 
@@ -513,6 +503,7 @@ Tasks:
 - ☐ Threat model row for "VM exposed publicly" marked mitigated
 
 #### Notes / decisions log
+- 2026-05-18: Phase 2a shipped as ocp #4. Full cloud-init rewrite: loopback-only binds, cloudflared systemd unit, nftables (input DROP), LLM-proxy env pattern, verify-no-inbound.sh self-audit. `ProvisionConfig` updated; `instance.ts` generates per-VM `ocDashboardToken`. Egress allow-list deferred to Phase 6 (§9). `cfTunnelToken` empty stub — Phase 2b wires the real CF API call.
 - 2026-05-18: Phase 2c scaffolding shipped — runbook + env-var wiring + `tunnels.ts` stub + `cf:smoke` script (ocp #3). Operator clicks remain (account, domain registration, token). Subdomain root confirmed as `oc-vms` (plan default). Registrar decision: direct at Cloudflare Registrar (no third-party).
 
 ---
