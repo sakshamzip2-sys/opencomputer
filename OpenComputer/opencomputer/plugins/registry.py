@@ -8,12 +8,14 @@ tool registry from tools/registry.py; hooks go into the hook engine).
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.hooks.engine import engine as hook_engine
+from opencomputer.plugins.activation_planner import channel_credentials_satisfied
 from opencomputer.plugins.discovery import (
     PluginCandidate,
     build_legacy_id_lookup,
@@ -157,6 +159,9 @@ class PluginRegistry:
         # see their per-request scope via ``api.request_context``.
         self.shared_api = api
         wildcard = enabled_ids is None or enabled_ids == "*"
+        # The credential gate (in the candidate loop below) is bypassed
+        # by the same escape hatch as every other filter layer.
+        load_all_hatch = os.environ.get("OPENCOMPUTER_LOAD_ALL_PLUGINS") == "1"
 
         # Layer B′ — legacy id normalization (G.22). Runs before Layer C
         # so a renamed provider plugin's current id is what model-prefix
@@ -256,6 +261,22 @@ class PluginRegistry:
                         cand.manifest.id,
                     )
                     continue
+            # Layer E — credential gate. A pure channel adapter (one
+            # declaring activation.on_channels) whose declared
+            # setup.channels[].env_vars are ALL unset cannot connect:
+            # loading it makes the gateway crash-connect or carry dead
+            # weight. Skip it. Tool-registering channel-kind plugins
+            # (no on_channels — homeassistant, discord) are never gated
+            # here; OPENCOMPUTER_LOAD_ALL_PLUGINS=1 bypasses entirely.
+            if not load_all_hatch and not channel_credentials_satisfied(
+                cand.manifest, os.environ
+            ):
+                logger.info(
+                    "skipping channel plugin '%s': none of its declared "
+                    "credential env vars are set",
+                    cand.manifest.id,
+                )
+                continue
             try:
                 loaded = load_plugin(cand, api)
             except SingleInstanceError as e:

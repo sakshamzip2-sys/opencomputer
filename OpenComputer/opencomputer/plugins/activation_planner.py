@@ -18,12 +18,15 @@ function — no filesystem I/O, no plugin loading.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from opencomputer.plugins.discovery import PluginCandidate
+from plugin_sdk.core import PluginManifest
 
 __all__ = [
     "ActivationTriggers",
+    "channel_credentials_satisfied",
     "channel_narrowed_ids",
     "plan_activations",
 ]
@@ -120,3 +123,38 @@ def channel_narrowed_ids(candidates: list[PluginCandidate]) -> list[str]:
             continue  # annotated channel adapter — narrowed out
         kept.append(cand.manifest.id)
     return sorted(kept)
+
+
+def channel_credentials_satisfied(
+    manifest: PluginManifest, environ: Mapping[str, str]
+) -> bool:
+    """Decide whether a *pure channel-adapter* plugin has its credentials.
+
+    Returns ``True`` (keep the plugin) unless it is a pure channel
+    adapter — one declaring a non-empty ``activation.on_channels`` — that
+    also declares required ``setup.channels[].env_vars`` of which NONE
+    are present in ``environ``.
+
+    The ``on_channels`` annotation, not the manifest ``kind``, is what
+    gates: a channel-*kind* plugin that also registers tools
+    (homeassistant, discord) declares no ``on_channels`` and is always
+    satisfied — the credential gate must never drop a plugin that
+    registers non-channel surface. An adapter that declares no
+    ``env_vars`` (matrix, slack) is also satisfied: the manifest gives
+    the gate nothing to check.
+
+    OR-semantics: any one declared var present keeps the adapter. This
+    is the loader-side half of the gateway credential fix; channel
+    plugins also guard their own ``register()`` (defense in depth).
+    """
+    activation = getattr(manifest, "activation", None)
+    if activation is None or not activation.on_channels:
+        return True  # not a pure channel adapter — never gated
+    setup = getattr(manifest, "setup", None)
+    channels = getattr(setup, "channels", None) or ()
+    required = {
+        var for ch in channels for var in (getattr(ch, "env_vars", None) or ())
+    }
+    if not required:
+        return True  # adapter declares no credential requirement
+    return any(environ.get(var) for var in required)
