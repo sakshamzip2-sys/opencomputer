@@ -175,3 +175,57 @@ def test_load_all_plugins_env_bypasses_credential_gate(
 
     loaded = {lp.candidate.manifest.id for lp in registry.loaded}
     assert "qq-test" in loaded, "OPENCOMPUTER_LOAD_ALL_PLUGINS=1 must bypass the gate"
+
+
+# ─── Layer B: defensive register() guards (qqbot / wecom / weixin) ────
+
+_EXTENSIONS = Path(__file__).resolve().parent.parent / "extensions"
+
+# (plugin id, the env vars its adapter needs to function)
+_UNGUARDED_CHANNELS = [
+    ("qqbot", ["QQBOT_APPID", "QQBOT_SECRET"]),
+    ("wecom", ["WECOM_CORP_ID", "WECOM_AGENT_ID", "WECOM_SECRET"]),
+    ("weixin", ["WEIXIN_APPID", "WEIXIN_SECRET", "WEIXIN_TOKEN"]),
+]
+
+
+def _load_one_bundled_plugin(pid: str) -> PluginRegistry:
+    """Load a single bundled plugin through the real loader (which
+    bypasses the Layer A gate) and return the registry it wrote into."""
+    from opencomputer.plugins.discovery import discover
+    from opencomputer.plugins.loader import load_plugin
+
+    cand = next(c for c in discover([_EXTENSIONS]) if c.manifest.id == pid)
+    registry = PluginRegistry()
+    load_plugin(cand, registry.api())
+    return registry
+
+
+@pytest.mark.parametrize("pid,env_vars", _UNGUARDED_CHANNELS)
+def test_register_skips_channel_when_creds_absent(
+    pid: str, env_vars: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Layer B — register() must early-return without registering the
+    adapter when credentials are absent (mirrors telegram/signal). This
+    is the defense-in-depth half: it holds even when Layer A is bypassed
+    (OPENCOMPUTER_LOAD_ALL_PLUGINS=1) or the plugin is force-loaded."""
+    for var in env_vars:
+        monkeypatch.delenv(var, raising=False)
+    registry = _load_one_bundled_plugin(pid)
+    assert pid not in registry.channels, (
+        f"{pid}.register() registered a channel adapter with no credentials"
+    )
+
+
+@pytest.mark.parametrize("pid,env_vars", _UNGUARDED_CHANNELS)
+def test_register_wires_channel_when_creds_present(
+    pid: str, env_vars: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With every required credential present, register() still wires
+    the adapter — the guard must not over-reject."""
+    for var in env_vars:
+        monkeypatch.setenv(var, "test-value")
+    registry = _load_one_bundled_plugin(pid)
+    assert pid in registry.channels, (
+        f"{pid}.register() failed to register its adapter with creds present"
+    )
