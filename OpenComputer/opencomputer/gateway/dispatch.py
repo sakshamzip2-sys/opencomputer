@@ -2107,9 +2107,10 @@ class Dispatch:
 
         Opt-in: shown only when ``display.gateway_banner.enabled = true``
         (or the shorthand ``display.gateway_banner: true``). Default off
-        — enabling it is a silent output change for every existing chat,
-        so the operator turns it on deliberately. Best-effort: a banner
-        failure must never replace the reply.
+        is a deliberate product call — a banner on every bot's first
+        reply is noise for customer-facing deployments, so the operator
+        enables it for the personal-assistant use case. Best-effort: a
+        banner failure must never replace the reply.
         """
         try:
             display = (self._display_cfg or {}).get("display") or {}
