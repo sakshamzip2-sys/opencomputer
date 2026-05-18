@@ -332,17 +332,18 @@ def test_timeout_exception_hierarchy() -> None:
 
 
 def test_loop_config_defaults() -> None:
-    """Default values after the 2026-05-05 cap-doubling sweep:
-      - inactivity_timeout_s: 600s (was 300)
-      - iteration_timeout_s: 7200s (was 3600)
-      - max_iterations: 100 (was 50)
-      - delegation_max_iterations: 100 (was 50)
-      - max_delegation_depth: 4 (was 2)
+    """Loop-config defaults — locked so nobody silently regresses them.
+
+      - inactivity_timeout_s: 1800s — 2026-05-18 bump (300 → 600 → 1800)
+      - iteration_timeout_s: 7200s (2026-05-05 sweep; was 3600)
+      - max_iterations: 100 (2026-05-05 sweep; was 50)
+      - delegation_max_iterations: 100 (2026-05-05 sweep; was 50)
+      - max_delegation_depth: 4 (2026-05-05 sweep; was 2)
     """
     from opencomputer.agent.config import LoopConfig
 
     cfg = LoopConfig()
-    assert cfg.inactivity_timeout_s == 600
+    assert cfg.inactivity_timeout_s == 1800
     assert cfg.iteration_timeout_s == 7200
     assert cfg.max_iterations == 100
     assert cfg.delegation_max_iterations == 100
