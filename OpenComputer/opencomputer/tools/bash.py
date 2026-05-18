@@ -386,6 +386,19 @@ class BashTool(BaseTool):
             # never leak into the subprocess.
             env = _strip_infra_env_vars(os.environ.copy())
 
+        # A6 (gateway-vs-CLI parity) — run in the per-turn working
+        # directory. On the CLI nothing is bound and get_working_directory()
+        # returns the process cwd (identical to inheriting it). On the
+        # gateway a binding's ``cwd:`` makes Bash operate in the user's
+        # project rather than the daemon's launch directory. A bound dir
+        # that no longer exists falls back to inherit (cwd=None) so a
+        # stale binding can never make every Bash call fail.
+        from plugin_sdk.working_directory import get_working_directory
+
+        run_cwd: str | None = get_working_directory()
+        if run_cwd and not os.path.isdir(run_cwd):
+            run_cwd = None
+
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -393,6 +406,7 @@ class BashTool(BaseTool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=run_cwd,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             exit_code = proc.returncode or 0

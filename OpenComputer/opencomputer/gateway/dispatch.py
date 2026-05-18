@@ -1054,6 +1054,30 @@ class Dispatch:
             self._resolver.resolve(event) if self._resolver is not None else "default"
         )
 
+        # A6 (gateway-vs-CLI parity) — per-chat working directory. The
+        # daemon's process cwd is its launch directory (usually the
+        # profile home), not the user's project. A binding may pin
+        # ``cwd:`` so file / Bash tools operate where the user expects.
+        # Bound around ``run_conversation`` below via a ContextVar so it
+        # propagates to the tool-dispatch tasks without an os.chdir
+        # (which would race across concurrent gateway sessions).
+        chat_cwd: str | None = None
+        if self._resolver is not None:
+            try:
+                _winning = self._resolver.resolve_binding(event)
+                _raw_cwd = _winning.cwd if _winning is not None else None
+                if _raw_cwd:
+                    if os.path.isdir(_raw_cwd):
+                        chat_cwd = _raw_cwd
+                    else:
+                        logger.warning(
+                            "binding cwd %r is not a directory; "
+                            "ignoring (file tools use the daemon cwd)",
+                            _raw_cwd,
+                        )
+            except Exception:  # noqa: BLE001 — routing must never break dispatch
+                logger.debug("binding cwd resolution failed", exc_info=True)
+
         # Pass-1 G9: structured per-dispatch logging. ``binding_match``
         # is "matched" when the resolver picked a non-default profile;
         # "default" otherwise. Logged BEFORE lock acquisition so even a
@@ -1573,7 +1597,12 @@ class Dispatch:
                 # async-consent round-trip.
                 _pre_consent = self._consent_prompt_counts.get(session_id, 0)
 
-                with set_profile(profile_home):
+                # A6 — bind the per-chat cwd for the duration of the
+                # turn. ``working_directory(None)`` is a no-op, so the
+                # default (no binding cwd) path is unchanged.
+                from plugin_sdk.working_directory import working_directory
+
+                with set_profile(profile_home), working_directory(chat_cwd):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
                             result = await loop.run_conversation(
@@ -1733,7 +1762,9 @@ class Dispatch:
                             model=_model_str,
                             tokens_used=getattr(result, "input_tokens", 0) or 0,
                             context_length=_ctx_len,
-                            cwd=os.getcwd(),
+                            # A6 — show the per-chat cwd when a binding
+                            # pinned one; else the daemon's process cwd.
+                            cwd=chat_cwd or os.getcwd(),
                         )
                         if _line:
                             _final_text = f"{_final_text}\n\n_{_line}_"

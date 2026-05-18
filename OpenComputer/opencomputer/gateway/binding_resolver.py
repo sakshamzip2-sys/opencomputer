@@ -93,6 +93,17 @@ class BindingResolver:
 
     def resolve(self, event: MessageEvent) -> str:
         """Return the matching profile_id, or ``default_profile`` on miss."""
+        winner = self.resolve_binding(event)
+        return winner.profile if winner is not None else self._cfg.default_profile
+
+    def resolve_binding(self, event: MessageEvent) -> Binding | None:
+        """Return the winning :class:`Binding`, or ``None`` on miss.
+
+        Same precedence as :meth:`resolve` (specificity desc, then
+        priority desc). Callers that need a binding's ``cwd`` /
+        ``queue_mode`` overrides (A6 / A9) use this; ``resolve`` stays
+        the cheap profile-only path for code that only routes.
+        """
         platform = event.platform.value if event.platform else None
         meta = event.metadata or {}
 
@@ -104,11 +115,11 @@ class BindingResolver:
             candidates.append((score, b.priority, b))
 
         if not candidates:
-            return self._cfg.default_profile
+            return None
 
         # Sort by (specificity_score desc, priority desc).
         candidates.sort(key=lambda t: (-t[0], -t[1]))
-        return candidates[0][2].profile
+        return candidates[0][2]
 
     def _match_score(
         self,
