@@ -1812,7 +1812,24 @@ def dispatch_slash(
     # a stray ``[`` would lose data to Rich markup parsing. Mirrors
     # ``dispatch_agent_slash_to_console``.
     bridge_name = cmd.name if cmd is not None else name.lower()
-    found, output = ctx.on_builtin_dispatch(bridge_name, " ".join(args))
+    # HIGH (review followup): the bridge runs an arbitrary System-A
+    # command and can raise — most importantly ``TimeoutError`` from the
+    # ``_on_builtin_dispatch`` 30s ``result()`` wait on a slow command
+    # (and ``CancelledError`` on a Ctrl+C arriving mid-dispatch). An
+    # uncaught raise here kills the whole ``oc chat`` REPL turn. Catch,
+    # log at WARNING, surface the error to the user, and consume the
+    # command — a slow/broken built-in must degrade gracefully, never
+    # crash the input loop.
+    try:
+        found, output = ctx.on_builtin_dispatch(bridge_name, " ".join(args))
+    except Exception as exc:  # noqa: BLE001 — a bridge fault must not kill the REPL
+        import logging
+
+        logging.getLogger("opencomputer.cli_ui.slash_handlers").warning(
+            "built-in command bridge failed for /%s: %s", bridge_name, exc
+        )
+        ctx.console.print(f"[red]/{bridge_name} failed:[/red] {exc}")
+        return SlashResult(handled=True)
     if found:
         if output:
             ctx.console.print(output, markup=False)

@@ -259,3 +259,21 @@ def test_synced_command_has_no_native_handler_so_it_bridges() -> None:
 
     dispatch_slash("/copy text", _ctx(_bridge))
     assert seen == ["copy"]
+
+
+def test_bridge_exception_does_not_crash_the_repl() -> None:
+    """HIGH (review followup) — a System-A built-in can raise (e.g.
+    ``TimeoutError`` from the 30s ``result()`` wait on a slow command,
+    or ``CancelledError`` on a mid-dispatch Ctrl+C). The bridge call in
+    ``dispatch_slash`` must catch it, surface the error, and consume the
+    command — never let the exception crash the ``oc chat`` REPL turn."""
+    def _bridge(name: str, args: str) -> tuple[bool, str]:
+        raise TimeoutError("synthetic: built-in command timed out")
+
+    ctx = _ctx(_bridge)
+    result = dispatch_slash("/slowcmd", ctx)  # must NOT raise
+    assert result.handled is True
+    assert any(
+        "failed" in line.lower()
+        for line in ctx.console.lines  # type: ignore[attr-defined]
+    ), f"bridge fault must surface a 'failed' line; got {ctx.console.lines!r}"  # type: ignore[attr-defined]
