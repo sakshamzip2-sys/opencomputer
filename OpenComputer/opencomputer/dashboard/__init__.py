@@ -15,9 +15,9 @@ Wave 6.D migration (2026-05-04): the original stdlib ``http.server``
 implementation has been replaced by FastAPI + uvicorn. FastAPI is a
 hard dep already (W2b), so this no longer adds anything.
 
-CLI entrypoint: ``oc dashboard``. Default bind 127.0.0.1 only;
-non-localhost binding requires the ``dashboard.bind_external`` consent
-capability.
+CLI entrypoint: ``oc workspace backend`` (``oc dashboard`` is a
+deprecated forwarding alias). Default bind 127.0.0.1 only; non-localhost
+binding requires the ``dashboard.bind_external`` consent capability.
 """
 
 from __future__ import annotations

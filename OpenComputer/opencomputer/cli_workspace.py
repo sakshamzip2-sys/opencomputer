@@ -365,3 +365,144 @@ def workspace_doctor(
     ok = prereqs.ok and install_ok and build_ok
     if not ok:
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# ``oc workspace backend`` — run the FastAPI backend standalone
+# ---------------------------------------------------------------------------
+#
+# The backend (DashboardServer) is the same one ``oc workspace run`` starts
+# internally. ``oc workspace backend`` runs it alone for headless / API-only
+# use. ``oc dashboard`` is kept as a deprecated forwarding alias — see
+# ``cli_dashboard.py``.
+
+
+def _check_external_bind_consent_or_exit(host: str) -> None:
+    """Refuse non-localhost binds unless ``dashboard.bind_external`` granted."""
+    try:
+        import sqlite3
+
+        from opencomputer.agent.config import _home
+        from opencomputer.agent.consent.store import ConsentStore
+        from opencomputer.agent.state import apply_migrations
+
+        db_path = _home() / "sessions.db"
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            apply_migrations(conn)
+            store = ConsentStore(conn)
+            grant = store.get("dashboard.bind_external", None)
+        finally:
+            conn.close()
+
+        if grant is None:
+            typer.echo(
+                f"Refusing to bind {host}: capability "
+                "'dashboard.bind_external' not granted. Run "
+                "`oc consent grant dashboard.bind_external` first if you "
+                "really mean it.",
+                err=True,
+            )
+            raise typer.Exit(2)
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # If we cannot check consent, fail closed.
+        logger.exception(
+            "workspace backend: external-bind consent check failed: %s", exc
+        )
+        typer.echo(
+            f"Refusing to bind {host}: consent system unavailable.",
+            err=True,
+        )
+        raise typer.Exit(2) from exc
+
+
+def _run_backend(*, host: str, port: int, wire_url: str, detach: bool) -> None:
+    """Start the backend ``DashboardServer`` standalone; block until Ctrl-C.
+
+    Shared by ``oc workspace backend`` and the deprecated ``oc dashboard``
+    forwarding alias.
+    """
+    import time
+
+    from opencomputer.dashboard.server import DashboardServer
+
+    if host != "127.0.0.1":
+        _check_external_bind_consent_or_exit(host)
+
+    if detach:
+        # Local import — ``_detach_to_background`` lives in cli.py.
+        from opencomputer.cli import _detach_to_background
+
+        if _detach_to_background(
+            pidfile_name="dashboard.pid", log_name="dashboard.log"
+        ):
+            return
+
+    # Load provider/tool plugins into this process so the backend's
+    # ``/v1/chat/completions`` handler has a populated registry — without
+    # this, chat 500s with "provider 'anthropic' is not registered".
+    # ``oc workspace run`` does the same in ``_run_impl``; the old
+    # standalone ``oc dashboard`` command skipped it.
+    try:
+        from opencomputer.cli import _discover_plugins
+
+        loaded = _discover_plugins()
+        logger.info("oc workspace backend: loaded %d plugin(s)", loaded)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("oc workspace backend: plugin discovery failed: %s", exc)
+
+    server = DashboardServer(host=host, port=port, wire_url=wire_url)
+    try:
+        server.start()
+    except OSError as exc:
+        console.print(
+            f"[red]error:[/red] backend failed to bind {host}:{port}: {exc}"
+        )
+        raise typer.Exit(2) from exc
+
+    console.print(f"[bold cyan]oc workspace backend[/bold cyan] → {server.url}")
+    console.print(f"  wire URL: {wire_url}")
+    console.print("  [dim]Ctrl-C to stop.[/dim]")
+    try:
+        # Block the main thread; the HTTP server runs in a daemon thread.
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        console.print("\n[dim]backend stopped[/dim]")
+    finally:
+        server.stop()
+
+
+@workspace_app.command("backend")
+def workspace_backend(
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Bind address. Non-localhost requires `dashboard.bind_external` consent.",
+    ),
+    port: int = typer.Option(
+        9119, "--port", help="Backend HTTP port (default 9119)."
+    ),
+    wire_url: str = typer.Option(
+        "ws://127.0.0.1:18789",
+        "--wire-url",
+        help="WebSocket URL of the wire server.",
+    ),
+    detach: bool = typer.Option(
+        False,
+        "--detach",
+        "-d",
+        help="Run in background; pid + logs under profile home.",
+    ),
+) -> None:
+    """Run the OpenComputer backend API server standalone (headless / API-only).
+
+    Exposes the OpenAI-compatible ``/v1/*`` endpoints plus the ``/api/*``
+    data routes — the same backend ``oc workspace`` runs internally. Use
+    this only when you want the API without the browser UI: headless
+    deployments, external OpenAI-compatible clients, or scripts. For
+    normal browser use, run ``oc workspace`` instead.
+    """
+    _run_backend(host=host, port=port, wire_url=wire_url, detach=detach)

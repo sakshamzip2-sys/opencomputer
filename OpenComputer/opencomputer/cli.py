@@ -5044,8 +5044,9 @@ from opencomputer.cli_webhook import webhook_app  # noqa: E402
 
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
-# 2026-05-07 PR7+11: dashboard + TUI both mounted at top-level so the
-# user-facing surface matches the docs (`oc dashboard`, `oc tui`).
+# `oc tui` mounted at top-level. `oc dashboard` is kept as a DEPRECATED
+# forwarding alias for `oc workspace backend` (see cli_dashboard.py) — it
+# stays registered so existing scripts/service units don't break.
 app.add_typer(dashboard_app, name="dashboard")
 app.add_typer(tui_app, name="tui")
 
