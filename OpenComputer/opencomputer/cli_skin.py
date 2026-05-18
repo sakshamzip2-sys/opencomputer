@@ -36,7 +36,16 @@ def _current_skin() -> str:
 
     try:
         return get_display_skin(_config_path()) or "default"
-    except Exception:  # noqa: BLE001 — a broken config must not break listing
+    except Exception as exc:  # noqa: BLE001 — a broken config must not break listing
+        import logging
+
+        # MEDIUM (review followup): a broken config must not break
+        # listing — but a silent fall-through hides "why isn't my skin
+        # loading". Surface it at WARN; the caller still gets "default".
+        logging.getLogger("opencomputer.cli_skin").warning(
+            "skin: could not read the display skin from the profile "
+            "config (%s) — reporting 'default'", exc
+        )
         return "default"
 
 
@@ -125,12 +134,21 @@ def preview_skin(
     table.add_column("Token", style="cyan")
     table.add_column("Hex", style="dim")
     table.add_column("Swatch")
+    import re
+
+    _hex_ok = re.compile(r"^#?[0-9A-Fa-f]{3,8}$")
     for token, hex_value in spec.colors.items():
-        try:
-            swatch = f"[{hex_value}]████████[/{hex_value}]"
-        except Exception:  # noqa: BLE001 — a bad hex must not abort the table
+        hv = str(hex_value)
+        # MEDIUM (review followup): validate the hex up front. The prior
+        # try/except guarded an f-string — which cannot raise; the real
+        # Rich-markup parse happens later at ``_console.print(table)``,
+        # outside the guard. A malformed hex (or a hostile user-skin
+        # value like "red [bold]") would have crashed the whole preview.
+        if _hex_ok.match(hv):
+            swatch = f"[{hv}]████████[/{hv}]"
+        else:
             swatch = "[dim]?[/dim]"
-        table.add_row(token, str(hex_value), swatch)
+        table.add_row(token, hv, swatch)
     _console.print(table)
     if spec.description:
         _console.print(f"[dim]{spec.description}[/dim]")
