@@ -70,7 +70,16 @@ def test_management_plugin_lists_plugins(client: TestClient) -> None:
     sample = body["plugins"][0]
     for required in ("id", "name", "version", "enabled", "auth_status"):
         assert required in sample, f"missing field: {required}"
-    assert sample["auth_status"] in ("configured", "missing", "unused")
+    # auth_status canonical values are configured/missing/none.
+    # auth_status_legacy carries the old "unused" alias for one release
+    # while the oc-workspace built bundle still expects it; remove in a
+    # follow-up PR once the bundle is rebuilt.
+    assert sample["auth_status"] in ("configured", "missing", "none")
+    assert "auth_status_legacy" in sample
+    if sample["auth_status"] == "none":
+        assert sample["auth_status_legacy"] == "unused"
+    else:
+        assert sample["auth_status_legacy"] == sample["auth_status"]
 
 
 def test_management_health_works(client: TestClient) -> None:
