@@ -31,6 +31,7 @@ import yaml
 
 from opencomputer.agent.workspace import WorkspaceOverlay
 from opencomputer.plugins.preset import load_preset
+from opencomputer.plugins.recommended import apply_core_defaults
 
 # ``"*"`` sentinel means "all plugins allowed"; matches zesty 14.D's
 # ``plugins.enabled: "*"`` shape. A concrete list means "only these ids".
@@ -48,6 +49,11 @@ class ProfileConfig:
 
     preset: str | None = None
     enabled_plugins: EnabledPlugins = "*"
+    # Recipe A.2 — explicit opt-out from the always-on core trio (and a
+    # plain subtraction from any concrete ``enabled`` list). Empty by
+    # default; only meaningful for concrete lists (a ``"*"`` wildcard
+    # already loads everything).
+    disabled_plugins: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +137,22 @@ def validate_profile_config_dict(
             f"plugins.enabled is an inline list)"
         )
 
-    return ProfileConfig(preset=preset, enabled_plugins=enabled)
+    # ``plugins.disabled`` — an independent axis (allowed alongside
+    # preset / enabled / wildcard). A list of plugin-id strings.
+    disabled: frozenset[str] = frozenset()
+    if plugins_block is not None and plugins_block.get("disabled") is not None:
+        block_disabled = plugins_block["disabled"]
+        if not isinstance(block_disabled, list) or not all(
+            isinstance(x, str) for x in block_disabled
+        ):
+            raise ProfileConfigError(
+                f"{path}: `plugins.disabled` must be a list of strings"
+            )
+        disabled = frozenset(block_disabled)
+
+    return ProfileConfig(
+        preset=preset, enabled_plugins=enabled, disabled_plugins=disabled
+    )
 
 
 def load_profile_config(profile_dir: Path) -> ProfileConfig:
@@ -211,6 +232,17 @@ def resolve_enabled_plugins(
             trail.append(f"+ overlay additional {additional}")
         else:
             enabled = base
+
+    # Recipe A.2 — the core plugin trio (coding-harness, memory-honcho,
+    # dev-tools) is always-on. `apply_core_defaults` unions it into a
+    # concrete list (a "*" wildcard already absorbs it) and subtracts
+    # `plugins.disabled` as the explicit opt-out.
+    enabled_with_defaults = apply_core_defaults(
+        enabled=enabled, disabled=profile_cfg.disabled_plugins
+    )
+    if enabled_with_defaults != enabled:
+        trail.append("+ core defaults (coding-harness/memory-honcho/dev-tools)")
+    enabled = enabled_with_defaults
 
     return ResolvedPluginFilter(enabled=enabled, source=" -> ".join(trail))
 

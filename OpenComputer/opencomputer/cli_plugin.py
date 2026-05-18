@@ -1025,6 +1025,25 @@ def plugin_enable(
         if plugins_block is None:
             plugins_block = {"enabled": []}
             raw["plugins"] = plugins_block
+
+        # If <id> was explicitly disabled, enabling means clearing that
+        # opt-out. For a core plugin that fully re-enables it (the trio
+        # is always-on once it leaves plugins.disabled); this is the
+        # complete action, so we write and return here.
+        disabled = plugins_block.get("disabled")
+        if isinstance(disabled, list) and plugin_id in disabled:
+            disabled.remove(plugin_id)
+            if not disabled:
+                plugins_block.pop("disabled", None)
+            _atomic_write_yaml(path, raw)
+            _try_clear_demand_tracker(plugin_id)
+            _console.print(
+                f"[green]Re-enabled[/green] '{plugin_id}' for profile "
+                f"'{profile_name}' (removed from plugins.disabled). "
+                "Restart opencomputer to load it."
+            )
+            raise typer.Exit(code=0)
+
         # validator already enforced that plugins is a dict + enabled is
         # list-or-"*" — here we just need to handle the "*" wildcard case
         # and seed an empty list.
@@ -1067,11 +1086,17 @@ def plugin_enable(
 def plugin_disable(
     plugin_id: str = typer.Argument(..., help="Plugin id to disable for the active profile."),
 ) -> None:
-    """Remove ``<id>`` from the active profile's ``profile.yaml``.
+    """Disable ``<id>`` for the active profile.
 
-    Friendly no-op if the id isn't currently enabled (including when
-    profile.yaml doesn't exist yet). Writes atomically on success.
+    An ordinary plugin is disabled by removal from ``plugins.enabled``.
+    A core plugin (coding-harness / memory-honcho / dev-tools) is
+    always-on (Recipe A.2), so disabling it instead adds ``<id>`` to
+    ``plugins.disabled`` — the explicit opt-out. ``plugins.disabled``
+    has no effect on a wildcard (``plugins.enabled: "*"`` or unset), so
+    disabling a core plugin there is refused with an instruction.
+    Friendly no-op when there is nothing to do. Writes atomically.
     """
+    from opencomputer.plugins.recommended import RECOMMENDED_PLUGINS
     from opencomputer.profiles_lock import profile_yaml_lock
 
     path, profile_name = _active_profile_yaml_path()
@@ -1082,6 +1107,49 @@ def plugin_disable(
             f"'{profile_name}'. Nothing to do."
         )
 
+    if plugin_id in RECOMMENDED_PLUGINS:
+        # Core plugin — always-on. The opt-out is plugins.disabled,
+        # which only has meaning for a concrete plugins.enabled list.
+        with profile_yaml_lock(path.parent):
+            raw = _read_and_validate_profile_yaml(path, action_label="disable")
+            plugins_block = raw.get("plugins")
+            if not isinstance(plugins_block, dict):
+                plugins_block = {}
+            enabled = plugins_block.get("enabled")
+            if enabled is None or enabled == "*":
+                _console.print(
+                    f"[red]error:[/red] '{plugin_id}' is a core plugin "
+                    "(always-on). The active profile uses the wildcard "
+                    'plugin filter (`plugins.enabled: "*"` or unset), '
+                    "where `plugins.disabled` has no effect.\n"
+                    "Set a concrete `plugins.enabled` list first, then "
+                    "re-run `oc plugin disable`."
+                )
+                raise typer.Exit(code=1)
+            raw.setdefault("plugins", plugins_block)
+            disabled = plugins_block.get("disabled")
+            if not isinstance(disabled, list):
+                disabled = []
+                plugins_block["disabled"] = disabled
+            if plugin_id in disabled:
+                _console.print(
+                    f"Core plugin '{plugin_id}' is already disabled for "
+                    f"profile '{profile_name}'. Nothing to do."
+                )
+                raise typer.Exit(code=0)
+            disabled.append(plugin_id)
+            # Resolve a contradictory enabled+disabled state.
+            if isinstance(enabled, list) and plugin_id in enabled:
+                enabled.remove(plugin_id)
+            _atomic_write_yaml(path, raw)
+        _console.print(
+            f"[green]Disabled[/green] core plugin '{plugin_id}' for profile "
+            f"'{profile_name}' (added to plugins.disabled). "
+            "Restart opencomputer to unload it."
+        )
+        return
+
+    # ── ordinary plugin — remove from plugins.enabled ──
     if not path.exists():
         _already_not_enabled()
         raise typer.Exit(code=0)
