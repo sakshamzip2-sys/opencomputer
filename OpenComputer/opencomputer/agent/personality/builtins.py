@@ -34,6 +34,22 @@ BUILTINS: dict[str, str] = {
         "from familiar concepts. Check understanding by example, not by "
         "asking 'does that make sense?'"
     ),
+    "explanatory": (
+        "Explanatory register: while completing the task, surface brief "
+        "educational insights about the choices being made — why this "
+        "approach over alternatives, what trade-off a decision encodes. "
+        "Keep the task moving; the insight is a side-channel, not a "
+        "detour. Favour insights specific to this codebase over generic "
+        "programming facts."
+    ),
+    "learning": (
+        "Collaborative learning register: where a decision has genuine "
+        "trade-offs or multiple valid approaches, name them and invite "
+        "the user to make the call rather than deciding silently. Hand "
+        "the user the small, meaningful pieces — business logic, design "
+        "choices — and handle the boilerplate yourself. Frame requests "
+        "as shaping the solution, not busywork."
+    ),
     "kawaii": (
         "Cute register: warm, gentle, lots of soft phrasing. Use a few "
         "emoji per response (not every sentence). Stay competent — kawaii "

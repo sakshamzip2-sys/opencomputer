@@ -69,3 +69,49 @@ class BusyIndicator:
 
     def reset(self) -> None:
         self._idx = 0
+
+
+# ── /indicator face override (best-of-three Recipe 7) ────────────────
+#
+# The streaming spinner normally uses the active skin's faces
+# (``streaming._skin_spinner_text``). ``/indicator <style>`` lets the
+# user override just the face — independent of the skin — picking one
+# of the STYLES above. ``minimal`` / ``none`` are the "spinner fatigue"
+# escape hatches. Session-scoped: a module global, not persisted.
+
+_INDICATOR_OVERRIDE: str = ""  # "" = no override (use the skin's faces)
+
+
+def set_indicator_style(name: str) -> bool:
+    """Set the busy-indicator face override.
+
+    ``""`` / ``"skin"`` / ``"default"`` clear the override (back to the
+    skin's faces). A known STYLES key sets it. Returns ``True`` when the
+    value was accepted, ``False`` for an unknown style.
+    """
+    global _INDICATOR_OVERRIDE
+    n = (name or "").strip().lower()
+    if n in ("", "skin", "default"):
+        _INDICATOR_OVERRIDE = ""
+        return True
+    if n in STYLES:
+        _INDICATOR_OVERRIDE = n
+        return True
+    return False
+
+
+def current_indicator_style() -> str:
+    """Active override style, or ``""`` when none is set."""
+    return _INDICATOR_OVERRIDE
+
+
+def current_indicator_face() -> str:
+    """First frame of the override style (padding stripped).
+
+    Returns ``""`` when no override is set OR when the override is
+    ``none`` — the caller then renders a verb-only spinner.
+    """
+    if not _INDICATOR_OVERRIDE:
+        return ""
+    frames = STYLES.get(_INDICATOR_OVERRIDE) or ("",)
+    return frames[0].rstrip()

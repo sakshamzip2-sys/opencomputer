@@ -358,3 +358,25 @@ def resolve_command(name: str) -> CommandDef | None:
     """Resolve a name (with or without leading ``/``) to a CommandDef."""
     n = name.lstrip("/").strip().lower()
     return _LOOKUP.get(n)
+
+
+def register_extra_commands(defs: list[CommandDef]) -> None:
+    """Append dynamically-discovered commands to the registry at boot.
+
+    Used by the markdown-command loader (best-of-three Recipe 1) to fold
+    user-authored ``*.md`` commands into the same registry the built-ins
+    live in, so they surface in ``/help`` and autocomplete and resolve
+    through :func:`resolve_command`.
+
+    Any existing entry whose name collides with an incoming def is
+    removed first. That makes the call idempotent (safe to re-run) and
+    implements the conflict policy's shadowing: a markdown command named
+    ``help`` replaces the built-in ``/help`` row outright rather than
+    leaving a duplicate. The shadow itself is logged at the discovery
+    layer; here we just enact last-wins.
+    """
+    incoming = {d.name for d in defs}
+    SLASH_REGISTRY[:] = [c for c in SLASH_REGISTRY if c.name not in incoming]
+    SLASH_REGISTRY.extend(defs)
+    global _LOOKUP
+    _LOOKUP = _build_lookup()

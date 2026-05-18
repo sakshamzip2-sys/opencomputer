@@ -181,3 +181,71 @@ class TestExecution:
         # Registry entry should NOT have been replaced — old object is
         # still there so the user knows what state they're in.
         assert reg.loaded[0] is old
+
+
+# ─── /plugin reload all (best-of-three Recipe 6) ──────────────────────
+
+
+class TestReloadAll:
+    @pytest.mark.asyncio
+    async def test_reload_all_reloads_every_plugin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        p1 = _FakeLoadedPlugin(_FakeCandidate(_FakeManifest("p1")))
+        p2 = _FakeLoadedPlugin(_FakeCandidate(_FakeManifest("p2")))
+        reg = _FakeRegistry(loaded=[p1, p2], shared_api=object())
+
+        from opencomputer.plugins import loader as loader_mod
+
+        monkeypatch.setattr(
+            loader_mod,
+            "reload_plugin",
+            lambda loaded, api, **_kw: (
+                _FakeLoadedPlugin(loaded.candidate),
+                f"reloaded {loaded.candidate.manifest.id}",
+            ),
+        )
+
+        result = await PluginReloadCommand().execute(
+            "reload all", _runtime(reg)
+        )
+        assert "reloaded 2/2 plugins" in result.output
+        # both entries swapped to fresh objects
+        assert reg.loaded[0] is not p1
+        assert reg.loaded[1] is not p2
+
+    @pytest.mark.asyncio
+    async def test_reload_all_empty_registry(self) -> None:
+        reg = _FakeRegistry(loaded=[], shared_api=object())
+        result = await PluginReloadCommand().execute(
+            "reload all", _runtime(reg)
+        )
+        assert "nothing to reload" in result.output.lower()
+
+    @pytest.mark.asyncio
+    async def test_reload_all_continues_past_a_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        p1 = _FakeLoadedPlugin(_FakeCandidate(_FakeManifest("p1")))
+        p2 = _FakeLoadedPlugin(_FakeCandidate(_FakeManifest("p2")))
+        reg = _FakeRegistry(loaded=[p1, p2], shared_api=object())
+
+        from opencomputer.plugins import loader as loader_mod
+
+        def _fake_reload(loaded, api, **_kw):  # noqa: ANN001, ANN002, ANN003
+            pid = loaded.candidate.manifest.id
+            if pid == "p2":
+                return (None, "boom")
+            return (_FakeLoadedPlugin(loaded.candidate), f"reloaded {pid}")
+
+        monkeypatch.setattr(loader_mod, "reload_plugin", _fake_reload)
+
+        result = await PluginReloadCommand().execute(
+            "reload all", _runtime(reg)
+        )
+        assert "reloaded 1/2 plugins" in result.output
+        assert "1 failed" in result.output
+        assert "p2" in result.output
+        # p1 swapped, p2 left in place (failed)
+        assert reg.loaded[0] is not p1
+        assert reg.loaded[1] is p2

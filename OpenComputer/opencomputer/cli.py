@@ -892,6 +892,80 @@ def _resolve_plugin_filter():
     return resolved.enabled
 
 
+def _activation_mode() -> str:
+    """Resolve the best-of-three Recipe 3 activation flag.
+
+    ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan`` opts into manifest-driven
+    activation narrowing; anything else (including unset) keeps today's
+    load-everything behaviour. ``OPENCOMPUTER_LOAD_ALL_PLUGINS=1`` is a
+    hard escape hatch that forces ``all`` regardless — the documented
+    way to bisect a "missing plugin" report.
+
+    Default is ``all``: narrowing stays opt-in until the extension
+    catalog carries enough ``activation`` metadata to narrow safely.
+    """
+    if os.environ.get("OPENCOMPUTER_LOAD_ALL_PLUGINS") == "1":
+        return "all"
+    return os.environ.get("OPENCOMPUTER_PLUGIN_ACTIVATION", "all").strip().lower()
+
+
+def _activation_narrowed_enabled_ids(search_paths):  # type: ignore[no-untyped-def]
+    """Build a narrowed ``enabled_ids`` set from the activation planner.
+
+    Best-of-three Recipe 3. Only consulted when the user has NO explicit
+    ``profile.yaml`` plugin filter and ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan``.
+    Reads each plugin's ``manifest.activation`` block and the current
+    provider/model triggers, then returns the deterministic set of
+    plugin ids whose triggers fire.
+
+    The result is intentionally a *seed* set: ``load_all`` still unions
+    in ``enabled_by_default`` plugins (Layer D) and model-matched
+    plugins (Layer C), so a session never loses its provider.
+
+    Returns ``None`` on any failure — the caller then falls back to
+    loading everything. Narrowing must never wedge startup.
+    """
+    import logging
+
+    log = logging.getLogger("opencomputer.cli")
+    try:
+        from opencomputer.agent.config import _home, load_config_for_profile
+        from opencomputer.plugins.activation_planner import (
+            ActivationTriggers,
+            plan_activations,
+        )
+        from opencomputer.plugins.discovery import discover
+
+        candidates = discover(search_paths)
+        try:
+            cfg = load_config_for_profile(_home())
+            provider = getattr(cfg.model, "provider", "") or ""
+            model = getattr(cfg.model, "model", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            log.warning("activation planner: config read failed (%s)", exc)
+            provider, model = "", ""
+        triggers = ActivationTriggers(
+            active_providers=frozenset(p for p in (provider,) if p),
+            active_model=model,
+        )
+        planned = plan_activations(candidates, triggers)
+        log.info(
+            "plugin activation planner: %d/%d plugins triggered "
+            "(provider=%r model=%r); load_all then unions in "
+            "enabled_by_default + model-matched plugins",
+            len(planned),
+            len(candidates),
+            provider,
+            model,
+        )
+        return frozenset(planned)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "activation planner failed — loading all plugins: %s", exc
+        )
+        return None
+
+
 def _discover_plugins() -> int:
     """Discover + load plugins from the canonical search paths. Returns count loaded.
 
@@ -902,6 +976,13 @@ def _discover_plugins() -> int:
 
     search_paths = standard_search_paths()
     enabled = _resolve_plugin_filter()
+    # Best-of-three Recipe 3 — activation narrowing. Only when the user
+    # has no explicit filter (``enabled is None``) and the flag opts in.
+    # A user-curated profile.yaml is never second-guessed.
+    if enabled is None and _activation_mode() == "plan":
+        narrowed = _activation_narrowed_enabled_ids(search_paths)
+        if narrowed is not None:
+            enabled = narrowed
     loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
 
     # v1.1 plan-3 M11.5 — Mount any plugin-registered CLI subcommand
@@ -2362,6 +2443,48 @@ def _run_chat_session(
 
     profile_home = _profile_home_fn()
 
+    # Best-of-three Recipe 2 — surface every System-A built-in command
+    # (agent/slash_commands_impl) in the CLI chat registry so it shows in
+    # /help + autocomplete and dispatches via the System-A bridge below.
+    try:
+        from opencomputer.cli_ui.slash_handlers import sync_builtin_commands
+
+        sync_builtin_commands()
+    except Exception as _sync_exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "built-in command sync failed: %s", _sync_exc
+        )
+
+    # Best-of-three Recipe 1 — fold user-authored ``*.md`` slash commands
+    # into the registry at boot so they show in /help + autocomplete and
+    # dispatch like built-ins. Project-dir commands are opt-in via
+    # OPENCOMPUTER_PROJECT_COMMANDS=1 (a cwd .md file is more trust-
+    # sensitive than the user's own profile dir).
+    try:
+        from opencomputer.cli_ui.slash_handlers import (
+            install_markdown_commands,
+        )
+
+        _project_cwd = (
+            Path.cwd()
+            if os.environ.get("OPENCOMPUTER_PROJECT_COMMANDS") == "1"
+            else None
+        )
+        _md_cmds = install_markdown_commands(
+            profile_home, project_cwd=_project_cwd
+        )
+        if _md_cmds:
+            console.print(
+                f"[dim]loaded {len(_md_cmds)} markdown command"
+                f"{'s' if len(_md_cmds) != 1 else ''} "
+                f"({', '.join('/' + c.name for c in _md_cmds)})[/dim]"
+            )
+    except Exception as _md_exc:  # noqa: BLE001
+        # A broken commands dir must never block chat startup.
+        logging.getLogger(__name__).warning(
+            "markdown command load failed: %s", _md_exc
+        )
+
     # Per-session paste-fold storage. Pastes >5 lines get folded to
     # ``[Pasted text #N +M lines]`` placeholders in the input buffer;
     # full content stored here for submit-time expansion. Reset on /clear.
@@ -3072,6 +3195,58 @@ def _run_chat_session(
                 )
                 return dispatch_agent_slash_to_console(text, rt, console)
 
+            def _on_builtin_dispatch(name: str, args: str) -> tuple[bool, str]:
+                # Best-of-three Recipe 2 — bridge a System-B miss to the
+                # System-A built-in command registry. Runs the matching
+                # agent/slash_commands_impl Command with the live runtime
+                # so cli_ui never imports the agent registry directly.
+                # Tried BEFORE ``_dispatch_agent_fallthrough`` in
+                # ``dispatch_slash`` so a CommandDef-known slash with no
+                # native handler is resolved here (eliminates the prior
+                # sethome/voice/approve/deny/status KeyError class).
+                import asyncio as _asyncio_bi
+                from dataclasses import replace as _dc_replace
+
+                from opencomputer.agent.slash_commands import (
+                    register_builtin_slash_commands,
+                )
+                from opencomputer.agent.slash_dispatcher import (
+                    dispatch as _bi_dispatch,
+                )
+                from opencomputer.plugins.registry import (
+                    registry as _bi_registry,
+                )
+
+                register_builtin_slash_commands()  # idempotent
+                msg = f"/{name}" + (f" {args}" if args.strip() else "")
+                rt = loop._runtime
+                custom = dict(getattr(rt, "custom", {}) or {})
+                custom.setdefault("session_id", session_id)
+                custom.setdefault("plugin_registry", _bi_registry)
+                rt = _dc_replace(rt, custom=custom)
+                # F3 (review followup): bind the coroutine to a local so
+                # we can ``.close()`` it on the RuntimeError fallback
+                # path. ``asyncio.run`` raises before awaiting when there
+                # is already a running loop in the current thread; the
+                # unawaited coroutine then emits ``RuntimeWarning:
+                # coroutine '_bi_dispatch' was never awaited`` at GC and
+                # leaks its frames. Mirrors the pattern in
+                # ``slash_commands.try_dispatch_agent_slash``.
+                pending = _bi_dispatch(msg, _bi_registry.slash_commands, rt)
+                try:
+                    res = _asyncio_bi.run(pending)
+                except RuntimeError:
+                    pending.close()
+                    _inner = _asyncio_bi.get_event_loop()
+                    _fut = _asyncio_bi.run_coroutine_threadsafe(
+                        _bi_dispatch(msg, _bi_registry.slash_commands, rt),
+                        _inner,
+                    )
+                    res = _fut.result(timeout=30.0)
+                if res is None:
+                    return (False, "")
+                return (True, getattr(res, "output", "") or "")
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -3103,6 +3278,7 @@ def _run_chat_session(
                 on_reasoning_dispatch=_on_reasoning_dispatch,
                 on_sources_dispatch=_on_sources_dispatch,
                 on_undo=_on_undo,
+                on_builtin_dispatch=_on_builtin_dispatch,
                 # Live (model, provider) getter — closes over the running
                 # AgentLoop so ``/model`` and ``/provider`` no-arg reads
                 # reflect the CURRENT state after any number of mid-session
@@ -5028,6 +5204,11 @@ app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
 app.add_typer(rules_app, name="rules")
 app.add_typer(routing_app, name="routing")
+
+# 2026-05-18 — best-of-three Recipe 4: `oc skin` list/set/preview.
+from opencomputer.cli_skin import skin_app  # noqa: E402
+
+app.add_typer(skin_app, name="skin")
 # 2026-05-11 — closed-loop threshold tuning surface. Distinct from the
 # existing ``oc evolution`` namespace (PR-1 trajectory/prompts/skills,
 # added in abbc1913) — this one specifically tunes skill-evolution +

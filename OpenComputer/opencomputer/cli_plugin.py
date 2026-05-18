@@ -304,6 +304,32 @@ def install(
     ),
 ) -> None:
     """Install a plugin from a local directory, remote catalog, git, URL, or PyPI."""
+    # Best-of-three Recipe 5 — ``<marketplace>/<plugin>`` install form.
+    # If the first slash-segment names a registered marketplace, resolve
+    # the slug against that marketplace's catalog. Checked before the
+    # source-policy gate and the github-shorthand path (both of which
+    # would mis-classify ``mp/plugin``); the catalog install path runs
+    # its own security scan + BEFORE_INSTALL gate.
+    if (
+        "/" in source
+        and not _is_url_arg(source)
+        and not _is_git_arg(source)
+    ):
+        mp_name, _, mp_slug = source.partition("/")
+        from opencomputer.plugins.marketplaces import get_marketplace
+
+        mp = get_marketplace(mp_name)
+        if mp is not None and mp_slug and "/" not in mp_slug:
+            _install_from_remote(
+                slug=mp_slug,
+                profile=profile,
+                is_global=is_global,
+                force=force,
+                refresh=refresh,
+                catalog_url=mp.url,
+            )
+            return
+
     # v1.1 plan-3 M11.3 — every install path runs through the typed
     # source-policy gate before any network IO.  Deny-by-default for
     # network kinds keeps the supply-chain surface narrow.
@@ -491,8 +517,14 @@ def _install_from_remote(
     is_global: bool,
     force: bool,
     refresh: bool,
+    catalog_url: str | None = None,
 ) -> None:
-    """D.3 T1 — install a plugin slug via the remote catalog."""
+    """D.3 T1 — install a plugin slug via the remote catalog.
+
+    ``catalog_url`` overrides the resolved single catalog — set by the
+    ``<marketplace>/<plugin>`` install form (best-of-three Recipe 5) so
+    the slug is resolved against that specific marketplace's catalog.
+    """
     from opencomputer.plugins.remote_install import (
         CatalogError,
         install_from_catalog,
@@ -504,6 +536,7 @@ def _install_from_remote(
         result = install_from_catalog(
             slug,
             dest_root=dest_root,
+            catalog_url=catalog_url,
             refresh=refresh,
             force=force,
             trusted_keys=_load_trusted_catalog_keys(),
@@ -1464,6 +1497,446 @@ def verify(
     for diff in report.differences:
         _console.print(f"  - {diff.kind}: {diff.path}")
     raise typer.Exit(code=1)
+
+
+# ── plugin doctor (best-of-three Recipe 8) ───────────────────────────
+
+
+def _host_version() -> str:
+    """Running opencomputer version, or '' if it can't be resolved."""
+    try:
+        from importlib.metadata import version
+
+        return version("opencomputer")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _entry_file(candidate: object) -> Path | None:
+    """Resolve a candidate's entry-module source file on disk."""
+    manifest = candidate.manifest  # type: ignore[attr-defined]
+    entry = str(getattr(manifest, "entry", "") or "plugin")
+    root = candidate.root_dir  # type: ignore[attr-defined]
+    cand = root / entry if entry.endswith(".py") else root / f"{entry}.py"
+    return cand if cand.is_file() else None
+
+
+def _diagnose_plugin(candidate: object) -> list[tuple[str, str, str]]:
+    """Run read-only checks on one discovered plugin.
+
+    Returns ``[(check, status, detail)]`` with status in
+    PASS / FAIL / SKIP / INFO. No plugin code is executed — the entry
+    module is syntax-checked via ``compile()``, never imported.
+    """
+    from opencomputer.plugins.loader import (
+        PluginIncompatibleError,
+        _check_min_host_version,
+    )
+    from opencomputer.plugins.registry import _manifest_allows_profile
+    from opencomputer.profiles import read_active_profile
+
+    manifest = candidate.manifest  # type: ignore[attr-defined]
+    rows: list[tuple[str, str, str]] = []
+
+    # 1. Manifest — discovery already parsed + validated it.
+    rows.append(("manifest", "PASS", f"v{manifest.version}, kind={manifest.kind}"))
+
+    # 2. Entry module — exists + compiles (syntax only, never executed).
+    entry_file = _entry_file(candidate)
+    if entry_file is None:
+        rows.append(("entry module", "FAIL", "entry source file not found"))
+    else:
+        try:
+            compile(
+                entry_file.read_text(encoding="utf-8"), str(entry_file), "exec"
+            )
+            rows.append(("entry module", "PASS", entry_file.name))
+        except (SyntaxError, OSError) as exc:
+            rows.append(("entry module", "FAIL", f"{type(exc).__name__}: {exc}"))
+
+    # 3. min_host_version compatibility.
+    min_host = str(getattr(manifest, "min_host_version", "") or "")
+    if not min_host:
+        rows.append(("min_host_version", "SKIP", "not declared"))
+    else:
+        try:
+            _check_min_host_version(
+                plugin_id=manifest.id,
+                min_host_version=min_host,
+                host_version=_host_version() or "0",
+            )
+            rows.append(("min_host_version", "PASS", f">= {min_host}"))
+        except PluginIncompatibleError as exc:
+            rows.append(("min_host_version", "FAIL", str(exc)))
+
+    # 4. Profile scope.
+    active = read_active_profile() or "default"
+    allowed, reason = _manifest_allows_profile(manifest, active)
+    if allowed:
+        rows.append(("profile scope", "PASS", f"allowed in {active!r}"))
+    else:
+        rows.append(("profile scope", "FAIL", reason or f"excluded in {active!r}"))
+
+    # 5. Enabled status — against the resolved profile.yaml filter.
+    # F4 (review followup): a broken ``_resolve_plugin_filter`` used to
+    # be silently swallowed and reported as "no explicit filter — all
+    # enabled" — i.e. the doctor lied about the configuration state.
+    # ``_resolve_plugin_filter`` already returns ``None`` for its
+    # documented failure modes (missing config, ProfileConfigError),
+    # so a raised exception here is a real bug and must surface as a
+    # FAIL row so ``doctor`` exits non-zero on real breakage.
+    try:
+        from opencomputer.cli import _resolve_plugin_filter
+
+        enabled = _resolve_plugin_filter()
+    except Exception as exc:  # noqa: BLE001
+        rows.append(("enabled", "FAIL", f"profile filter error: {exc}"))
+    else:
+        if enabled is None:
+            rows.append(("enabled", "SKIP", "no explicit filter — all enabled"))
+        elif manifest.id in enabled:
+            rows.append(("enabled", "PASS", "in active enabled set"))
+        else:
+            # Disabled-by-config is a deliberate state, not a fault — keep
+            # it INFO so ``doctor`` exits non-zero only on real breakage.
+            rows.append((
+                "enabled", "INFO", "disabled — not in profile.yaml enabled set"
+            ))
+
+    # 6. Declared surface (informational).
+    n_tools = len(getattr(manifest, "tool_names", ()) or ())
+    n_mcp = len(getattr(manifest, "mcp_servers", ()) or ())
+    n_cli = len(getattr(manifest, "cli_commands", ()) or ())
+    rows.append((
+        "declared surface",
+        "INFO",
+        f"{n_tools} tools, {n_mcp} mcp servers, {n_cli} cli commands",
+    ))
+    return rows
+
+
+_DOCTOR_STYLE = {
+    "PASS": "green",
+    "FAIL": "red",
+    "SKIP": "dim",
+    "INFO": "cyan",
+}
+
+
+@plugin_app.command("doctor")
+def plugin_doctor(
+    plugin_id: str = typer.Argument(
+        "", help="Plugin id to diagnose. Omit and pass --all for every plugin."
+    ),
+    check_all: bool = typer.Option(
+        False, "--all", help="Diagnose every discovered plugin."
+    ),
+) -> None:
+    """Diagnose plugins — manifest, entry module, compatibility, status.
+
+    Read-only: the entry module is syntax-checked, never imported, so
+    ``doctor`` is safe to run against an untrusted plugin.
+    """
+    from opencomputer.plugins.discovery import discover, standard_search_paths
+
+    candidates = discover(standard_search_paths())
+    by_id = {c.manifest.id: c for c in candidates}
+
+    if check_all:
+        targets = sorted(by_id)
+    elif plugin_id:
+        if plugin_id not in by_id:
+            _console.print(
+                f"[red]no plugin {plugin_id!r} discovered.[/red] "
+                f"run [cyan]oc plugins[/cyan] to list discovered ids."
+            )
+            raise typer.Exit(code=1)
+        targets = [plugin_id]
+    else:
+        _console.print(
+            "usage: [cyan]oc plugin doctor <id>[/cyan] "
+            "or [cyan]oc plugin doctor --all[/cyan]"
+        )
+        raise typer.Exit(code=2)
+
+    any_fail = False
+    for tid in targets:
+        rows = _diagnose_plugin(by_id[tid])
+        table = Table(title=f"plugin doctor — {tid}", header_style="bold")
+        table.add_column("Check", style="bold")
+        table.add_column("Status")
+        table.add_column("Detail")
+        for check, status, detail in rows:
+            if status == "FAIL":
+                any_fail = True
+            table.add_row(
+                check,
+                f"[{_DOCTOR_STYLE.get(status, 'white')}]{status}[/]",
+                detail,
+            )
+        _console.print(table)
+    if any_fail:
+        raise typer.Exit(code=1)
+
+
+# ── named marketplaces (best-of-three Recipe 5) ──────────────────────
+
+marketplace_app = typer.Typer(
+    help="Manage named plugin marketplaces (plural catalog sources)."
+)
+
+
+@marketplace_app.command("add")
+def marketplace_add(
+    name: str = typer.Argument(..., help="Short name for the marketplace."),
+    url: str = typer.Argument(..., help="https:// catalog endpoint."),
+    trust_key: str = typer.Option(
+        "",
+        "--trust-key",
+        help="Advisory signing-key fingerprint to record for this source.",
+    ),
+) -> None:
+    """Register a named marketplace."""
+    from opencomputer.plugins.marketplaces import (
+        MarketplaceError,
+        add_marketplace,
+    )
+
+    try:
+        mp = add_marketplace(name, url, trust_key=trust_key)
+    except MarketplaceError as exc:
+        _console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    _console.print(
+        f"[green]added marketplace[/green] [cyan]{mp.name}[/cyan] → {mp.url}"
+    )
+
+
+@marketplace_app.command("remove")
+def marketplace_remove(
+    name: str = typer.Argument(..., help="Marketplace name to remove."),
+) -> None:
+    """Remove a marketplace. Installed plugins are not affected."""
+    from opencomputer.plugins.marketplaces import remove_marketplace
+
+    if remove_marketplace(name):
+        _console.print(f"[green]removed marketplace[/green] {name}")
+    else:
+        _console.print(f"[yellow]no marketplace named[/yellow] {name!r}")
+        raise typer.Exit(code=1)
+
+
+@marketplace_app.command("list")
+def marketplace_list() -> None:
+    """List configured marketplaces."""
+    from opencomputer.plugins.marketplaces import load_marketplaces
+
+    items = load_marketplaces()
+    if not items:
+        _console.print(
+            "[dim]no marketplaces configured — "
+            "oc plugin marketplace add <name> <url>[/dim]"
+        )
+        return
+    table = Table(title="Plugin marketplaces", header_style="bold")
+    table.add_column("Name", style="cyan")
+    table.add_column("URL")
+    table.add_column("Trust key", style="dim")
+    for mp in items:
+        table.add_row(mp.name, mp.url, mp.trust_key or "—")
+    _console.print(table)
+
+
+def _catalog_plugin_entries(catalog: dict) -> list[tuple[str, dict]]:
+    """Normalise a catalog's ``plugins`` block to ``[(slug, entry)]``,
+    tolerating both the dict-keyed and list shapes."""
+    plugins = catalog.get("plugins")
+    if isinstance(plugins, dict):
+        return [(str(k), v if isinstance(v, dict) else {})
+                for k, v in plugins.items()]
+    if isinstance(plugins, list):
+        out: list[tuple[str, dict]] = []
+        for entry in plugins:
+            if isinstance(entry, dict):
+                slug = str(entry.get("id") or entry.get("slug") or "")
+                if slug:
+                    out.append((slug, entry))
+        return out
+    return []
+
+
+@plugin_app.command("search")
+def plugin_search(
+    query: str = typer.Argument(..., help="Substring to match plugin ids."),
+) -> None:
+    """Search plugin ids across every configured marketplace."""
+    from opencomputer.plugins.marketplaces import (
+        load_marketplaces,
+        marketplace_cache_path,
+    )
+    from opencomputer.plugins.remote_install import CatalogError, fetch_catalog
+
+    marketplaces = load_marketplaces()
+    if not marketplaces:
+        _console.print(
+            "[yellow]no marketplaces configured[/yellow] — "
+            "oc plugin marketplace add <name> <url>"
+        )
+        raise typer.Exit(code=1)
+
+    needle = query.strip().lower()
+    rows: list[tuple[str, str, str]] = []
+    for mp in marketplaces:
+        try:
+            catalog = fetch_catalog(
+                url=mp.url,
+                cache_path_override=marketplace_cache_path(mp.name),
+            )
+        except CatalogError as exc:
+            _console.print(
+                f"[yellow]skipping {mp.name}:[/yellow] {exc}"
+            )
+            continue
+        for slug, entry in _catalog_plugin_entries(catalog):
+            if needle in slug.lower():
+                rows.append(
+                    (mp.name, slug, str(entry.get("description", "")))
+                )
+
+    if not rows:
+        _console.print(f"[dim]no plugins match {query!r}[/dim]")
+        return
+    table = Table(title=f"Search: {query}", header_style="bold")
+    table.add_column("Marketplace", style="cyan")
+    table.add_column("Plugin", style="bold")
+    table.add_column("Description")
+    for mp_name, slug, desc in sorted(rows):
+        table.add_row(mp_name, slug, desc)
+    _console.print(table)
+    _console.print(
+        "[dim]install with[/dim] "
+        "[cyan]oc plugin install <marketplace>/<plugin>[/cyan]"
+    )
+
+
+plugin_app.add_typer(marketplace_app, name="marketplace")
+
+
+# ── per-plugin update notifier (best-of-three Recipe 10) ─────────────
+
+
+def _installed_plugin_records() -> list:
+    """Read every installed-plugin index — active profile + global."""
+    from opencomputer.plugins.installed_index import read_index
+    from opencomputer.profiles import get_default_root, get_profile_dir, read_active_profile
+
+    roots: list[Path] = [get_default_root() / "plugins"]
+    active = read_active_profile()
+    if active is not None:
+        roots.insert(0, get_profile_dir(active) / "plugins")
+    seen: set[str] = set()
+    records: list = []
+    for root in roots:
+        for rec in read_index(root / ".installed_index.json"):
+            if rec.plugin_id in seen:
+                continue
+            seen.add(rec.plugin_id)
+            records.append(rec)
+    return records
+
+
+def _build_catalog_versions() -> dict[str, str]:
+    """Fetch the default catalog + every marketplace; map id → version."""
+    from opencomputer.plugins.marketplaces import (
+        load_marketplaces,
+        marketplace_cache_path,
+    )
+    from opencomputer.plugins.remote_install import (
+        CatalogError,
+        fetch_catalog,
+        resolve_catalog_url,
+    )
+
+    versions: dict[str, str] = {}
+
+    def _absorb(catalog: dict) -> None:
+        for slug, entry in _catalog_plugin_entries(catalog):
+            ver = str(entry.get("version", "")).strip()
+            if ver:
+                versions[slug] = ver
+
+    try:
+        _absorb(fetch_catalog(url=resolve_catalog_url()))
+    except CatalogError as exc:
+        # F5 (review followup): the previous ``except CatalogError: pass``
+        # swallowed every subclass under a "no default catalog configured"
+        # comment that was only true for one subclass. A real network 5xx,
+        # signature failure, or parse error would silently leave
+        # ``update-check`` reporting "all up to date" — the worst class
+        # of bug in a notifier. Surface every variant symmetrically with
+        # the marketplace loop below.
+        _console.print(f"[yellow]skipping default catalog:[/yellow] {exc}")
+    for mp in load_marketplaces():
+        try:
+            _absorb(
+                fetch_catalog(
+                    url=mp.url,
+                    cache_path_override=marketplace_cache_path(mp.name),
+                )
+            )
+        except CatalogError as exc:
+            _console.print(f"[yellow]skipping {mp.name}:[/yellow] {exc}")
+    return versions
+
+
+@plugin_app.command("update-check")
+def plugin_update_check(
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Bypass the 6h cache and re-poll catalogs."
+    ),
+) -> None:
+    """Report installed plugins that have a newer catalog version.
+
+    Performing an update is ``oc plugin install <marketplace>/<plugin>
+    --force`` — this command is the notifier.
+    """
+    from opencomputer.plugins.update_check import (
+        compute_updates,
+        read_cache,
+        write_cache,
+    )
+
+    if not refresh:
+        cached = read_cache()
+        if cached is not None:
+            _render_plugin_updates(cached, from_cache=True)
+            return
+
+    records = _installed_plugin_records()
+    catalog_versions = _build_catalog_versions()
+    updates = compute_updates(records, catalog_versions)
+    write_cache(updates)
+    _render_plugin_updates(updates, from_cache=False)
+
+
+def _render_plugin_updates(updates: list, *, from_cache: bool) -> None:  # noqa: ANN001
+    if not updates:
+        suffix = " [dim](cached)[/dim]" if from_cache else ""
+        _console.print(f"[green]all plugins up to date[/green]{suffix}")
+        return
+    table = Table(
+        title=f"{len(updates)} plugin update(s) available", header_style="bold"
+    )
+    table.add_column("Plugin", style="cyan")
+    table.add_column("Installed", style="dim")
+    table.add_column("Available", style="bold green")
+    for u in updates:
+        table.add_row(u.plugin_id, u.installed_version, u.available_version)
+    _console.print(table)
+    _console.print(
+        "[dim]update with[/dim] [cyan]oc plugin install "
+        "<marketplace>/<plugin> --force[/cyan]"
+    )
 
 
 __all__ = ["plugin_app"]

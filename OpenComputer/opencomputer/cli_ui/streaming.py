@@ -131,15 +131,27 @@ def _skin_spinner_text(*, phase: Literal["waiting", "thinking"]) -> str:
         verbs = current_spinner_verbs()
     except Exception:  # noqa: BLE001 — fail to legacy text
         return "Thinking…"
+    verb = verbs[0] if verbs else "thinking"
+    # ``/indicator <style>`` override (best-of-three R7) — a user-picked
+    # busy-face style takes precedence over the skin's faces; ``none``
+    # collapses to a verb-only spinner (the fatigue escape hatch).
+    try:
+        from opencomputer.cli_ui.busy_indicator import (
+            current_indicator_face,
+            current_indicator_style,
+        )
+
+        if current_indicator_style():
+            face = current_indicator_face()
+            return f"{face} {verb}…" if face else f"{verb.capitalize()}…"
+    except Exception:  # noqa: BLE001 — never break the render path
+        pass
     if not faces:
         # No face cycle configured — fall back to the legacy verb-only
         # spinner so user-authored skins that omit faces still get the
         # text they configured.
-        verb = verbs[0] if verbs else "thinking"
         return f"{verb.capitalize()}…"
-    face = faces[0]
-    verb = verbs[0] if verbs else "thinking"
-    return f"{face} {verb}…"
+    return f"{faces[0]} {verb}…"
 
 
 def current_renderer() -> StreamingRenderer | None:

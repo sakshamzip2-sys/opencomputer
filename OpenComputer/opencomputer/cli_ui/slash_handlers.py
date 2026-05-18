@@ -26,6 +26,7 @@ from opencomputer.cli_ui.slash import (
     CommandDef,
     SlashResult,
     is_slash_command,
+    register_extra_commands,
     resolve_command,
 )
 from plugin_sdk.runtime_context import RuntimeContext
@@ -178,6 +179,16 @@ class SlashContext:
     #: fixtures that don't wire the getter still render a meaningful
     #: value rather than literal empty strings.
     get_active_model_info: Callable[[], tuple[str, str]] = lambda: ("", "")
+    #: Bridge to the System-A built-in command registry (best-of-three
+    #: Recipe 2). Called when System B has no native handler for a
+    #: command — runs the matching ``agent/slash_commands_impl`` Command
+    #: with the live ``RuntimeContext`` and returns ``(found, output)``.
+    #: ``found=False`` means no System-A command matched either, so the
+    #: dispatcher reports "unknown command". cli.py wires a closure over
+    #: the live AgentLoop; the default keeps test contexts agnostic.
+    on_builtin_dispatch: Callable[[str, str], tuple[bool, str]] = (
+        lambda _name, _args: (False, "")
+    )
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -1784,13 +1795,35 @@ def dispatch_slash(
         return SlashResult(handled=False)
     name, args = _split_args(text)
     cmd: CommandDef | None = resolve_command(name)
-    if cmd is None:
-        if on_unknown is not None:
-            return on_unknown(text)
-        ctx.console.print(f"[red]unknown command:[/red] /{name}  (try /help)")
+    # Native System-B handler — the fast path (R2).
+    if cmd is not None and cmd.name in _HANDLERS:
+        return _HANDLERS[cmd.name](ctx, args)
+    # No native handler: try the System-A built-in bridge first (R2 —
+    # fixes the KeyError for commands with a CommandDef but no native
+    # System-B handler, by running the matching System-A Command with
+    # the live RuntimeContext).
+    #
+    # F1 (review followup): pass the *canonical* lowercase name to the
+    # bridge — ``resolve_command`` normalises (so ``/COPY`` finds the
+    # CommandDef) but the System-A registry is keyed by lowercase, so
+    # a non-canonical ``name`` here would miss every mixed-case slash.
+    # F2 (review followup): ``markup=False`` on bridge output — System-A
+    # command output is plain text (file names, exception messages) and
+    # a stray ``[`` would lose data to Rich markup parsing. Mirrors
+    # ``dispatch_agent_slash_to_console``.
+    bridge_name = cmd.name if cmd is not None else name.lower()
+    found, output = ctx.on_builtin_dispatch(bridge_name, " ".join(args))
+    if found:
+        if output:
+            ctx.console.print(output, markup=False)
         return SlashResult(handled=True)
-    handler = _HANDLERS[cmd.name]
-    return handler(ctx, args)
+    # Still unhandled — fall through to ``on_unknown`` (#639's agent-slash
+    # fallthrough, used by ``oc chat`` to reach the agent SlashCommand
+    # registry for slashes the System-B registry never saw).
+    if on_unknown is not None:
+        return on_unknown(text)
+    ctx.console.print(f"[red]unknown command:[/red] /{name}  (try /help)")
+    return SlashResult(handled=True)
 
 
 def dispatch_agent_slash_to_console(
@@ -1820,3 +1853,132 @@ def dispatch_agent_slash_to_console(
     elif result.output:
         console.print(result.output, markup=False)
     return SlashResult(handled=True)
+
+
+# ── user markdown commands (best-of-three Recipe 1) ──────────────────
+
+
+def _make_markdown_handler(
+    md: Any,
+) -> Callable[[SlashContext, list[str]], SlashResult]:
+    """Build the handler for one discovered markdown command.
+
+    The handler renders the command body (substituting ``{{args}}``) and
+    pushes it onto the per-session next-turn queue — the chat outer loop
+    drains that queue ahead of stdin, so the rendered prompt runs as the
+    very next turn with no extra keypress.
+    """
+    from opencomputer.agent.markdown_commands import render_command_body
+
+    def _handler(ctx: SlashContext, args: list[str]) -> SlashResult:
+        body = render_command_body(md, " ".join(args))
+        if not body.strip():
+            ctx.console.print(
+                f"[yellow]/{md.name}: command body is empty[/yellow]"
+            )
+            return SlashResult(handled=True)
+        if ctx.on_queue_add(body):
+            ctx.console.print(f"[dim](/{md.name})[/dim]")
+        else:
+            ctx.console.print(
+                f"[red]/{md.name}: next-turn queue is full[/red]"
+            )
+        return SlashResult(handled=True)
+
+    return _handler
+
+
+def install_markdown_commands(
+    profile_home: Path,
+    *,
+    project_cwd: Path | None = None,
+) -> list[Any]:
+    """Discover user markdown commands and fold them into the registry.
+
+    Called once at chat-session boot. Returns the discovered
+    :class:`~opencomputer.agent.markdown_commands.MarkdownCommand` list
+    (empty when there are none) so the caller can report a count.
+    Idempotent — re-running replaces prior markdown registrations.
+    """
+    from opencomputer.agent.markdown_commands import (
+        discover_markdown_commands,
+    )
+
+    cmds = discover_markdown_commands(profile_home, project_cwd=project_cwd)
+    if not cmds:
+        return []
+    defs: list[CommandDef] = []
+    for md in cmds:
+        defs.append(
+            CommandDef(
+                name=md.name,
+                description=(
+                    md.description
+                    or f"User markdown command ({md.source_path.name})"
+                ),
+                category=md.category or "custom",
+                args_hint=md.args_hint,
+            )
+        )
+        _HANDLERS[md.name] = _make_markdown_handler(md)
+    register_extra_commands(defs)
+    return cmds
+
+
+# ── System-A built-in command sync (best-of-three Recipe 2) ──────────
+
+
+def sync_builtin_commands() -> list[str]:
+    """Surface every System-A built-in command in System B's registry.
+
+    The CLI chat dispatcher (``cli_ui/slash``) and the gateway/wire/ACP
+    dispatcher (``agent/slash_commands``) are two registries that have
+    drifted: many ``agent/slash_commands_impl`` Command classes are
+    registered in System A but were never given a ``CommandDef`` in
+    System B, so they did not appear in ``/help`` or autocomplete and
+    could not be typed in ``oc chat``.
+
+    This adds a ``CommandDef`` for each System-A command whose name (or
+    an alias) does not already resolve in System B — built-ins with a
+    native handler keep it, since :func:`dispatch_slash` checks
+    ``_HANDLERS`` first. Synced commands have no native handler on
+    purpose: :func:`dispatch_slash` falls through to ``on_builtin_dispatch``,
+    which runs the real System-A command.
+
+    Returns the list of newly-surfaced command names. Idempotent.
+    """
+    try:
+        from opencomputer.agent.slash_commands import get_registered_commands
+    except Exception:  # noqa: BLE001 — never block boot on import drift
+        return []
+
+    # Dedup System-A entries: aliases register the same instance under
+    # multiple keys, so iterate unique instances by primary name.
+    seen: set[str] = set()
+    new_defs: list[CommandDef] = []
+    for command in get_registered_commands():
+        name = getattr(command, "name", None)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        # Skip anything System B already resolves (native command or an
+        # alias of one — e.g. System-A `title` is System-B `/rename`).
+        if resolve_command(name) is not None:
+            continue
+        aliases = tuple(
+            a for a in getattr(command, "aliases", ()) or () if a
+        )
+        new_defs.append(
+            CommandDef(
+                name=name,
+                description=(
+                    getattr(command, "description", "") or "Built-in command."
+                ),
+                category=getattr(command, "category", "builtin") or "builtin",
+                aliases=aliases,
+                args_hint=getattr(command, "args_hint", "") or "",
+            )
+        )
+    if new_defs:
+        register_extra_commands(new_defs)
+    return [d.name for d in new_defs]

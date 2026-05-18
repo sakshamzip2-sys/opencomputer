@@ -49,6 +49,9 @@ from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.footer_cmd import FooterCommand
 from opencomputer.agent.slash_commands_impl.handoff_cmd import HandoffCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
+from opencomputer.agent.slash_commands_impl.indicator_cmd import (
+    IndicatorCommand,
+)
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
 from opencomputer.agent.slash_commands_impl.mouse_cmd import MouseCommand
 from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
@@ -126,6 +129,9 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     AgentsCommand,
     VerboseCommand,
     StatusbarCommand,
+    # 2026-05-18 — best-of-three R7: /indicator overrides the busy-
+    # spinner face style independent of the skin.
+    IndicatorCommand,
     # Batch 4 — ephemeral side-loop:
     BtwCommand,
     # Provider/feature discovery — companion to VisionUnsupportedError /
