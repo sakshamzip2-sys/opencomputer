@@ -179,3 +179,39 @@ def test_security_headers_set(client: TestClient) -> None:
     assert r.headers.get("X-Frame-Options") == "DENY"
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
     assert "Content-Security-Policy" in r.headers
+
+
+def test_auth_status_uses_none_not_unused(client: TestClient) -> None:
+    """Regression: the canonical auth_status value is 'none', not the
+    old misleading 'unused'. Surfaces if anyone reverts the rename.
+
+    The 'unused' label is preserved server-side as ``auth_status_legacy``
+    for one-release back-compat with the oc-workspace built bundle and
+    external API consumers; it MUST NOT appear in the canonical
+    ``auth_status`` field anymore.
+    """
+    resp = client.get("/api/plugins/management/list")
+    assert resp.status_code == 200
+    payload = resp.json()
+    statuses = {row["auth_status"] for row in payload["plugins"]}
+    # At least one bundled plugin (e.g. coding-harness) has no env vars
+    # → its auth_status should be 'none'. If the discovery set is empty
+    # (unusual but possible in stripped test envs), accept that too.
+    assert "none" in statuses or len(statuses) == 0, (
+        f"Expected at least one plugin with auth_status='none' for "
+        f"plugins without env vars; got {statuses}"
+    )
+    assert "unused" not in statuses, (
+        f"auth_status 'unused' was renamed to 'none'; got {statuses}. "
+        f"This value should only appear in auth_status_legacy now."
+    )
+    # Every row carries both fields.
+    for row in payload["plugins"]:
+        assert "auth_status_legacy" in row, (
+            f"row missing auth_status_legacy: {row.get('id')}"
+        )
+        # Legacy mirrors canonical except 'none' ↔ 'unused'.
+        if row["auth_status"] == "none":
+            assert row["auth_status_legacy"] == "unused"
+        else:
+            assert row["auth_status_legacy"] == row["auth_status"]
