@@ -61,7 +61,23 @@ _PLUGINS_DIR: Path = Path(__file__).parent / "plugins"
 # so plugin routers can read it via ``request.app.state.session_token``.
 # Module-level export is for back-compat with plugin code that does
 # ``from opencomputer.dashboard.server import _SESSION_TOKEN``.
-_SESSION_TOKEN: str = secrets.token_urlsafe(32)
+#
+# OC_DASHBOARD_TOKEN env override (tryopencomputer.com platform integration,
+# Phase 1a — 2026-05-18):
+#   When set, the value is used verbatim and is NOT regenerated on subsequent
+#   process restarts. This is the **only** safe shape for production VM
+#   deployments where the platform records the token in its DB and routes
+#   requests using it — a fresh random token per process restart would
+#   silently invalidate the platform's view. Falls back to a random token
+#   for local / standalone use.
+#
+#   See: OpenComputer/docs/SECURITY-INVARIANTS.md invariant #4 and
+#        OpenComputer/docs/plans/tryopencomputer-platform-build-2026-05-18.md
+#        Phase 1a.
+_SESSION_TOKEN: str = (
+    os.environ.get("OC_DASHBOARD_TOKEN")
+    or secrets.token_urlsafe(32)
+)
 
 
 # Loopback hosts treated as safe peers for /api/pty when the server is

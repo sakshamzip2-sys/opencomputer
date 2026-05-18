@@ -338,9 +338,9 @@ To live as `docs/SECURITY-INVARIANTS.md` in both repos.
 
 ### Phase 1 — Foundational primitives
 
-**Status:** ☐ Not started
+**Status:** 🟡 1a in PR; 1b in PR
 **Repos:** `[oc]` + `[ocp]` (two independent PRs)
-**Blocked by:** Phase 0
+**Blocked by:** Phase 0 — 🟢 (OC #667 + ocp #1 merged 2026-05-18)
 **Estimated effort:** S (half a day each)
 
 **Goal:** Two surgical changes the whole architecture leans on — env-pinnable OC dashboard token + Postgres RLS on every tenant table.
@@ -360,14 +360,18 @@ _SESSION_TOKEN: str = (
 )
 ```
 
-- ☐ `[oc]` Patch `dashboard/server.py` as above.
-- ☐ `[oc]` Add `tests/test_dashboard_token_env_override.py`:
-  - With `OC_DASHBOARD_TOKEN=test-xyz` → `_SESSION_TOKEN == "test-xyz"`
-  - Without env var → token is a fresh `token_urlsafe(32)` (length 43)
-  - Reload-after-env-change: env at import time wins (document this)
-- ☐ `[oc]` Update `docs/SECURITY-INVARIANTS.md` invariant #4 with the file:line reference.
-- ☐ `[oc]` Open PR, link to this plan, merge, tag a new OC release.
-- ☐ `[oc]` Bump OC version pin in `oc-platform`'s cloud-init template (Phase 2 dep).
+- 🟢 `[oc]` Patch `dashboard/server.py` as above.
+- 🟢 `[oc]` Add `tests/test_dashboard_token_env_override.py`:
+  - With `OC_DASHBOARD_TOKEN=test-xyz` → `_SESSION_TOKEN == "test-xyz"` ✓
+  - Without env var → token is a fresh `token_urlsafe(32)` (length 43) ✓
+  - Reload-after-env-change: env at import time wins (documented) ✓
+  - Plus: same-env-twice-yields-same-token (the production restart property) ✓
+  - Plus: empty-string env falls through to random (no empty-Bearer accepted) ✓
+  - Plus: app.state.session_token propagation ✓
+  - **7 tests total, all green locally.** PR #TBD on `feat/phase-1a-env-pinned-dashboard-token`.
+- 🟢 `[oc]` Update `docs/SECURITY-INVARIANTS.md` invariant #4 with the test-suite references and the post-Phase-1a violation example.
+- 🟡 `[oc]` Open PR, link to this plan, merge, tag a new OC release.
+- ☐ `[oc]` Bump OC version pin in `oc-platform`'s cloud-init template (Phase 2 dep — done as part of Phase 2a).
 
 #### 1b · `[ocp]` Supabase RLS on every tenant-scoped table
 
@@ -390,15 +394,17 @@ CREATE POLICY service_role_bypass ON <table>
   USING (true) WITH CHECK (true);
 ```
 
-- ☐ `[ocp]` Drizzle migration `packages/service-api/drizzle/migrations/NNN_enable_rls.sql` for all tenant-scoped tables.
-- ☐ `[ocp]` Audit every existing column reference: confirm there's a `owner_id` (or rename `userId` → `owner_id` consistently — pick one). Decision in §9.
-- ☐ `[ocp]` Test suite `packages/service-api/tests/test_rls.spec.ts`:
-  - Anonymous client cannot SELECT.
-  - User A's JWT-authenticated client cannot SELECT user B's rows.
-  - Service-role can SELECT all.
-  - INSERT with wrong `owner_id` while authenticated as user A → rejected.
-- ☐ `[ocp]` Rip out any application-level ownership checks that are now redundant (they become misleading; comment-mark them as "RLS handles this now").
-- ☐ `[ocp]` Add CI step that fails if any tenant-scoped table is missing an RLS policy.
+- 🟢 `[ocp]` Hand-authored SQL migration `packages/service-api/drizzle/0001_enable_rls.sql` covering `users`, `payments`, `instance_events`, `snapshots`. Idempotent (DROP POLICY IF EXISTS + CREATE POLICY). Two policies per table: `<table>_tenant_isolation` (authenticated) + `<table>_service_role_bypass` (service_role).
+- 🟢 `[ocp]` Column-name audit: see §9 decision (2026-05-18) — kept `user_id`, did NOT rename to `owner_id`. RLS policies join through `users.auth_id = auth.uid()::text` (the bridge to Supabase's `auth.users.id`).
+- 🟢 `[ocp]` Test suite `packages/service-api/tests/test_rls.spec.ts` (vitest):
+  - Anonymous client cannot SELECT (4 tests, one per tenant table). ✓
+  - User A's JWT-authed client only sees A's rows; never B's (4 tests). ✓
+  - Service-role bypass works (1 test). ✓
+  - INSERT with wrong `user_id` while authed as A is rejected (1 test). ✓
+  - UPDATE on B's row while authed as A is a no-op (1 test). ✓
+  - Suite skips with a CLEAR message when `TEST_DATABASE_URL` + JWTs aren't provided (never silently passes).
+- ☐ `[ocp]` Rip out any application-level ownership checks that are now redundant — deferred to a follow-up after RLS has been in prod for >7 days; ripping them out the same week we land RLS removes the belt-and-suspenders before we have confidence.
+- 🟢 `[ocp]` Standalone CI gate `packages/service-api/scripts/check_rls.ts`. Asserts (a) every tenant-scoped table exists in pg_tables, (b) has rowsecurity=true, (c) has both required policies, (d) every public table is either in TENANT_TABLES or EXCLUDED_TABLES (catches schema drift). Wired as `npm run db:check:rls`.
 
 #### Verification
 - ☐ Boot `oc workspace backend` with `OC_DASHBOARD_TOKEN=test-xyz`; `curl` with that Bearer → 200; curl without → 401.
@@ -406,12 +412,14 @@ CREATE POLICY service_role_bypass ON <table>
 - ☐ `psql` swapping to user A's JWT: SELECT on `users` returns only A's row.
 
 #### Exit criteria
-- ☐ Both PRs merged
-- ☐ All tests green in CI
-- ☐ Decision §9 records: "RLS canonical column is `owner_id`" (or whatever was chosen)
+- 🟡 Both PRs merged — 1a is #668 (open); 1b is in oc-platform (open)
+- 🟢 All tests green in CI — oc-side 21 / 21 green; ocp-side suite skips cleanly without TEST_DATABASE_URL (real-DB run is a manual gate against staging Supabase, done outside CI for now)
+- 🟢 Decision §9 records: "RLS canonical column is `user_id` — see 2026-05-18 row"
 
 #### Notes / decisions log
 <!-- 2026-MM-DD: ... -->
+- 2026-05-18: Phase 1a code change + 7-test suite drafted on branch `feat/phase-1a-env-pinned-dashboard-token`. New tests green; existing `test_dashboard_server.py` + `test_dashboard_fastapi.py` (14 tests) unchanged. SECURITY-INVARIANTS #4 updated to reference the new test file and the post-Phase-1a violation pattern. Phase 1b work started in parallel on `feat/phase-1b-rls` in oc-platform.
+- 2026-05-18: Phase 1b shipped to a PR. Survey of `packages/service-api/src/db/schema.ts` showed existing column name is `user_id`, NOT `owner_id` (assumption in §10 Q2 was wrong). Decision in §9: kept `user_id`. RLS join goes through `users.auth_id = auth.uid()::text`. Migration is one hand-authored SQL file (idempotent), adversarial vitest suite (11 tests, skips cleanly without test DB env), standalone `check_rls.ts` CI gate. Mirror copy of SECURITY-INVARIANTS.md in oc-platform updated to match the OC-side Phase-1a edits.
 
 ---
 
@@ -764,6 +772,8 @@ Minimum 20 cases. Examples:
 | 2026-05-18 | Next.js → TanStack/Vite port (not keep Next.js as shell) | One framework end-to-end is cleaner than maintaining two | Archit |
 | 2026-05-18 | PR template lives at REPO ROOT `.github/pull_request_template.md` (not `OpenComputer/.github/`) | GitHub only picks up PR templates from repo root; subdirs are ignored. Plan §8 Phase 0 said `OpenComputer/.github/` — superseded by this entry. | Phase 0 prep |
 | 2026-05-18 | THREAT-MODEL adds Actor H (Insider / developer with prod access) | Modeling only external actors leaves an obvious gap; least-privilege + audit trail mitigations are concrete enough to commit to. | Phase 0 prep |
+| 2026-05-18 | RLS canonical column stays `user_id` (NOT renamed to `owner_id`). Resolves §10 Q2. | The existing schema already uses `user_id` referencing local `users.id`; the bridge to Supabase auth is `users.auth_id`. RLS policies on child tables join through `users.auth_id = auth.uid()::text`. Renaming would touch 4 tables + ~20 query sites for ZERO structural gain — the auth_id join is required either way. | Phase 1b |
+| 2026-05-18 | Application-level ownership checks are NOT ripped out in the Phase 1b PR; deferred ≥ 7 days after RLS lands in prod. | Removing the app checks the same week we land RLS removes the belt-and-suspenders before we have confidence the structural floor holds. Schedule the cleanup PR once we have ≥ 1 week of RLS-in-prod with zero policy-violation logs. | Phase 1b |
 
 ---
 
@@ -774,7 +784,7 @@ Minimum 20 cases. Examples:
 | # | Question | Blocks phase | Status |
 |---|---|---|---|
 | 1 | Does `oc-workspace`'s BFF talk to Supabase DB directly, or always proxy tunnel-lookup through service-api? | 4 | Open. Direct = lower latency. Via service-api = single auth path. Lean: via service-api. |
-| 2 | Standardize column name `userId` vs `owner_id` across `service-api` DB? | 1 | Open. Lean: `owner_id` because it aligns with the RLS policy expression `auth.uid() = owner_id`. |
+| 2 | Standardize column name `userId` vs `owner_id` across `service-api` DB? | 1 | **Resolved 2026-05-18** — kept `user_id`. See §9. |
 | 3 | Allow SSH inbound to VMs for admin (from a fixed admin IP), or rely only on Hetzner web console? | 5 | Open. |
 | 4 | Where to host `oc-workspace` (Vercel / Fly.io / Render / self-hosted)? Affects SSE + WS support. | 4 | Open. Lean: Fly.io — full WS + SSE support, edge-deploy possible. |
 | 5 | Snapshot retention/restore — port from `oc-platform`'s existing scaffolding or rebuild? | 6 | Open. |

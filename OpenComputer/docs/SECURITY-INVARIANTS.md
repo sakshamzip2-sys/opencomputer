@@ -97,13 +97,19 @@ Every Postgres table that contains user-scoped data has Row-Level Security ENABL
 Every VM has a unique `OC_DASHBOARD_TOKEN` injected as an environment variable at provision time. `oc workspace backend` MUST read this env var on startup and use it as the only valid Bearer for incoming requests. The token is NEVER regenerated at process boot from `secrets.token_urlsafe(32)` — that would silently invalidate the platform's view of the token on every restart.
 
 ### What violates it
-- `OpenComputer/opencomputer/dashboard/server.py` line 64 (current): `_SESSION_TOKEN: str = secrets.token_urlsafe(32)` — generates a new token on every process start, defeating env-pinning.
+- Reverting [`OpenComputer/opencomputer/dashboard/server.py`](../opencomputer/dashboard/server.py) (search for `OC_DASHBOARD_TOKEN` — the env-override block lives ~line 60–85 as of Phase 1a, 2026-05-18) to the pre-Phase-1a shape `_SESSION_TOKEN: str = secrets.token_urlsafe(32)` — would silently regenerate a fresh token on every process start, defeating env-pinning.
 - A VM startup script that fails to export `OC_DASHBOARD_TOKEN` before launching `oc`.
 - A code path that accepts a Bearer matching `secrets.token_urlsafe(32)` shape regardless of env var (legacy debug shortcut).
 - Logging the token to stdout / syslog / the audit log in plaintext.
+- Empty-string env (`OC_DASHBOARD_TOKEN=`) being accepted as a valid pinned token. Handled by `or` shortcut today — must stay handled.
 
 ### How it is enforced
-- **OpenComputer test** (`OpenComputer/tests/test_dashboard_token.py`): sets `OC_DASHBOARD_TOKEN=test-fixed-token`, starts the backend, asserts that the configured token is exactly `test-fixed-token` and the random fallback is NOT used.
+- **OpenComputer tests** ([`OpenComputer/tests/test_dashboard_token_env_override.py`](../tests/test_dashboard_token_env_override.py), 7 tests) assert:
+  (a) `OC_DASHBOARD_TOKEN=<value>` pins `_SESSION_TOKEN` to that exact value,
+  (b) the pinned value propagates to `app.state.session_token`,
+  (c) two reimports with the same env yield the same token (stable across simulated restart — the actual production property),
+  (d) two reimports without the env yield DIFFERENT tokens (random fallback works),
+  (e) empty-string env (`OC_DASHBOARD_TOKEN=`) falls through to the random fallback — empty Bearer is never accepted.
 - **Cloud-init template (`oc-platform/templates/cloud-init.yaml.tmpl`):** asserts (via `cloud-init validate` + provision-time test) that `OC_DASHBOARD_TOKEN` is set in `/etc/systemd/system/oc-workspace.service.d/override.conf`.
 - **Service-api provision step** records the token in the `vms.vm_token` column (KMS-encrypted) at the same moment it's baked into the VM env. Mismatch impossible at provision time; rotation is an atomic update of both.
 - **Log scrub:** structured logger has a redaction list that masks anything matching the token shape.
