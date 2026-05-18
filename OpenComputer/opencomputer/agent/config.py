@@ -458,7 +458,7 @@ class LoopConfig:
     #: on first transient error. Plumbed into Anthropic SDK constructor.
     api_max_retries: int = 2
     parallel_tools: bool = True
-    inactivity_timeout_s: int = 600  # 2026-05-05: doubled 300 → 600 (10 min)
+    inactivity_timeout_s: int = 1800  # 2026-05-18: 600 → 1800 (30 min)
     iteration_timeout_s: int = 7200  # 2026-05-05: doubled 3600 → 7200 (2h)
     delegation_max_iterations: int = 100  # 2026-05-05: doubled 50 → 100
     max_delegation_depth: int = 4  # 2026-05-05: doubled 2 → 4
