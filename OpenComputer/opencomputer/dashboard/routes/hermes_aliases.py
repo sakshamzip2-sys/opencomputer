@@ -236,7 +236,7 @@ async def create_session(
                 )
             db.create_session(
                 session_id=sid,
-                platform="webui",
+                platform="workspace",
                 title=title,
             )
             row = db.get_session(sid) or {"id": sid, "title": title}

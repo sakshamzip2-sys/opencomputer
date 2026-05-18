@@ -52,7 +52,7 @@ def run(
         str, typer.Option(help="WebSocket URL of the OC wire server.")
     ] = "ws://127.0.0.1:18789",
     dashboard_url: Annotated[
-        str, typer.Option(help="HTTP URL of the OC dashboard for non-streaming reads.")
+        str, typer.Option(help="HTTP URL of the OC backend for non-streaming reads.")
     ] = "http://127.0.0.1:9119",
     cont: Annotated[
         bool,

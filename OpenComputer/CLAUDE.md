@@ -103,7 +103,7 @@ A live OC profile is a fat directory with ~70 entries. The ones you'll touch oft
 ├── agents/  ambient/  audit/  cron/  evolution/  gateway/  hook_history.jsonl
 ├── kanban/  langfuse/  locks/  logs/  memories/  pairing/  presets/  plugins/
 ├── profile_bootstrap/  profiles/  rate_limits/  rules/  secrets/  sessions/
-├── tool_result_storage/  user_model/  webui/  wire.log  wire.pid
+├── tool_result_storage/  user_model/  wire.log  wire.pid
 └── home/                            ← Hermes-style wrappers + soul (sub-project C)
 ```
 
@@ -121,7 +121,7 @@ A live OC profile is a fat directory with ~70 entries. The ones you'll touch oft
        ┌──────────────────────┼─────────────────────────────────┐
        │                      │                                 │
        ▼                      ▼                                 ▼
-    oc chat              oc gateway                  oc webui / oc workspace
+    oc chat              oc gateway                       oc workspace
    (streaming           (daemon: Telegram /                (Node SSR + FastAPI
     CLI tokens)          Discord / Slack / Matrix /         dashboard backend
                          IRC / Email / iMessage / …)        on port 9119)
@@ -218,8 +218,7 @@ oc chat                                # streaming CLI (-c resume last, -q quiet
 oc --plan                              # plan mode (Edit/Write/Bash refused)
 oc gateway                             # channel daemon
 oc wire                                # WebSocket JSON-RPC at ws://127.0.0.1:18789
-oc webui                               # built-in React webui
-oc workspace                           # hermes-workspace alternative webui
+oc workspace                           # hermes-workspace browser UI (Node SSR)
 oc -p <name>                           # switch to named profile
 
 oc plugins  / skills  / doctor         # listings + multi-layer health
@@ -324,7 +323,7 @@ Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_
 
 12. **`enable_probe=False` is load-bearing on hot paths.** Compaction / context-window probes hit the network and `~/.opencomputer/<profile>/.context_window_cache.json`. Callers that render in tight loops MUST pass `enable_probe=False` to get static defaults. Active branch is fixing leaks of probe-on through call chains that should be probe-off.
 
-13. **Silent `except: log.debug(...)` hides feature breakage.** Recently audited across `opencomputer/webui/` shims (9 swallow sites → WARN). Pattern reviewer: any generic `except` in a try/except should log at WARN minimum and assert the expected side effect fired, not just absence of exception.
+13. **Silent `except: log.debug(...)` hides feature breakage.** A 2026-05 audit found 9 such swallow sites across shim modules (all lifted to WARN). Pattern reviewer: any generic `except` in a try/except should log at WARN minimum and assert the expected side effect fired, not just absence of exception.
 
 14. **Parallel sessions, one worktree = catastrophe.** Two Claude sessions touching the same checkout race git index + venv state. Use `git worktree add` per session; never share a tree. If you see "[gone]" branches, the `/clean_gone` slash command (from the `commit-commands` plugin) prunes them safely.
 

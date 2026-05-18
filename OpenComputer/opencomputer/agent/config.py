@@ -1840,8 +1840,8 @@ class Config:
     #: ``"silent"`` (default): the classifier-driven trigger is live; on
     #: a sustained-confidence persona shift, the agent generates a
     #: handoff per protocol v2.0, writes it to the target profile's
-    #: ``inbox/``, and swaps profiles on the next turn. CLI / webui /
-    #: workspace / wire surfaces all participate; gateway channels are
+    #: ``inbox/``, and swaps profiles on the next turn. CLI / workspace /
+    #: wire surfaces all participate; gateway channels are
     #: opt-in via their per-channel ``auto_swap_enabled`` flag.
     #: ``"off"``: classifier still runs (existing persona-uplift), but
     #: no auto-swap fires. The ``/handoff <target>`` slash command is

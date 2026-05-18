@@ -244,8 +244,8 @@ def test_migration_v18_to_v19_is_idempotent(tmp_path: Path) -> None:
     SessionDB(db_path)
 
 
-def test_apply_migrations_advances_to_19(tmp_path: Path) -> None:
-    """A fresh DB must end up at the latest schema version (``SCHEMA_VERSION``)."""
+def test_apply_migrations_advances_to_current(tmp_path: Path) -> None:
+    """A fresh DB must end up at the current ``SCHEMA_VERSION``."""
     db_path = tmp_path / "sessions.db"
     SessionDB(db_path)
     with sqlite3.connect(db_path) as raw:
