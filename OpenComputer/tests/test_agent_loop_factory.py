@@ -230,3 +230,199 @@ def test_tool_filter_profile_is_the_default(tmp_path: Path) -> None:
 
     loop = build_agent_loop_for_profile("p1", profile_home)
     assert loop.allowed_tools == frozenset()  # allowlist still active
+
+
+# ---------------------------------------------------------------------------
+# Perf cache (closes the TODO(perf) in agent_loop_factory.py)
+# ---------------------------------------------------------------------------
+
+
+def test_factory_cache_reuses_resolution_for_same_profile(tmp_path: Path) -> None:
+    """Two builds for the same (profile_id, model_override) reuse the
+    cached _ResolvedProfile (YAML loads + provider lookup + allowlist
+    derivation skipped on second call).
+
+    Asserted via the underlying _resolve_profile_uncached call-count:
+    one cold-build call, zero on the warm rebuild.
+    """
+    from unittest.mock import patch
+
+    import opencomputer.gateway.agent_loop_factory as factory
+
+    factory.invalidate_cache()
+
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+
+    original = factory._resolve_profile_uncached
+    with patch.object(
+        factory, "_resolve_profile_uncached", side_effect=original
+    ) as spy:
+        build_agent_loop_for_profile("p1", profile_home)
+        build_agent_loop_for_profile("p1", profile_home)
+        build_agent_loop_for_profile("p1", profile_home)
+
+    # Cold build runs the uncached resolution exactly once; the next two
+    # builds hit the cache and never re-enter the expensive helper.
+    assert spy.call_count == 1
+
+
+def test_factory_cache_distinguishes_model_override(tmp_path: Path) -> None:
+    """model_override is part of the cache key — a different override
+    is a cache miss."""
+    from unittest.mock import patch
+
+    import opencomputer.gateway.agent_loop_factory as factory
+
+    factory.invalidate_cache()
+
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+
+    original = factory._resolve_profile_uncached
+    with patch.object(
+        factory, "_resolve_profile_uncached", side_effect=original
+    ) as spy:
+        build_agent_loop_for_profile("p1", profile_home, model_override="m1")
+        build_agent_loop_for_profile("p1", profile_home, model_override="m2")
+        build_agent_loop_for_profile("p1", profile_home, model_override="m1")
+
+    # Two distinct override values → two cold resolves; the third call
+    # reuses the m1 entry.
+    assert spy.call_count == 2
+
+
+def test_factory_cache_invalidates_on_provider_set_change(
+    tmp_path: Path,
+) -> None:
+    """When the plugin registry's provider keyset changes (a plugin
+    registered or unregistered a provider), cached entries are stale
+    and must be rebuilt — the cached allowed_tools could now be wrong."""
+    from unittest.mock import patch
+
+    import opencomputer.gateway.agent_loop_factory as factory
+    from opencomputer.plugins.registry import registry as plugin_registry
+
+    factory.invalidate_cache()
+
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+
+    original = factory._resolve_profile_uncached
+    with patch.object(
+        factory, "_resolve_profile_uncached", side_effect=original
+    ) as spy:
+        build_agent_loop_for_profile("p1", profile_home)  # cold
+
+        # Simulate a plugin registering a new provider — the keyset
+        # signature changes, so the cache entry is treated as stale.
+        plugin_registry.providers["fake-test-provider"] = _StubProvider
+        try:
+            build_agent_loop_for_profile("p1", profile_home)  # cold again
+        finally:
+            plugin_registry.providers.pop("fake-test-provider", None)
+
+    assert spy.call_count == 2
+
+
+def test_factory_invalidate_cache_one_profile(tmp_path: Path) -> None:
+    """invalidate_cache(profile_id="p1") drops only that profile; other
+    profiles' cache entries survive."""
+    from unittest.mock import patch
+
+    import opencomputer.gateway.agent_loop_factory as factory
+
+    factory.invalidate_cache()
+
+    p1 = tmp_path / "p1"
+    p2 = tmp_path / "p2"
+    for h in (p1, p2):
+        h.mkdir()
+        (h / "config.yaml").write_text(
+            "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+        )
+
+    original = factory._resolve_profile_uncached
+    with patch.object(
+        factory, "_resolve_profile_uncached", side_effect=original
+    ) as spy:
+        build_agent_loop_for_profile("p1", p1)  # cold
+        build_agent_loop_for_profile("p2", p2)  # cold
+        assert spy.call_count == 2
+
+        factory.invalidate_cache(profile_id="p1")
+
+        build_agent_loop_for_profile("p1", p1)  # cold (flushed)
+        build_agent_loop_for_profile("p2", p2)  # warm (survived)
+
+    # 2 initial cold + 1 cold after flush = 3 total. p2 stayed cached.
+    assert spy.call_count == 3
+
+
+def test_factory_env_var_disables_cache(tmp_path: Path, monkeypatch) -> None:
+    """OPENCOMPUTER_AGENT_LOOP_FACTORY_NOCACHE=1 bypasses caching entirely
+    — every build hits the expensive resolution. Used by tests that need
+    to inspect fresh YAML reads on every call."""
+    from unittest.mock import patch
+
+    import opencomputer.gateway.agent_loop_factory as factory
+
+    factory.invalidate_cache()
+    monkeypatch.setenv("OPENCOMPUTER_AGENT_LOOP_FACTORY_NOCACHE", "1")
+
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+
+    original = factory._resolve_profile_uncached
+    with patch.object(
+        factory, "_resolve_profile_uncached", side_effect=original
+    ) as spy:
+        build_agent_loop_for_profile("p1", profile_home)
+        build_agent_loop_for_profile("p1", profile_home)
+        build_agent_loop_for_profile("p1", profile_home)
+
+    # Cache disabled → every call re-enters the uncached resolver.
+    assert spy.call_count == 3
+
+
+def test_factory_delegate_factory_still_isolates_message_state(
+    tmp_path: Path,
+) -> None:
+    """Even with the resolution cache, the delegate factory MUST still
+    build a fresh AgentLoop instance per call — two concurrent delegates
+    sharing one AgentLoop would race on message-state. This is the
+    correctness invariant the perf optimisation must not break."""
+    import opencomputer.gateway.agent_loop_factory as factory
+
+    factory.invalidate_cache()
+
+    profile_home = tmp_path / "p1"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+    )
+
+    parent = build_agent_loop_for_profile("p1", profile_home)
+    from opencomputer.tools.delegate import DelegateTool
+    delegate = next(t for t in parent.tools if isinstance(t, DelegateTool))
+
+    child_a = delegate._factory()
+    child_b = delegate._factory()
+
+    # Different instances — message-state isolation preserved.
+    assert child_a is not child_b
+    assert child_a is not parent
+    # But the resolved config object is the cached one — same identity.
+    assert child_a.config is child_b.config is parent.config
