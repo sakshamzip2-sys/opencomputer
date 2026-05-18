@@ -448,10 +448,44 @@ def create_job(
     return job
 
 
+def resolve_job_id(job_id: str) -> str | None:
+    """Resolve a job-id — or a unique id *prefix* — to the full 12-char id.
+
+    ``oc cron list`` / ``oc cron status`` display only the first 8 chars
+    of the 12-char id. This lets every id-consuming command accept that
+    truncated form (or any unique prefix), git-short-hash style.
+
+    Returns the full id for an exact match or a unique prefix match.
+    Returns ``None`` for no match, an empty prefix, or an *ambiguous*
+    prefix (2+ matches) — an ambiguous prefix also logs a WARNING rather
+    than silently picking one job.
+    """
+    if not job_id:
+        return None
+    ids = [j["id"] for j in load_jobs()]
+    if job_id in ids:
+        return job_id
+    matches = [jid for jid in ids if jid.startswith(job_id)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.warning(
+            "cron: job-id prefix %r is ambiguous — matches %d jobs (%s); "
+            "use more characters",
+            job_id,
+            len(matches),
+            ", ".join(sorted(matches)),
+        )
+    return None
+
+
 def get_job(job_id: str) -> dict[str, Any] | None:
-    """Return one job by id (or ``None``)."""
+    """Return one job by id or unique id-prefix (or ``None``)."""
+    resolved = resolve_job_id(job_id)
+    if resolved is None:
+        return None
     for j in load_jobs():
-        if j["id"] == job_id:
+        if j["id"] == resolved:
             return j
     return None
 
@@ -480,10 +514,14 @@ def update_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         from opencomputer.cron.scheduler import validate_notify_target
         validate_notify_target(updates["notify"])
 
+    resolved = resolve_job_id(job_id)
+    if resolved is None:
+        return None
+
     with _jobs_lock:
         jobs = load_jobs()
         for i, job in enumerate(jobs):
-            if job["id"] != job_id:
+            if job["id"] != resolved:
                 continue
 
             updated = {**job, **updates}
@@ -553,10 +591,13 @@ def trigger_job(job_id: str) -> dict[str, Any] | None:
 
 
 def remove_job(job_id: str) -> bool:
+    resolved = resolve_job_id(job_id)
+    if resolved is None:
+        return False
     with _jobs_lock:
         jobs = load_jobs()
         original = len(jobs)
-        jobs = [j for j in jobs if j["id"] != job_id]
+        jobs = [j for j in jobs if j["id"] != resolved]
         if len(jobs) < original:
             save_jobs(jobs)
             return True
