@@ -18,19 +18,20 @@ def _runtime(**overrides) -> RuntimeContext:
 # ─── Subagent override (depth > 0) ────────────────────────────────
 
 
-def test_subagent_gets_low_regardless_of_model() -> None:
-    """Doc 5: subagents are the canonical low-effort use case."""
+def test_subagent_gets_medium_regardless_of_model() -> None:
+    """Subagents get a fixed mid tier (raised low → medium in the
+    2026-05-18 smarter-default pass) regardless of the model."""
     rt = _runtime(delegation_depth=1)
-    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "low"
-    assert recommended_effort(runtime=rt, model="claude-sonnet-4-6") == "low"
-    assert recommended_effort(runtime=rt, model="o1") == "low"
-    assert recommended_effort(runtime=rt, model="kimi-k2") == "low"
+    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "medium"
+    assert recommended_effort(runtime=rt, model="claude-sonnet-4-6") == "medium"
+    assert recommended_effort(runtime=rt, model="o1") == "medium"
+    assert recommended_effort(runtime=rt, model="kimi-k2") == "medium"
 
 
-def test_grandchild_subagent_also_gets_low() -> None:
+def test_grandchild_subagent_also_gets_medium() -> None:
     """delegation_depth > 0 catches all subagent depths, not just depth=1."""
     rt = _runtime(delegation_depth=3)
-    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "low"
+    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "medium"
 
 
 # ─── Voice mode ───────────────────────────────────────────────────
@@ -45,27 +46,27 @@ def test_voice_mode_gets_low() -> None:
 def test_voice_mode_false_does_not_trigger_low() -> None:
     """Only literal True triggers — not 'true' string, not present-but-falsy."""
     rt = _runtime(custom={"voice_mode": False})
-    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "xhigh"
+    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "max"
 
 
 # ─── Per-model defaults ───────────────────────────────────────────
 
 
 @pytest.mark.parametrize("model,expected", [
-    # Opus 4.7 → xhigh (Doc 5 explicit recommendation)
-    ("claude-opus-4-7", "xhigh"),
-    ("claude-opus-4-7-20260301", "xhigh"),
-    # Sonnet 4.6 → medium (Doc 5 latency warning)
-    ("claude-sonnet-4-6", "medium"),
-    ("claude-sonnet-4-6-20251101", "medium"),
-    ("claude-sonnet-4-5", "medium"),
-    # OpenAI reasoning → medium (sensible paid-tier default)
-    ("o1", "medium"),
-    ("o1-preview", "medium"),
-    ("o3-mini", "medium"),
-    ("o3", "medium"),
-    ("o4-mini", "medium"),
-    ("gpt-5-thinking", "medium"),
+    # Opus 4.7 → max (smarter-default pass: was xhigh)
+    ("claude-opus-4-7", "max"),
+    ("claude-opus-4-7-20260301", "max"),
+    # Sonnet 4.6 → high (smarter-default pass: was medium)
+    ("claude-sonnet-4-6", "high"),
+    ("claude-sonnet-4-6-20251101", "high"),
+    ("claude-sonnet-4-5", "high"),
+    # OpenAI reasoning → high (smarter-default pass: was medium)
+    ("o1", "high"),
+    ("o1-preview", "high"),
+    ("o3-mini", "high"),
+    ("o3", "high"),
+    ("o4-mini", "high"),
+    ("gpt-5-thinking", "high"),
     # No recommendation for non-reasoning models — provider default applies
     ("claude-haiku-4-5", None),
     ("claude-opus-4-5", None),  # legacy Anthropic, no policy override yet
@@ -85,17 +86,18 @@ def test_per_model_defaults(model: str, expected: str | None) -> None:
 
 def test_runtime_none_uses_model_default() -> None:
     """When no runtime is provided, fall back to per-model defaults."""
-    assert recommended_effort(runtime=None, model="claude-opus-4-7") == "xhigh"
+    assert recommended_effort(runtime=None, model="claude-opus-4-7") == "max"
     assert recommended_effort(runtime=None, model="gpt-4o") is None
 
 
 def test_subagent_override_beats_model_default() -> None:
-    """A coding subagent on Opus 4.7 still gets low — narrow scope wins."""
+    """A coding subagent on Opus 4.7 stays at the subagent tier (medium)
+    — narrow scope wins over the model's own (higher) default."""
     rt = _runtime(delegation_depth=1)
-    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "low"
-    # Without subagent depth, Opus 4.7 → xhigh
+    assert recommended_effort(runtime=rt, model="claude-opus-4-7") == "medium"
+    # Without subagent depth, Opus 4.7 → max
     rt_main = _runtime()
-    assert recommended_effort(runtime=rt_main, model="claude-opus-4-7") == "xhigh"
+    assert recommended_effort(runtime=rt_main, model="claude-opus-4-7") == "max"
 
 
 # ─── Loop integration: policy applied when reasoning_effort unset ──
@@ -149,8 +151,8 @@ async def test_loop_applies_policy_default_when_reasoning_unset(tmp_path) -> Non
 
     await loop.run_conversation("Hi", session_id="t-policy")
 
-    # Opus 4.7 model default → xhigh
-    assert captured_extras["runtime_extras"]["reasoning_effort"] == "xhigh"
+    # Opus 4.7 model default → max (smarter-default pass)
+    assert captured_extras["runtime_extras"]["reasoning_effort"] == "max"
 
 
 @pytest.mark.asyncio
@@ -210,5 +212,5 @@ async def test_loop_user_set_reasoning_wins_over_policy(tmp_path) -> None:
         "Hi", session_id="t-user-wins", runtime=user_runtime,
     )
 
-    # User's "low" wins — policy would have set xhigh.
+    # User's "low" wins — policy would have set max.
     assert captured_extras["runtime_extras"]["reasoning_effort"] == "low"

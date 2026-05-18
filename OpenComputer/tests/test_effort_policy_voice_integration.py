@@ -19,9 +19,9 @@ def test_voice_mode_runtime_picks_low_on_any_model() -> None:
         DEFAULT_RUNTIME_CONTEXT, custom={"voice_mode": True}
     )
 
-    # Voice on Opus 4.7 (which would otherwise → xhigh)
+    # Voice on Opus 4.7 (which would otherwise → max)
     assert recommended_effort(runtime=runtime, model="claude-opus-4-7") == "low"
-    # Voice on Sonnet 4.6 (which would otherwise → medium)
+    # Voice on Sonnet 4.6 (which would otherwise → high)
     assert recommended_effort(runtime=runtime, model="claude-sonnet-4-6") == "low"
     # Voice on a model with no per-model default
     assert recommended_effort(runtime=runtime, model="kimi-k2") == "low"
@@ -30,4 +30,4 @@ def test_voice_mode_runtime_picks_low_on_any_model() -> None:
 def test_non_voice_runtime_falls_back_to_per_model_defaults() -> None:
     """A runtime without voice_mode flag still gets per-model defaults."""
     runtime = DEFAULT_RUNTIME_CONTEXT  # no voice_mode in custom
-    assert recommended_effort(runtime=runtime, model="claude-opus-4-7") == "xhigh"
+    assert recommended_effort(runtime=runtime, model="claude-opus-4-7") == "max"

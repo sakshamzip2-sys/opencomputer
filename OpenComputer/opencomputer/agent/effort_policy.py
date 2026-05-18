@@ -68,19 +68,24 @@ class EffortLevel(str, Enum):
 
 
 def _model_default(model: str) -> str | None:
-    """Per-model effort default. ``None`` = no recommendation."""
-    # Claude — per Doc 5 guidance
+    """Per-model effort default. ``None`` = no recommendation.
+
+    2026-05-18 — every tier raised one level ("think and feel smarter"
+    pass). The product favours depth over latency by default; users on
+    latency- or cost-sensitive workloads dial back via ``/reasoning``.
+    """
+    # Claude — per Doc 5 guidance, +1 level for the smarter-default pass.
     if model.startswith("claude-opus-4-7"):
-        return "xhigh"  # recommended starting point for coding/agentic
+        return "max"  # was xhigh — deepest tier for the flagship model
     if model.startswith("claude-sonnet-4-6"):
-        return "medium"  # explicit Doc 5 warning about default-high latency
+        return "high"  # was medium
     if model.startswith("claude-sonnet-4-5"):
-        return "medium"  # same latency profile as 4.6
-    # OpenAI reasoning models — sensible mid default for paid usage.
+        return "high"  # was medium — same latency profile as 4.6
+    # OpenAI reasoning models — raised to high for the smarter default.
     # Users with cost-sensitive workloads override via /reasoning low.
     for p in ("o1", "o3", "o4", "gpt-5-thinking"):
         if model.startswith(p):
-            return "medium"
+            return "high"  # was medium
     # Default: no recommendation. The API/provider default applies.
     return None
 
@@ -93,11 +98,14 @@ def recommended_effort(
     """Recommend a ``reasoning_effort`` value, or ``None`` to use the API default.
 
     Priority order:
-      1. **Subagent context** (``runtime.delegation_depth > 0``) → ``low``.
-         Per Doc 5: subagents are the canonical low-effort use case.
+      1. **Subagent context** (``runtime.delegation_depth > 0``) → ``medium``.
+         Subagents stay below the parent's per-model tier but were raised
+         from ``low`` to ``medium`` in the smarter-default pass so a
+         delegated task isn't shallow.
       2. **Voice mode** (``runtime.custom["voice_mode"] is True``) → ``low``.
          Realtime voice is latency-bound; thinking budget kills round-trip.
-      3. **Per-model defaults** (see ``_model_default``) — Doc 5 calibrated
+         Deliberately NOT raised — voice trades depth for responsiveness.
+      3. **Per-model defaults** (see ``_model_default``) — calibrated
          tiers per model lineage.
       4. ``None`` — use the API's own default.
 
@@ -106,10 +114,10 @@ def recommended_effort(
     the recommendation independent of user-set state.
     """
     # Subagent override wins over everything: a coding subagent on Opus
-    # 4.7 should still be ``low``, not ``xhigh``. Subagents are by
-    # definition narrow-scoped tasks delegated from a richer parent.
+    # 4.7 still runs below the parent's tier. Raised low → medium in the
+    # 2026-05-18 smarter-default pass so delegated work isn't shallow.
     if runtime is not None and getattr(runtime, "delegation_depth", 0) > 0:
-        return "low"
+        return "medium"
 
     # Voice mode: latency-sensitive. Realtime voice (PR #270) cannot
     # afford a thinking budget on the critical path.
