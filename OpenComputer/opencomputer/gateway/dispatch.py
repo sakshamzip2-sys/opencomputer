@@ -1466,6 +1466,27 @@ class Dispatch:
                     runtime = _dc.replace(runtime, plan_mode=True)
             except Exception:  # noqa: BLE001 — never break dispatch
                 logger.debug("plan-mode injection failed", exc_info=True)
+            # B3 (gateway-vs-CLI parity) — thread the active adapter's
+            # capabilities onto the runtime so the agent loop can tell
+            # the model what this channel supports (edit / photos /
+            # reactions / length cap). dataclasses.replace builds a
+            # fresh RuntimeContext — never mutates the shared default.
+            try:
+                from opencomputer.gateway.capability_prompt import (
+                    describe_channel_capabilities,
+                )
+
+                _cap_text = describe_channel_capabilities(adapter)
+                if _cap_text:
+                    import dataclasses as _dc
+
+                    _cap_custom = dict(getattr(runtime, "custom", {}) or {})
+                    _cap_custom["channel_capabilities"] = _cap_text
+                    runtime = _dc.replace(runtime, custom=_cap_custom)
+            except Exception:  # noqa: BLE001 — never break dispatch
+                logger.debug(
+                    "channel-capabilities injection failed", exc_info=True,
+                )
             # M1 parity telemetry — mechanisms decidable from the
             # per-turn runtime: #4 (channel_prompt_overlay) fired iff
             # _build_channel_runtime stuffed a channel-scoped prompt or

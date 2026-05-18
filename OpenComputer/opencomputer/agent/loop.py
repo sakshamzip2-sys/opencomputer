@@ -2602,6 +2602,19 @@ class AgentLoop:
             injected_volatile = (
                 injected_volatile + "\n\n" + block if injected_volatile else block
             )
+        # B3 (gateway-vs-CLI parity) — tell the model what the channel
+        # supports (edit / photos / reactions / length cap) so it adapts
+        # its output. Threaded in by Dispatch from the active adapter's
+        # ChannelCapabilities; absent on the CLI, so the prompt is
+        # unchanged there.
+        channel_caps = self._runtime.custom.get("channel_capabilities")
+        if isinstance(channel_caps, str) and channel_caps.strip():
+            block = "## Channel capabilities\n\n" + channel_caps.strip()
+            volatile_memory_blocks.append(block)
+            system = system + "\n\n" + block
+            injected_volatile = (
+                injected_volatile + "\n\n" + block if injected_volatile else block
+            )
         channel_skill_bodies = self._runtime.custom.get("channel_skill_bodies")
         if channel_skill_bodies:
             blocks: list[str] = []

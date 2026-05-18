@@ -87,9 +87,11 @@ from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.status_cmd import StatusCommand
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
+from opencomputer.agent.slash_commands_impl.tools_cmd import ToolsCommand
 from opencomputer.agent.slash_commands_impl.undo_cmd import UndoCommand
 from opencomputer.agent.slash_commands_impl.update_cmd import UpdateCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
+from opencomputer.agent.slash_commands_impl.which_cmd import WhichCommand
 from opencomputer.plugins.registry import registry as _plugin_registry
 from plugin_sdk.runtime_context import RuntimeContext
 from plugin_sdk.slash_command import SlashCommandResult
@@ -185,6 +187,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-05-18 — A2 gateway-vs-CLI parity. /plan on|off|status — the
     # gateway equivalent of `oc --plan`; per-chat, persisted.
     PlanCommand,
+    # 2026-05-18 — Wave 2 gateway-vs-CLI parity. /tools (D2) lists the
+    # chat's tool surface; /which (D1) shows the resolution chain.
+    ToolsCommand,
+    WhichCommand,
     # 2026-05-11 — /plugin reload <id> hot-reload (pi-style). Requires
     # ``plugin_registry`` to be wired into ``runtime.custom``; without
     # that, the command surfaces a clean error rather than crash.
