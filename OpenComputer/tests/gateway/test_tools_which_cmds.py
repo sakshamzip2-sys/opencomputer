@@ -7,7 +7,6 @@ from opencomputer.agent.slash_commands_impl.tools_cmd import ToolsCommand
 from opencomputer.agent.slash_commands_impl.which_cmd import WhichCommand
 from plugin_sdk.runtime_context import RuntimeContext
 
-
 # ─── /which (D1) ────────────────────────────────────────────────────────
 
 
