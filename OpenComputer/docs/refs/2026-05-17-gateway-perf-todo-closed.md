@@ -104,16 +104,33 @@ assert child_a.config is child_b.config  # but cached config shared
 Different `AgentLoop` instances + shared immutable `Config`. That's
 exactly what we want.
 
-### Performance impact (est.)
+### Performance impact (NOT BENCHMARKED — estimated only)
+
+**Honesty correction (2026-05-18):** the original numbers below were
+written without a benchmark. They are reasoned estimates from "YAML
+reads + provider instantiation are slow" — not measured against a
+real delegate-fanout workload. Treat them as order-of-magnitude
+hypotheses, not measured improvements.
 
 The cached path skips:
 - 2 YAML file reads (`config.yaml` + `profile.yaml`)
 - 1 plugin registry walk
 - 1 provider class instantiation
 
-Cold delegate cost: ~30-50ms (Python startup + YAML parse + plugin walk).
-Warm delegate cost: <1ms (dataclass lookup + AgentLoop ctor).
-**Net: 30-50x speedup on hot delegate paths.**
+**Estimated** cold delegate cost: ~30-50ms (Python YAML parse + plugin
+walk; not measured).
+**Estimated** warm delegate cost: <1ms (dataclass lookup + AgentLoop
+constructor only; not measured).
+**Estimated** speedup: 30-50x on hot delegate paths — **unverified
+until a real benchmark runs.**
+
+Real verification requires a delegate-fanout workload (e.g. a
+`tasks=[...]` batch of 3+ children) profiled against the
+uncached path (`OPENCOMPUTER_AGENT_LOOP_FACTORY_NOCACHE=1`).
+Until that benchmark exists, the perf claim is a hypothesis only;
+the CORRECTNESS claims (cache hit reuse + provider-set
+invalidation + concurrent message-state isolation) ARE verified
+by the 7 tests added in this PR.
 
 Will surface most under workloads that fan out heavily via `delegate`
 (skill loops, batch tasks, multi-step research). Cold-start of the
@@ -222,7 +239,7 @@ Cache:
 - Manually flushable via invalidate_cache([profile_id])
 - Process-scoped, bounded by N_profiles × model_override values
 
-Hot delegate path: ~30-50x faster. Cold first-call: unchanged.
+Estimated speedup ~30-50x on hot delegate paths (NOT benchmarked — see Performance impact section). Cold first-call unchanged.
 
 Net: 13 tests, 367 gateway tests green, ruff clean.
 ```
