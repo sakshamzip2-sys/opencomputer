@@ -37,8 +37,9 @@ def test_c1_plugin_doctor_all_runs_without_crash() -> None:
 
 def test_c3_discover_plugins_skips_planner_when_flag_off(monkeypatch) -> None:  # noqa: ANN001
     """Tier-3 R3 invariant: with ``OPENCOMPUTER_PLUGIN_ACTIVATION`` unset,
-    ``_discover_plugins`` must NOT invoke the activation planner —
-    behaviour stays byte-identical to pre-R3."""
+    ``_discover_plugins`` must NOT invoke the activation planner — even
+    when called with ``narrow_channels=True`` (the ``oc chat`` path).
+    Behaviour stays byte-identical to pre-R3."""
     from opencomputer import cli
 
     calls: list[int] = []
@@ -52,13 +53,14 @@ def test_c3_discover_plugins_skips_planner_when_flag_off(monkeypatch) -> None:  
     )
     monkeypatch.delenv("OPENCOMPUTER_PLUGIN_ACTIVATION", raising=False)
 
-    cli._discover_plugins()
+    cli._discover_plugins(narrow_channels=True)
     assert calls == [], "planner must NOT run when the flag is off"
 
 
 def test_c3_discover_plugins_runs_planner_when_flag_on(monkeypatch) -> None:  # noqa: ANN001
-    """With ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan`` and no explicit
-    profile filter, the planner IS consulted."""
+    """With ``narrow_channels=True``, ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan``
+    and no explicit profile filter, the planner IS consulted (the
+    cold-start channel-narrowing path for ``oc chat``)."""
     from opencomputer import cli
 
     calls: list[int] = []
@@ -72,7 +74,7 @@ def test_c3_discover_plugins_runs_planner_when_flag_on(monkeypatch) -> None:  # 
     )
     monkeypatch.setenv("OPENCOMPUTER_PLUGIN_ACTIVATION", "plan")
 
-    cli._discover_plugins()
+    cli._discover_plugins(narrow_channels=True)
     assert calls == [1], "planner MUST run when the flag opts in"
 
 
