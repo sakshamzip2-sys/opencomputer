@@ -124,26 +124,28 @@ def test_enable_preserves_other_profile_yaml_keys(tmp_path, monkeypatch):
 # ─── disable ──────────────────────────────────────────────────────────
 
 
-def test_disable_removes_from_enabled_list(tmp_path, monkeypatch):
+def test_disable_ordinary_plugin_removes_from_enabled_list(tmp_path, monkeypatch):
+    """An ordinary (non-core) plugin is disabled by removal from
+    plugins.enabled."""
     profile_dir = _isolate_home(tmp_path, monkeypatch)
     _write_profile_yaml(
         profile_dir,
         {"plugins": {"enabled": ["coding-harness", "telegram"]}},
     )
 
-    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+    result = _runner().invoke(plugin_app, ["disable", "telegram"])
 
     assert result.exit_code == 0, result.stdout
     data = _load_profile_yaml(profile_dir)
-    assert data["plugins"]["enabled"] == ["telegram"]
+    assert data["plugins"]["enabled"] == ["coding-harness"]
 
 
-def test_disable_when_not_enabled_is_friendly_noop(tmp_path, monkeypatch):
+def test_disable_ordinary_plugin_not_enabled_is_friendly_noop(tmp_path, monkeypatch):
     profile_dir = _isolate_home(tmp_path, monkeypatch)
     _write_profile_yaml(profile_dir, {"plugins": {"enabled": ["telegram"]}})
     before_yaml = _load_profile_yaml(profile_dir)
 
-    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+    result = _runner().invoke(plugin_app, ["disable", "discord"])
 
     assert result.exit_code == 0, result.stdout
     assert "not enabled" in result.stdout
@@ -234,3 +236,89 @@ def test_enable_rejects_invalid_yaml(tmp_path, monkeypatch):
 
     assert result.exit_code == 1
     assert "invalid yaml" in result.stdout.lower() or "yaml" in result.stdout.lower()
+
+
+# ─── core-plugin disable / re-enable (Recipe A.2 — always-on trio) ────
+
+
+def test_disable_core_plugin_writes_to_disabled_list(tmp_path, monkeypatch):
+    """A core plugin is always-on, so disabling it writes to
+    plugins.disabled (the explicit opt-out), not plugins.enabled."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(profile_dir, {"plugins": {"enabled": ["telegram"]}})
+
+    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+
+    assert result.exit_code == 0, result.stdout
+    data = _load_profile_yaml(profile_dir)
+    assert data["plugins"]["disabled"] == ["coding-harness"]
+    assert data["plugins"]["enabled"] == ["telegram"]
+
+
+def test_disable_core_plugin_also_drops_it_from_enabled(tmp_path, monkeypatch):
+    """If the core plugin was also explicitly in enabled, the
+    contradiction is resolved — it lands only in disabled."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(
+        profile_dir, {"plugins": {"enabled": ["coding-harness", "telegram"]}}
+    )
+
+    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+
+    assert result.exit_code == 0, result.stdout
+    data = _load_profile_yaml(profile_dir)
+    assert "coding-harness" not in data["plugins"]["enabled"]
+    assert data["plugins"]["disabled"] == ["coding-harness"]
+
+
+def test_disable_core_plugin_on_wildcard_errors(tmp_path, monkeypatch):
+    """plugins.disabled has no effect on a wildcard filter — refuse
+    with a clear instruction rather than silently failing."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(profile_dir, {"plugins": {"enabled": "*"}})
+
+    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+
+    assert result.exit_code == 1, result.stdout
+    assert "wildcard" in result.stdout.lower()
+
+
+def test_disable_core_plugin_absent_profile_errors(tmp_path, monkeypatch):
+    """No profile.yaml == wildcard filter — same refusal."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    assert not (profile_dir / "profile.yaml").exists()
+
+    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+
+    assert result.exit_code == 1, result.stdout
+    assert "wildcard" in result.stdout.lower()
+
+
+def test_disable_core_plugin_already_disabled_is_noop(tmp_path, monkeypatch):
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(
+        profile_dir,
+        {"plugins": {"enabled": ["telegram"], "disabled": ["coding-harness"]}},
+    )
+
+    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "already disabled" in result.stdout.lower()
+
+
+def test_enable_core_plugin_removes_from_disabled(tmp_path, monkeypatch):
+    """Re-enabling a disabled core plugin clears the plugins.disabled
+    opt-out (the trio is always-on again); the emptied list is dropped."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(
+        profile_dir,
+        {"plugins": {"enabled": ["telegram"], "disabled": ["coding-harness"]}},
+    )
+
+    result = _runner().invoke(plugin_app, ["enable", "coding-harness"])
+
+    assert result.exit_code == 0, result.stdout
+    data = _load_profile_yaml(profile_dir)
+    assert "disabled" not in data["plugins"]
+    assert "re-enabled" in result.stdout.lower()

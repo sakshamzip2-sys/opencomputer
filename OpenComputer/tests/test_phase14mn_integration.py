@@ -19,6 +19,11 @@ from opencomputer.agent.profile_config import (
     resolve_enabled_plugins,
 )
 from opencomputer.agent.workspace import WorkspaceOverlay
+from opencomputer.plugins.recommended import RECOMMENDED_PLUGINS
+
+# Recipe A.2 — resolve_enabled_plugins unions the always-on core trio
+# into every concrete plugin set (a "*" wildcard absorbs it already).
+_TRIO = frozenset(RECOMMENDED_PLUGINS)
 
 # ── load_profile_config ───────────────────────────────────────────────────
 
@@ -228,14 +233,14 @@ def test_resolve_defaults_to_wildcard():
 def test_resolve_inline_enabled_list():
     cfg = ProfileConfig(enabled_plugins=frozenset({"a", "b"}))
     out = resolve_enabled_plugins(cfg)
-    assert out.enabled == frozenset({"a", "b"})
+    assert out.enabled == frozenset({"a", "b"}) | _TRIO
 
 
 def test_resolve_preset_expands(tmp_path: Path):
     (tmp_path / "coding.yaml").write_text("plugins: [code-review, repomap]\n")
     cfg = ProfileConfig(preset="coding")
     out = resolve_enabled_plugins(cfg, presets_root=tmp_path)
-    assert out.enabled == frozenset({"code-review", "repomap"})
+    assert out.enabled == frozenset({"code-review", "repomap"}) | _TRIO
 
 
 def test_resolve_missing_preset_raises(tmp_path: Path):
@@ -253,7 +258,7 @@ def test_overlay_preset_overrides_profile_preset(tmp_path: Path):
     cfg = ProfileConfig(preset="coding")
     overlay = WorkspaceOverlay(preset="stock")
     out = resolve_enabled_plugins(cfg, overlay, presets_root=tmp_path)
-    assert out.enabled == frozenset({"s1", "s2"})
+    assert out.enabled == frozenset({"s1", "s2"}) | _TRIO
 
 
 def test_overlay_preset_overrides_profile_inline_enabled(tmp_path: Path):
@@ -261,7 +266,7 @@ def test_overlay_preset_overrides_profile_inline_enabled(tmp_path: Path):
     cfg = ProfileConfig(enabled_plugins=frozenset({"c1", "c2"}))
     overlay = WorkspaceOverlay(preset="stock")
     out = resolve_enabled_plugins(cfg, overlay, presets_root=tmp_path)
-    assert out.enabled == frozenset({"s1"})
+    assert out.enabled == frozenset({"s1"}) | _TRIO
 
 
 def test_overlay_additional_unions(tmp_path: Path):
@@ -269,7 +274,7 @@ def test_overlay_additional_unions(tmp_path: Path):
     cfg = ProfileConfig(preset="coding")
     overlay = WorkspaceOverlay.model_validate({"plugins": {"additional": ["extra1", "extra2"]}})
     out = resolve_enabled_plugins(cfg, overlay, presets_root=tmp_path)
-    assert out.enabled == frozenset({"c1", "c2", "extra1", "extra2"})
+    assert out.enabled == frozenset({"c1", "c2", "extra1", "extra2"}) | _TRIO
 
 
 def test_overlay_additional_on_wildcard_is_noop():
@@ -289,7 +294,7 @@ def test_overlay_preset_and_additional_compose(tmp_path: Path):
         {"preset": "stock", "plugins": {"additional": ["s2"]}}
     )
     out = resolve_enabled_plugins(cfg, overlay, presets_root=tmp_path)
-    assert out.enabled == frozenset({"s1", "s2"})
+    assert out.enabled == frozenset({"s1", "s2"}) | _TRIO
 
 
 def test_overlay_preset_missing_raises(tmp_path: Path):
