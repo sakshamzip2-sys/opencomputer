@@ -57,6 +57,7 @@ from opencomputer.agent.slash_commands_impl.mouse_cmd import MouseCommand
 from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
     PersonaModeCommand,
 )
+from opencomputer.agent.slash_commands_impl.plan_cmd import PlanCommand
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
 from opencomputer.agent.slash_commands_impl.plugin_reload_cmd import (
     PluginReloadCommand,
@@ -181,6 +182,9 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     SethomeCommand,
     StatusCommand,
     FooterCommand,
+    # 2026-05-18 — A2 gateway-vs-CLI parity. /plan on|off|status — the
+    # gateway equivalent of `oc --plan`; per-chat, persisted.
+    PlanCommand,
     # 2026-05-11 — /plugin reload <id> hot-reload (pi-style). Requires
     # ``plugin_registry`` to be wired into ``runtime.custom``; without
     # that, the command surfaces a clean error rather than crash.

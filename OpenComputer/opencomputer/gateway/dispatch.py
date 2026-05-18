@@ -363,6 +363,12 @@ class Dispatch:
         # acceptable semantics).
         self._known_sessions: set[str] = set()
 
+        # A7 (gateway-vs-CLI parity) — one-line session banner. Shown
+        # once per session (process-lifetime latch) prepended to the
+        # first reply, so the user can see which profile / model / cwd
+        # answered. Suppressed by display.gateway_banner.enabled=false.
+        self._banner_shown: set[str] = set()
+
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
         # two must be set.
@@ -522,6 +528,27 @@ class Dispatch:
         self._last_seen_dirty_count = 0
         self._last_seen_persist_every = 10
         self._load_last_seen()
+
+        # A2 (gateway-vs-CLI parity) — per-chat plan-mode store. Persisted
+        # alongside last_seen.json under <profile>/gateway/. The /plan
+        # slash command toggles it; __do_dispatch_inner injects plan_mode
+        # onto the runtime each turn. Registered process-wide so /plan
+        # (which only sees a RuntimeContext) reaches this same instance.
+        from pathlib import Path as _Path
+
+        from opencomputer.gateway.runtime_state import (
+            GatewayRuntimeState,
+            set_active_runtime_state,
+        )
+
+        _rs_path = None
+        if last_seen_path is not None:
+            try:
+                _rs_path = _Path(last_seen_path).parent / "runtime_state.json"
+            except Exception:  # noqa: BLE001 — fall back to in-memory only
+                _rs_path = None
+        self._runtime_state = GatewayRuntimeState(path=_rs_path)
+        set_active_runtime_state(self._runtime_state)
         # PR-1 follow-up — drain coordination. ``_drain_active`` is set by
         # ``Gateway.serve_forever`` when ``oc gateway restart`` writes the
         # drain flag; new arrivals while drain is active return None
@@ -1062,6 +1089,7 @@ class Dispatch:
         # propagates to the tool-dispatch tasks without an os.chdir
         # (which would race across concurrent gateway sessions).
         chat_cwd: str | None = None
+        _binding_queue_mode: str | None = None
         if self._resolver is not None:
             try:
                 _winning = self._resolver.resolve_binding(event)
@@ -1075,8 +1103,31 @@ class Dispatch:
                             "ignoring (file tools use the daemon cwd)",
                             _raw_cwd,
                         )
+                _binding_queue_mode = (
+                    _winning.queue_mode if _winning is not None else None
+                )
             except Exception:  # noqa: BLE001 — routing must never break dispatch
                 logger.debug("binding cwd resolution failed", exc_info=True)
+
+        # A9 (gateway-vs-CLI parity) — seed a binding's pinned
+        # ``queue_mode`` exactly once per session. ``has_session_mode``
+        # guards against clobbering a later ``/queue-mode`` from the
+        # user: the binding is the *default*, not an every-turn force.
+        if _binding_queue_mode and not self._queue_manager.has_session_mode(
+            session_id
+        ):
+            try:
+                # load_bindings already validated the literal; the cast
+                # keeps the type checker honest on the str→QueueMode hop.
+                self._queue_manager.set_session_mode(
+                    session_id,
+                    _binding_queue_mode,  # pyright: ignore[reportArgumentType]
+                )
+            except ValueError:
+                logger.warning(
+                    "binding queue_mode %r invalid; ignoring",
+                    _binding_queue_mode,
+                )
 
         # Pass-1 G9: structured per-dispatch logging. ``binding_match``
         # is "matched" when the resolver picked a non-default profile;
@@ -1386,6 +1437,19 @@ class Dispatch:
                 else:
                     _rt_custom["persona_id_override"] = _persona_override
                 runtime = RuntimeContext(custom=_rt_custom)
+            # A2 (gateway-vs-CLI parity) — per-chat plan mode. /plan
+            # persists the toggle in <profile>/gateway/runtime_state.json;
+            # inject plan_mode onto the runtime so the loop's plan-mode
+            # path applies, parity with `oc --plan` on the CLI.
+            # dataclasses.replace returns a NEW RuntimeContext — it never
+            # mutates the module-shared DEFAULT_RUNTIME_CONTEXT.
+            try:
+                if self._runtime_state.get_plan_mode(session_id):
+                    import dataclasses as _dc
+
+                    runtime = _dc.replace(runtime, plan_mode=True)
+            except Exception:  # noqa: BLE001 — never break dispatch
+                logger.debug("plan-mode injection failed", exc_info=True)
             # M1 parity telemetry — mechanisms decidable from the
             # per-turn runtime: #4 (channel_prompt_overlay) fired iff
             # _build_channel_runtime stuffed a channel-scoped prompt or
@@ -1691,6 +1755,22 @@ class Dispatch:
                 # deployments see no UX change. Wrapped defensively — a
                 # footer-render failure must never replace the actual reply.
                 _final_text = result.final_message.content or None
+                # A7 — prepend the one-line session banner on the first
+                # reply of a session so the user knows which profile /
+                # model / cwd answered. Defensive — never replaces the
+                # reply on failure.
+                try:
+                    _banner = self._maybe_session_banner(
+                        session_id, profile_id, loop, chat_cwd,
+                    )
+                    if _banner:
+                        _final_text = (
+                            f"_{_banner}_\n\n{_final_text}"
+                            if _final_text
+                            else f"_{_banner}_"
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.debug("session banner prepend failed", exc_info=True)
                 try:
                     from opencomputer.gateway.runtime_footer import (
                         format_runtime_footer,
@@ -1998,6 +2078,53 @@ class Dispatch:
             getattr(adapter, "auto_swap_enabled", False),
         )
         return RuntimeContext(custom=custom)
+
+    def _maybe_session_banner(
+        self, session_id: str, profile_id: str, loop: Any, chat_cwd: str | None,
+    ) -> str:
+        """Return a one-line session banner the first time a session is
+        seen this process, ``""`` afterwards or when not enabled.
+
+        A7 (gateway-vs-CLI parity). The CLI prints model / profile / cwd
+        at session start; the gateway sent nothing. This banner is
+        prepended (italic) to the first reply.
+
+        Opt-in: shown only when ``display.gateway_banner.enabled = true``
+        (or the shorthand ``display.gateway_banner: true``). Default off
+        — enabling it is a silent output change for every existing chat,
+        so the operator turns it on deliberately. Best-effort: a banner
+        failure must never replace the reply.
+        """
+        try:
+            display = (self._display_cfg or {}).get("display") or {}
+            gb = display.get("gateway_banner")
+            enabled = gb is True or (
+                isinstance(gb, dict) and gb.get("enabled") is True
+            )
+            if not enabled:
+                return ""
+            if session_id in self._banner_shown:
+                return ""
+            self._banner_shown.add(session_id)
+            model = str(
+                getattr(getattr(loop, "config", None), "model", "") or ""
+            )
+            cwd = chat_cwd or os.getcwd()
+            parts = [f"OpenComputer · profile={profile_id}"]
+            if model:
+                parts.append(f"model={model}")
+            parts.append(f"cwd={cwd}")
+            banner = " · ".join(parts)
+            try:
+                mem = getattr(loop, "memory", None)
+                if mem is not None:
+                    banner += f" · skills={len(mem.list_skills())}"
+            except Exception:  # noqa: BLE001 — skill count is decoration
+                pass
+            return banner
+        except Exception:  # noqa: BLE001 — banner must never break dispatch
+            logger.debug("session banner render failed", exc_info=True)
+            return ""
 
     async def _safe_lifecycle_hook(self, coro) -> None:
         """Fire-and-forget lifecycle hook with error swallowing.

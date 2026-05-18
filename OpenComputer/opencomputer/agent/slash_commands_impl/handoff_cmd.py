@@ -33,6 +33,13 @@ class HandoffCommand(SlashCommand):
         "(use --no-content to skip the handoff)"
     )
     aliases: tuple[str, ...] = ("profile-handoff",)
+    # A8 (gateway-vs-CLI parity) — the profile-rebind plumbing already
+    # handles every cross-cutting state swap, so /handoff is safe to run
+    # inline on Telegram/Discord. bypass_running_guard lets a swap be
+    # requested even while a turn is in flight (the swap itself lands on
+    # the next turn).
+    gateway_safe = True
+    bypass_running_guard = True
 
     async def execute(
         self, args: str, runtime: RuntimeContext,
