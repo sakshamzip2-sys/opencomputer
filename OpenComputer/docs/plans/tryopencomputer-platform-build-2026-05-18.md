@@ -338,9 +338,9 @@ To live as `docs/SECURITY-INVARIANTS.md` in both repos.
 
 ### Phase 1 — Foundational primitives
 
-**Status:** ☐ Not started
+**Status:** 🟡 1a in PR; 1b in PR
 **Repos:** `[oc]` + `[ocp]` (two independent PRs)
-**Blocked by:** Phase 0
+**Blocked by:** Phase 0 — 🟢 (OC #667 + ocp #1 merged 2026-05-18)
 **Estimated effort:** S (half a day each)
 
 **Goal:** Two surgical changes the whole architecture leans on — env-pinnable OC dashboard token + Postgres RLS on every tenant table.
@@ -360,14 +360,18 @@ _SESSION_TOKEN: str = (
 )
 ```
 
-- ☐ `[oc]` Patch `dashboard/server.py` as above.
-- ☐ `[oc]` Add `tests/test_dashboard_token_env_override.py`:
-  - With `OC_DASHBOARD_TOKEN=test-xyz` → `_SESSION_TOKEN == "test-xyz"`
-  - Without env var → token is a fresh `token_urlsafe(32)` (length 43)
-  - Reload-after-env-change: env at import time wins (document this)
-- ☐ `[oc]` Update `docs/SECURITY-INVARIANTS.md` invariant #4 with the file:line reference.
-- ☐ `[oc]` Open PR, link to this plan, merge, tag a new OC release.
-- ☐ `[oc]` Bump OC version pin in `oc-platform`'s cloud-init template (Phase 2 dep).
+- 🟢 `[oc]` Patch `dashboard/server.py` as above.
+- 🟢 `[oc]` Add `tests/test_dashboard_token_env_override.py`:
+  - With `OC_DASHBOARD_TOKEN=test-xyz` → `_SESSION_TOKEN == "test-xyz"` ✓
+  - Without env var → token is a fresh `token_urlsafe(32)` (length 43) ✓
+  - Reload-after-env-change: env at import time wins (documented) ✓
+  - Plus: same-env-twice-yields-same-token (the production restart property) ✓
+  - Plus: empty-string env falls through to random (no empty-Bearer accepted) ✓
+  - Plus: app.state.session_token propagation ✓
+  - **7 tests total, all green locally.** PR #TBD on `feat/phase-1a-env-pinned-dashboard-token`.
+- 🟢 `[oc]` Update `docs/SECURITY-INVARIANTS.md` invariant #4 with the test-suite references and the post-Phase-1a violation example.
+- 🟡 `[oc]` Open PR, link to this plan, merge, tag a new OC release.
+- ☐ `[oc]` Bump OC version pin in `oc-platform`'s cloud-init template (Phase 2 dep — done as part of Phase 2a).
 
 #### 1b · `[ocp]` Supabase RLS on every tenant-scoped table
 
@@ -412,6 +416,7 @@ CREATE POLICY service_role_bypass ON <table>
 
 #### Notes / decisions log
 <!-- 2026-MM-DD: ... -->
+- 2026-05-18: Phase 1a code change + 7-test suite drafted on branch `feat/phase-1a-env-pinned-dashboard-token`. New tests green; existing `test_dashboard_server.py` + `test_dashboard_fastapi.py` (14 tests) unchanged. SECURITY-INVARIANTS #4 updated to reference the new test file and the post-Phase-1a violation pattern. Phase 1b work started in parallel on `feat/phase-1b-rls` in oc-platform.
 
 ---
 
