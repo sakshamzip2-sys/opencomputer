@@ -38,10 +38,10 @@ colors:
   agent_label:      "#3B82F6"
 
 spinner:
-  thinking_verbs: [thinking, computing, parsing]
+  thinking_verbs: [thinking, computing, parsing, analyzing, evaluating, resolving, indexing, scanning, deriving, inferring]
   wings: [["[", "]"]]
-  waiting_faces: ["[◌]", "[◍]", "[◎]"]
-  thinking_faces: ["[◐]", "[◓]", "[◑]", "[◒]"]
+  waiting_faces: ["[◌]", "[◍]", "[◎]", "[○]", "[●]", "[◐]", "[◑]", "[◯]", "[⊙]", "[⊚]"]
+  thinking_faces: ["[◴]", "[◵]", "[◶]", "[◷]", "[◐]", "[◓]", "[◑]", "[◒]", "[⊙]", "[⊛]"]
 
 branding:
   agent_name: "OpenComputer"

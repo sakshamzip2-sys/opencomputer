@@ -2991,6 +2991,18 @@ def _run_chat_session(
                 _image_queue.append(str(p.resolve()))
                 return (True, f"queued image for next turn: {p.name}")
 
+            def _on_undo() -> str:
+                # Bridge cli_ui's sync slash dispatcher to the /undo logic.
+                # undo_last_exchange is plain sync (no event loop needed),
+                # so this closes over the live SessionDB + current session
+                # id directly. ``session_id`` is nonlocal — read live so a
+                # post-/resume swap targets the right session.
+                from opencomputer.agent.slash_commands_impl.undo_cmd import (
+                    undo_last_exchange,
+                )
+
+                return undo_last_exchange(session_id, loop.db)
+
             def _on_reasoning_dispatch(args: str) -> str:
                 # Bridge cli_ui's sync slash dispatcher into the async
                 # ReasoningCommand. Closes over ``runtime`` so the
@@ -3033,6 +3045,33 @@ def _run_chat_session(
                     res = fut.result(timeout=10.0)
                 return getattr(res, "output", "") or ""
 
+            def _dispatch_agent_fallthrough(text: str):
+                # `oc chat` dispatches only the cli_ui slash registry;
+                # route a slash it doesn't recognise to the agent
+                # SlashCommand registry (/copy, /rollback, /background,
+                # /agents, …) so every agent command is reachable in
+                # chat, not just on gateway/wire/ACP. Dispatched directly
+                # via the slash dispatcher — NOT run_conversation — so
+                # there is no persist / end-session side effect.
+                # ``session_id`` is nonlocal — read live so a post-/resume
+                # swap targets the right session. The dispatch + render
+                # logic is ``dispatch_agent_slash_to_console`` (unit-tested).
+                from dataclasses import replace as _replace
+
+                from opencomputer.cli_ui.slash_handlers import (
+                    dispatch_agent_slash_to_console,
+                )
+
+                rt = _replace(
+                    runtime,
+                    custom={
+                        **runtime.custom,
+                        "session_id": session_id,
+                        "session_db": loop.db,
+                    },
+                )
+                return dispatch_agent_slash_to_console(text, rt, console)
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -3063,6 +3102,7 @@ def _run_chat_session(
                 on_image_attach=_on_image_attach,
                 on_reasoning_dispatch=_on_reasoning_dispatch,
                 on_sources_dispatch=_on_sources_dispatch,
+                on_undo=_on_undo,
                 # Live (model, provider) getter — closes over the running
                 # AgentLoop so ``/model`` and ``/provider`` no-arg reads
                 # reflect the CURRENT state after any number of mid-session
@@ -3074,7 +3114,9 @@ def _run_chat_session(
                     getattr(loop.config.model, "provider", "?") or "?",
                 ),
             )
-            result = dispatch_slash(user_input, slash_ctx)
+            result = dispatch_slash(
+                user_input, slash_ctx, on_unknown=_dispatch_agent_fallthrough
+            )
             if result.exit_loop:
                 if result.message:
                     console.print(f"[dim]{result.message}[/dim]")

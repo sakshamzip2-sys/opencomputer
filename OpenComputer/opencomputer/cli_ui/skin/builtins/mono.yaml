@@ -45,10 +45,10 @@ colors:
   dim:              "#808080"
 
 spinner:
-  thinking_verbs: [thinking, working, processing]
+  thinking_verbs: [thinking, working, processing, computing, parsing, churning, crunching, grinding, iterating, resolving]
   wings: [[">", "<"]]
-  waiting_faces: ["(o_o)", "(O_O)", "(o.o)"]
-  thinking_faces: ["(*_*)", "(@_@)", "(#_#)"]
+  waiting_faces: ["(o_o)", "(O_O)", "(o.o)", "(._.)", "(-_-)", "(o_-)", "(-_o)", "(O.o)", "(o.O)", "(°_°)"]
+  thinking_faces: ["(*_*)", "(@_@)", "(#_#)", "(+_+)", "(x_x)", "(*.*)", "(@.@)", "(=_=)", "(¤_¤)", "(*‿*)"]
 
 branding:
   agent_name: "OpenComputer"

@@ -83,9 +83,12 @@ from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.status_cmd import StatusCommand
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
+from opencomputer.agent.slash_commands_impl.undo_cmd import UndoCommand
 from opencomputer.agent.slash_commands_impl.update_cmd import UpdateCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
 from opencomputer.plugins.registry import registry as _plugin_registry
+from plugin_sdk.runtime_context import RuntimeContext
+from plugin_sdk.slash_command import SlashCommandResult
 
 # The built-in slash command classes. Each is instantiated by
 # ``register_builtin_slash_commands`` — list lets new built-ins drop in
@@ -152,6 +155,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # B1 /rollback [N], B2 /busy [interrupt|queue|steer|status],
     # B3 /details [section] [mode], D5 /mouse [on|off|toggle|status].
     RollbackCommand,
+    # 2026-05-17 — Hermes-parity /undo. Conversation-history op: removes
+    # the last user/assistant exchange (distinct from /rollback, which
+    # restores filesystem checkpoints).
+    UndoCommand,
     BusyCommand,
     DetailsCommand,
     MouseCommand,
@@ -248,6 +255,45 @@ def dispatch_slash(message: str) -> str:
     return result.output
 
 
+def try_dispatch_agent_slash(
+    message: str, runtime: RuntimeContext
+) -> SlashCommandResult | None:
+    """Dispatch ``message`` against the built-in/plugin slash registry.
+
+    Returns the :class:`SlashCommandResult`, or ``None`` when ``message``
+    isn't a slash command or no registered command matches — so the
+    caller can fall back to its own "unknown command" handling.
+
+    Synchronous wrapper for the ``oc chat`` REPL fallthrough: agent
+    ``SlashCommand``s (``/copy``, ``/rollback``, ``/background``, …) are
+    otherwise reachable only on gateway/wire/ACP. Unlike
+    :func:`dispatch_slash` it dispatches against the *caller's* runtime
+    (which carries ``session_id`` / ``session_db``) and returns the full
+    result. No skill fallback is wired — only registered commands
+    resolve, so a genuine typo still surfaces as "unknown".
+    """
+    import asyncio
+
+    from opencomputer.agent.slash_dispatcher import dispatch
+
+    register_builtin_slash_commands()
+    cmds = _plugin_registry.slash_commands
+    pending = dispatch(message, cmds, runtime)
+    try:
+        return asyncio.run(pending)
+    except RuntimeError:
+        # Already inside a running loop (the async oc-chat REPL calls
+        # this from its sync slash path). Close the rejected coroutine
+        # and hand a fresh one to the running loop. Mirrors the
+        # _on_reasoning_dispatch bridge in cli.py.
+        pending.close()
+        loop = asyncio.get_event_loop()
+        fut = asyncio.run_coroutine_threadsafe(
+            dispatch(message, cmds, runtime), loop
+        )
+        return fut.result(timeout=15.0)
+
+
 # Eager registration on import — keeps the surface area discoverable
 # (any ``import opencomputer.agent.slash_commands`` puts the built-ins
 # in place) without requiring the agent loop or CLI to know about it.
@@ -258,4 +304,5 @@ __all__ = [
     "dispatch_slash",
     "get_registered_commands",
     "register_builtin_slash_commands",
+    "try_dispatch_agent_slash",
 ]

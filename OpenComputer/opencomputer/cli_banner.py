@@ -49,19 +49,80 @@ __all__ = [
 # 3-tier OC pink gradient + neutral text + dim/gray for secondary info.
 # These mirror the cli_banner_art constants and the visual reference in
 # /Users/saksham/Vscode/claude/hermes_launch.py.
-_TITLE = "#FF3D8A"      # hot pink — wordmark top + panel title (bold)
-_ACCENT = "#E91E78"     # rose — section headers, model accent
-_BORDER = "#C2185B"     # deep rose — panel border + wordmark bottom
-_DIM = "#8E1A4F"        # dark rose — secondary prose, tip
-_TEXT = "#E8E2D4"       # off-white — body text (tools, skills, values)
-_SESSION = "#8B8682"    # warm gray — Session: line
+#
+# Skin-aware (2026-05-17): the palette is resolved per render from the
+# *active* skin's ``banner_*`` color block via :func:`_palette`, so
+# ``oc skin set mono`` re-themes the splash. The ``default`` skin (and
+# no active skin) always yield OC's pink, so the splash stays
+# byte-identical to its historical output.
+_FALLBACK: dict[str, str] = {
+    "title": "#FF3D8A",    # hot pink — wordmark top + panel title (bold)
+    "accent": "#E91E78",   # rose — section headers, model accent
+    "border": "#C2185B",   # deep rose — panel border + wordmark bottom
+    "dim": "#8E1A4F",      # dark rose — secondary prose, tip
+    "text": "#E8E2D4",     # off-white — body text (tools, skills, values)
+    "session": "#8B8682",  # warm gray — Session: line
+}
 
-# Back-compat aliases — downstream tools may inspect these names.
-_PRIMARY = _TITLE
-_MUTED = _DIM
-_ROSE_TEXT = _TITLE
-_ROSE_ACCENT = _BORDER
-_DIVIDER = _BORDER
+#: Legacy module-attr name -> ``_FALLBACK`` key, consulted by ``__getattr__``
+#: so external callers reading ``cli_banner._TITLE`` (and the historical
+#: back-compat aliases) still resolve — now skin-aware.
+_PALETTE_NAMES: dict[str, str] = {
+    "_TITLE": "title",
+    "_ACCENT": "accent",
+    "_BORDER": "border",
+    "_DIM": "dim",
+    "_TEXT": "text",
+    "_SESSION": "session",
+    "_PRIMARY": "title",
+    "_MUTED": "dim",
+    "_ROSE_TEXT": "title",
+    "_ROSE_ACCENT": "border",
+    "_DIVIDER": "border",
+}
+
+
+def _palette() -> dict[str, str]:
+    """Resolve the banner palette from the active skin.
+
+    The ``default`` skin (and no active skin) yield OC's hardcoded pink,
+    so the splash is byte-identical to its historical output. Any other
+    skin themes the banner from its ``banner_*`` color block, falling
+    back to OC pink for any key the skin omits. Never raises — a skin
+    lookup failure collapses to the pink fallback.
+    """
+    try:
+        from opencomputer.cli_ui.skin import current_spec
+
+        spec = current_spec()
+    except Exception:  # noqa: BLE001 — the splash must never crash on skins
+        return dict(_FALLBACK)
+    if spec is None or getattr(spec, "name", "") == "default":
+        return dict(_FALLBACK)
+    colors = getattr(spec, "colors", {}) or {}
+    return {
+        "title": colors.get("banner_title") or _FALLBACK["title"],
+        "accent": colors.get("banner_accent") or _FALLBACK["accent"],
+        "border": colors.get("banner_border") or _FALLBACK["border"],
+        "dim": colors.get("banner_dim") or _FALLBACK["dim"],
+        "text": colors.get("banner_text") or _FALLBACK["text"],
+        "session": colors.get("session_border") or _FALLBACK["session"],
+    }
+
+
+def __getattr__(name: str) -> str:
+    """Resolve the skin-aware legacy palette names (PEP 562).
+
+    ``_TITLE`` and its siblings are not module globals — external reads
+    resolve here, live, against the active skin via :func:`_palette`.
+    The module's own render helpers call :func:`_palette` directly
+    (a function's ``LOAD_GLOBAL`` never triggers module ``__getattr__``).
+    Any other missing attribute raises ``AttributeError`` as usual.
+    """
+    key = _PALETTE_NAMES.get(name)
+    if key is not None:
+        return _palette()[key]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Layout knobs.
 _WORDMARK_MIN_WIDTH = OPEN_COMPUTER_LOGO_HERMES_STYLE_WIDTH + 2
@@ -233,8 +294,9 @@ def _truncate_items_list(items: list[str], budget: int) -> str:
 
 def _format_group_line(group: str, items: list[str]) -> str:
     """One Rich-markup row: ``[dim DIM]group:[/] [TEXT]a, b, c, ...[/]``."""
+    pal = _palette()
     items_str = _truncate_items_list(sorted(items), _PER_GROUP_CHAR_BUDGET)
-    return f"[dim {_DIM}]{group}:[/] [{_TEXT}]{items_str}[/]"
+    return f"[dim {pal['dim']}]{group}:[/] [{pal['text']}]{items_str}[/]"
 
 
 def _categorize_skills_by_prefix(
@@ -301,13 +363,14 @@ def _build_version_cluster() -> tuple[str, str]:
     """
     if not __version__:
         return "", ""
+    pal = _palette()
     label = f"v{__version__}"
     visible = label
-    markup = f"[bold {_TITLE}]{label}[/]"
+    markup = f"[bold {pal['title']}]{label}[/]"
     sha = _git_short_sha()
     if sha:
         visible += f" · {sha}"
-        markup += f"[{_DIM}] · {sha}[/]"
+        markup += f"[{pal['dim']}] · {sha}[/]"
     return visible, markup
 
 
@@ -347,6 +410,7 @@ def _build_left_column(
     from rich.console import Group
     from rich.text import Text
 
+    pal = _palette()
     caduceus = Align.center(
         Text.from_markup(OPEN_COMPUTER_CADUCEUS_PINK, end="")
     )
@@ -360,13 +424,13 @@ def _build_left_column(
         model_short = model_short[:25] + "..."
 
     if model_short:
-        accent_line = f"[{_ACCENT}]{model_short}[/]"
+        accent_line = f"[{pal['accent']}]{model_short}[/]"
         if provider_clean:
-            accent_line += f" [dim {_DIM}]· {provider_clean}[/]"
+            accent_line += f" [dim {pal['dim']}]· {provider_clean}[/]"
         runtime_lines.append(accent_line)
 
     if cwd:
-        runtime_lines.append(f"[dim {_DIM}]{cwd}[/]")
+        runtime_lines.append(f"[dim {pal['dim']}]{cwd}[/]")
 
     if session_id:
         # When the caller's helper echoed back the raw uuid as the
@@ -376,12 +440,12 @@ def _build_left_column(
             shown = session_label
         else:
             shown = _shorten_session(session_id)
-        runtime_lines.append(f"[dim {_SESSION}]Session: {shown}[/]")
+        runtime_lines.append(f"[dim {pal['session']}]Session: {shown}[/]")
 
     profile_name = _active_profile_name()
     if profile_name:
         runtime_lines.append(
-            f"[bold {_ACCENT}]Profile:[/] [{_TEXT}]{profile_name}[/]"
+            f"[bold {pal['accent']}]Profile:[/] [{pal['text']}]{profile_name}[/]"
         )
 
     if not runtime_lines:
@@ -402,7 +466,8 @@ def _build_right_column(
     """``Available Tools`` + per-toolset rows + ``Available Skills`` +
     per-category rows + optional ``MCP Servers`` section + summary line.
     """
-    lines: list[str] = [f"[bold {_ACCENT}]Available Tools[/]"]
+    pal = _palette()
+    lines: list[str] = [f"[bold {pal['accent']}]Available Tools[/]"]
 
     sorted_toolsets = sorted(tools_grouped.items()) if tools_grouped else []
     for toolset, names in sorted_toolsets[:_TOOLS_MAX_TOOLSETS]:
@@ -410,10 +475,10 @@ def _build_right_column(
     extra_toolsets = max(0, len(sorted_toolsets) - _TOOLS_MAX_TOOLSETS)
     if extra_toolsets > 0:
         plural = "toolset" if extra_toolsets == 1 else "toolsets"
-        lines.append(f"[dim {_DIM}](and {extra_toolsets} more {plural}...)[/]")
+        lines.append(f"[dim {pal['dim']}](and {extra_toolsets} more {plural}...)[/]")
 
     lines.append("")
-    lines.append(f"[bold {_ACCENT}]Available Skills[/]")
+    lines.append(f"[bold {pal['accent']}]Available Skills[/]")
 
     sorted_skills = sorted(skills_grouped.items()) if skills_grouped else []
     for category, names in sorted_skills[:_SKILLS_MAX_CATEGORIES]:
@@ -421,7 +486,7 @@ def _build_right_column(
     extra_categories = max(0, len(sorted_skills) - _SKILLS_MAX_CATEGORIES)
     if extra_categories > 0:
         plural = "category" if extra_categories == 1 else "categories"
-        lines.append(f"[dim {_DIM}](and {extra_categories} more {plural}...)[/]")
+        lines.append(f"[dim {pal['dim']}](and {extra_categories} more {plural}...)[/]")
 
     # MCP Servers — only rendered when at least one is known. Matches
     # upstream Hermes' conditional section (banner.py:536-549). Three
@@ -435,7 +500,7 @@ def _build_right_column(
     mcp_configured = 0
     if mcp_status:
         lines.append("")
-        lines.append(f"[bold {_ACCENT}]MCP Servers[/]")
+        lines.append(f"[bold {pal['accent']}]MCP Servers[/]")
         for srv in mcp_status:
             name = srv.get("name", "unknown")
             transport = srv.get("transport") or srv.get("url", "")
@@ -448,14 +513,14 @@ def _build_right_column(
                     tool_count = len(tool_count)
                 plural = "tool" if tool_count == 1 else "tools"
                 lines.append(
-                    f"[dim {_DIM}]{name}[/] [{_TEXT}]({transport_short})[/] "
-                    f"[dim {_DIM}]—[/] [{_TEXT}]{tool_count} {plural}[/]"
+                    f"[dim {pal['dim']}]{name}[/] [{pal['text']}]({transport_short})[/] "
+                    f"[dim {pal['dim']}]—[/] [{pal['text']}]{tool_count} {plural}[/]"
                 )
             elif state == "configured":
                 mcp_configured += 1
                 lines.append(
-                    f"[dim {_DIM}]{name}[/] [{_TEXT}]({transport_short})[/] "
-                    f"[dim {_DIM}]— configured[/]"
+                    f"[dim {pal['dim']}]{name}[/] [{pal['text']}]({transport_short})[/] "
+                    f"[dim {pal['dim']}]— configured[/]"
                 )
             else:
                 err = srv.get("last_error") or "disconnected"
@@ -482,8 +547,8 @@ def _build_right_column(
         plural = "MCP" if mcp_configured == 1 else "MCP"
         summary_parts.append(f"{mcp_configured} {plural}")
     lines.append(
-        f"[dim {_DIM}]{' · '.join(summary_parts)} · "
-        f"[/][{_ACCENT}]/help[/][dim {_DIM}] for commands[/]"
+        f"[dim {pal['dim']}]{' · '.join(summary_parts)} · "
+        f"[/][{pal['accent']}]/help[/][dim {pal['dim']}] for commands[/]"
     )
 
     return "\n".join(lines)
@@ -498,6 +563,7 @@ def _render_wordmark(console: Console, term_width: int) -> None:
     """
     from rich.text import Text
 
+    pal = _palette()
     if term_width >= _WORDMARK_MIN_WIDTH:
         console.print(
             Text.from_markup(OPEN_COMPUTER_LOGO_HERMES_STYLE),
@@ -525,7 +591,7 @@ def _render_wordmark(console: Console, term_width: int) -> None:
 
     # Pathological narrow: plain bold "OPENCOMPUTER".
     console.print(
-        Text(OPENCOMPUTER_LOGO_FALLBACK, style=f"bold {_TITLE}"),
+        Text(OPENCOMPUTER_LOGO_FALLBACK, style=f"bold {pal['title']}"),
         no_wrap=True,
         overflow="ellipsis",
     )
@@ -559,6 +625,7 @@ def _render_panel(
     from rich.table import Table
     from rich.text import Text
 
+    pal = _palette()
     left = _build_left_column(model, provider, cwd, session_id, session_label)
     # Apply the prefix-derived recategorization to skills so a flat
     # ``{"skills": [139 names]}`` registry shows as multiple rows
@@ -578,7 +645,7 @@ def _render_panel(
         console.print(right, highlight=False)
         return
 
-    title = f"[bold {_TITLE}]{format_banner_version_label()}[/]"
+    title = f"[bold {pal['title']}]{format_banner_version_label()}[/]"
 
     if term_width < _PANEL_TWO_COL_MIN_WIDTH:
         # Single-column boxed — below ~88 cols the 31-cell laurel art
@@ -603,7 +670,7 @@ def _render_panel(
     panel = Panel(
         body,
         title=title,
-        border_style=_BORDER,
+        border_style=pal["border"],
         box=box.ROUNDED,
         padding=(0, 1),
     )
@@ -614,9 +681,10 @@ def _render_welcome_and_tip(console: Console) -> None:
     """``Welcome to OpenComputer!`` line + a single random ``✦ Tip:``."""
     from rich.text import Text
 
+    pal = _palette()
     console.print(
         Text.from_markup(
-            f"[{_TEXT}]Welcome to OpenComputer! Type your message or "
+            f"[{pal['text']}]Welcome to OpenComputer! Type your message or "
             f"/help for commands.[/]"
         ),
         highlight=False,
@@ -625,7 +693,7 @@ def _render_welcome_and_tip(console: Console) -> None:
         return
     tip = random.choice(_TIPS)
     console.print(
-        Text.from_markup(f"[dim {_DIM}]✦ Tip: {tip}[/]"),
+        Text.from_markup(f"[dim {pal['dim']}]✦ Tip: {tip}[/]"),
         highlight=False,
     )
 

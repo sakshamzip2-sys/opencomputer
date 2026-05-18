@@ -28,6 +28,7 @@ from opencomputer.cli_ui.slash import (
     is_slash_command,
     resolve_command,
 )
+from plugin_sdk.runtime_context import RuntimeContext
 
 
 @dataclass
@@ -153,6 +154,10 @@ class SlashContext:
     on_sources_dispatch: Callable[[str], str] = lambda _args: (
         "/sources callback not wired"
     )
+    #: ``/undo`` — remove the last user/assistant exchange. Bridges to the
+    #: agent ``UndoCommand``; the chat loop binds this to a closure over
+    #: the live SessionDB + session id. Returns the status text to print.
+    on_undo: Callable[[], str] = lambda: "/undo callback not wired"
     #: ``/goal <text>`` mid-run race-guard — returns True iff the AgentLoop
     #: is currently streaming a turn for this session. The slash handler
     #: refuses the SET form when this is True (status / pause / resume /
@@ -1595,6 +1600,60 @@ def _handle_image(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_paste(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/paste`` — attach an image from the system clipboard.
+
+    Hermes-parity ("Attach clipboard image from your clipboard"). Pulls
+    the image off the OS clipboard via the cross-platform engine in
+    :mod:`opencomputer.cli_ui.clipboard`, writes it to a temp PNG, and
+    queues it for the next user message through ``on_image_attach`` —
+    the same callback ``/image`` uses. Clipboard-only; ``args`` ignored.
+    """
+    import tempfile
+    import time
+
+    from opencomputer.cli_ui import clipboard
+
+    if not clipboard.has_clipboard_image():
+        ctx.console.print(
+            "[yellow]No image found on the clipboard. "
+            "Copy an image first, or use /image <path> for a file.[/yellow]"
+        )
+        return SlashResult(handled=True)
+
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    counter = int(time.time() * 1000) % 100000
+    dest = (
+        Path(tempfile.gettempdir())
+        / "opencomputer-clipboard"
+        / f"paste_{ts}_{counter}.png"
+    )
+    if not clipboard.save_clipboard_image(dest):
+        ctx.console.print(
+            "[yellow]Couldn't read the image from your clipboard.[/yellow]"
+        )
+        return SlashResult(handled=True)
+
+    ok, msg = ctx.on_image_attach(str(dest))
+    if ok:
+        ctx.console.print(f"[green]✓[/green] {msg}")
+    else:
+        ctx.console.print(f"[yellow]{msg}[/yellow]")
+    return SlashResult(handled=True)
+
+
+def _handle_undo(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/undo`` — remove the last user/assistant exchange.
+
+    Bridges to the agent ``UndoCommand`` via the ``on_undo`` callback,
+    which the chat loop binds to a closure over the live SessionDB.
+    """
+    # markup=False — the status text is plain (it can carry an exception
+    # message), so a stray ``[`` must not be parsed as Rich markup.
+    ctx.console.print(ctx.on_undo(), markup=False)
+    return SlashResult(handled=True)
+
+
 # ─── Hermes-parity Tier B (2026-04-30): /retry + /stop ───────────────
 
 
@@ -1694,28 +1753,70 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "plugins":  _handle_plugins_inline,
     "profile":  _handle_profile_inline,
     "image":    _handle_image,
+    "paste":    _handle_paste,
     "tools":    _handle_tools_inline,
     "retry":    _handle_retry,
+    "undo":     _handle_undo,
     "stop":     _handle_stop_bg,
     "reasoning": _handle_reasoning,
     "sources": _handle_sources,
 }
 
 
-def dispatch_slash(text: str, ctx: SlashContext) -> SlashResult:
+def dispatch_slash(
+    text: str,
+    ctx: SlashContext,
+    on_unknown: Callable[[str], SlashResult] | None = None,
+) -> SlashResult:
     """Dispatch a slash-command string to its handler.
 
     Returns ``SlashResult(handled=False)`` for non-slash text so the
-    caller can fall back to "treat as normal message". Unknown slash
-    commands are consumed (handled=True) with an error message — we
-    don't want them to leak to the LLM.
+    caller can fall back to "treat as normal message".
+
+    A slash command not in the cli_ui registry routes to ``on_unknown``
+    when one is supplied — the ``oc chat`` REPL wires this to the agent
+    slash registry so commands like ``/copy`` / ``/rollback`` work in
+    chat, not only on gateway/wire/ACP. With no ``on_unknown`` hook the
+    command is consumed (handled=True) with an error message — we don't
+    want a stray slash leaking to the LLM.
     """
     if not is_slash_command(text):
         return SlashResult(handled=False)
     name, args = _split_args(text)
     cmd: CommandDef | None = resolve_command(name)
     if cmd is None:
+        if on_unknown is not None:
+            return on_unknown(text)
         ctx.console.print(f"[red]unknown command:[/red] /{name}  (try /help)")
         return SlashResult(handled=True)
     handler = _HANDLERS[cmd.name]
     return handler(ctx, args)
+
+
+def dispatch_agent_slash_to_console(
+    text: str, runtime: RuntimeContext, console: Console
+) -> SlashResult:
+    """Dispatch ``text`` via the agent slash registry and render the result.
+
+    This is the tested core of the ``oc chat`` REPL fallthrough — the
+    ``on_unknown`` hook ``dispatch_slash`` calls for a slash absent from
+    the cli_ui registry. It dispatches through the agent ``SlashCommand``
+    registry via ``try_dispatch_agent_slash`` (so ``/copy``, ``/rollback``,
+    ``/background``, … reach `oc chat`), prints the command's output —
+    or an "unknown command" line when no agent command matches either —
+    and returns a handled :class:`SlashResult`.
+
+    ``markup=False`` on the output print: an agent command's text is
+    plain (it can carry a filename or exception message), so a stray
+    ``[`` must not be parsed as Rich markup.
+    """
+    from opencomputer.agent.slash_commands import try_dispatch_agent_slash
+
+    result = try_dispatch_agent_slash(text, runtime)
+    if result is None:
+        parts = text.lstrip("/").split(maxsplit=1)
+        name = parts[0] if parts else ""
+        console.print(f"[red]unknown command:[/red] /{name}  (try /help)")
+    elif result.output:
+        console.print(result.output, markup=False)
+    return SlashResult(handled=True)

@@ -240,6 +240,16 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="session",
         args_hint="<path>",
     ),
+    # Hermes-parity — "Attach clipboard image from your clipboard". The
+    # clipboard-image engine (cli_ui/clipboard.py) already exists; this
+    # surfaces it as a slash command alongside the path-based /image.
+    CommandDef(
+        name="paste",
+        description=(
+            "Attach an image from the system clipboard for the next message."
+        ),
+        category="session",
+    ),
     CommandDef(
         name="tools",
         description="List enabled tools (read-only inventory).",
@@ -248,6 +258,14 @@ SLASH_REGISTRY: list[CommandDef] = [
     CommandDef(
         name="retry",
         description="Resend the last user message (queues it for next turn).",
+        category="session",
+    ),
+    # Hermes-parity — removes the last user/assistant exchange. Logic
+    # lives in the agent UndoCommand; this entry + _handle_undo bridge
+    # it into the oc-chat REPL (mirrors /reasoning, /sources).
+    CommandDef(
+        name="undo",
+        description="Remove the last user/assistant exchange from this session.",
         category="session",
     ),
     CommandDef(

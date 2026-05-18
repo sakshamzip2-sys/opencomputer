@@ -38,10 +38,10 @@ colors:
   agent_label:      "#0EA5E9"
 
 spinner:
-  thinking_verbs: [diving, surfacing, currents-checking, depth-sounding]
+  thinking_verbs: [diving, surfacing, currents-checking, depth-sounding, drifting, fathoming, cresting, ebbing, tide-reading, submerging]
   wings: [["≈", "≈"], ["⟆", "⟇"]]
-  waiting_faces: ["(≈‿≈)", "(~‿~)", "(∽‿∽)"]
-  thinking_faces: ["(◉‿◉)", "(◐‿◑)", "(◔‿◓)"]
+  waiting_faces: ["(≈‿≈)", "(~‿~)", "(∽‿∽)", "(≋‿≋)", "(◡‿◡)", "(˜‿˜)", "(≈ᴗ≈)", "(~ᴗ~)", "(∿‿∿)", "(◞‿◟)"]
+  thinking_faces: ["(◉‿◉)", "(◐‿◑)", "(◔‿◓)", "(◑‿◐)", "(◒‿◓)", "(◉ω◉)", "(◐ω◑)", "(◯‿◯)", "(◍‿◍)", "(◴‿◷)"]
 
 branding:
   agent_name: "Poseidon"

@@ -38,10 +38,10 @@ colors:
   agent_label:      "#DC143C"
 
 spinner:
-  thinking_verbs: [strategizing, drilling, sparring, marshalling]
+  thinking_verbs: [strategizing, drilling, sparring, marshalling, flanking, fortifying, regrouping, advancing, besieging, outmaneuvering]
   wings: [["⚔", "⚔"], ["▲", "▲"]]
-  waiting_faces: ["[◇]", "[◆]", "[◈]"]
-  thinking_faces: ["[⌖]", "[⌬]", "[⌘]"]
+  waiting_faces: ["[◇]", "[◆]", "[◈]", "[◊]", "[⬡]", "[⬢]", "[▽]", "[△]", "[◁]", "[▷]"]
+  thinking_faces: ["[⌖]", "[⌬]", "[⌘]", "[※]", "[⊕]", "[⊗]", "[⌗]", "[✦]", "[✶]", "[❖]"]
 
 branding:
   agent_name: "Ares"
