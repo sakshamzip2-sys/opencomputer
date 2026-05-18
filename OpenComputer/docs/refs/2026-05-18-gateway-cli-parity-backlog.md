@@ -31,6 +31,14 @@ sized and prioritised, and nothing is hand-waved.
 | D2 | `/tools` — tool-surface inspector | #656 |
 | — | Thinking-budget defaults +1 tier + dynamic-budget design | #655 |
 
+**Also closed by the above (spec IDs that are duplicates / sub-cases):**
+
+- **G5** (slash commands have no `gateway_safe` declaration) — this *is*
+  A3; the spec calls it out separately as "the single biggest unlock".
+  Shipped with A3 (#648).
+- **C2** (filesystem is daemon-local), same-machine case — closed by A6
+  (#648, per-chat `cwd`). The different-machine case remains; see §4.
+
 **Result:** a connector went from a "dumb relay" to ~80% of the CLI
 experience. The remaining work below is mostly P2/P3 polish plus a few
 genuine architectural pieces.
@@ -95,6 +103,8 @@ fix. The A3 mechanism makes the slash commands cheap.
 | I4 | Surface the active reset policy via `/status` | XS |
 | I5 | Warn on first redaction-enabled boot if the PII salt is not backed up | XS |
 | I6 | Exponential backoff + N retries in `outgoing_drainer` before `mark_failed` | S |
+| I7 | Mid-flight `agent_context` rebinding — a long turn that crosses into cron-like / batch work keeps the `chat` tag. Mostly a doc/edge-case note, not a true parity gap. | XS (docs) |
+| C2 | Remote-filesystem proxy — when the daemon runs on a different machine than the user, file tools can't reach the user's laptop. (Same-machine case already closed by A6.) Own spec. | XL |
 | H1–H8 | Per-platform polish (Telegram MDV2 edge cases, Discord embeds, WhatsApp re-auth notice, …) — several are "by design", listed for completeness | varies |
 
 ---
@@ -161,3 +171,26 @@ budget chasing 100% here:
 
 Each wave = one focused, fully-tested PR with green CI, the same way
 A1–A9 / B3 / D1 / D2 shipped. Never a multi-feature dump.
+
+---
+
+## 9. Completeness check
+
+Every gap in the source spec (`EXTENDED-GAP-ANALYSIS.md`, IDs A1–J3) is
+accounted for here — verified ID-by-ID 2026-05-18:
+
+| Spec section | IDs | Where in this doc |
+|---|---|---|
+| A — affordances | A1 A2 A3 A6 A7 A8 A9 | §1 shipped · A4 → §2 · A5 → §5 |
+| B — output/display | B3 | §1 shipped · B1 → §2 · B2 B4 B5 B6 → §3 |
+| C — memory/context | — | C1.1 C4 → §3 · C1.2 C1.3 → §5 · C3 → §2 · C5 C6 C2(remote) → §4 · C2(same-machine) shipped via A6 |
+| D — routing/config | D1 D2 | §1 shipped · D3 → §3 · D4 D5 D6 → §4 |
+| E — observability | — | E2 → §3 · E1 E3 E4 → §4 |
+| F — multi-modal | — | F3 (F1=B6) → §3 · F2 F4 F5 → §4 |
+| G — architectural | — | G1 G2 G3 → §5 · G6 → §3 · G4 G7 G8 → §4 · **G5 = A3, shipped** |
+| H — per-platform | H1–H8 | §4 (several "by design") |
+| I — cross-cutting | — | I8 → §3 · I1–I7 → §4 |
+| J — honest floor | J1 J2 J3 | §7 (will not close) |
+
+No spec ID is unlisted. Items deliberately *not* given their own row:
+G5 (= A3) and C2-same-machine (= A6) — both shipped, noted in §1.
