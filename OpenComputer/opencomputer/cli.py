@@ -1020,6 +1020,34 @@ def _discover_plugins(*, narrow_channels: bool = False) -> int:
 _MOUNTED_PLUGIN_CLI_NAMESPACES: set[str] = set()
 
 
+def _maybe_warn_coding_harness_dark() -> None:
+    """Nudge the user when coding-harness is installed but the active
+    profile's plugin filter excludes it (Recipe A, M1.0).
+
+    Best-effort cosmetics: any failure is swallowed at DEBUG so a
+    filesystem hiccup during discovery never blocks the chat REPL. The
+    decision logic + suppression escapes live in
+    ``opencomputer.plugins.recommended``.
+    """
+    try:
+        from opencomputer.agent.config import _home
+        from opencomputer.plugins.discovery import discover, standard_search_paths
+        from opencomputer.plugins.recommended import maybe_warn_harness_dark
+
+        installed = frozenset(
+            c.manifest.id for c in discover(standard_search_paths())
+        )
+        maybe_warn_harness_dark(
+            enabled_ids=_resolve_plugin_filter(),
+            installed_plugin_ids=installed,
+            profile_yaml=_home() / "profile.yaml",
+            console=console,
+            env=os.environ,
+        )
+    except Exception:  # noqa: BLE001 — a startup nag must never crash chat
+        _log.debug("coding-harness dark-state check failed", exc_info=True)
+
+
 def _log_cli_mount_failure(namespace: str, exc: Exception) -> None:
     """Log a plugin-CLI mount failure without crashing the CLI."""
     import logging
@@ -1830,6 +1858,7 @@ def _run_chat_session(
     # Best-of-three Recipe 3 — interactive chat serves no channels, so
     # channel-adapter plugins are dropped under the activation flag.
     _discover_plugins(narrow_channels=True)
+    _maybe_warn_coding_harness_dark()
     _apply_model_overrides()
     _discover_and_register_agents()
     n_settings_hooks = _register_settings_hooks(cfg)

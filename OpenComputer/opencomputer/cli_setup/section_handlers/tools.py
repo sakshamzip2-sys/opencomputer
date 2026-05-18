@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, checklist, radiolist
+from opencomputer.plugins.recommended import RECOMMENDED_PLUGINS
 
 _TOOLS = [
     Choice("🔍 Web Search & Scraping", "web_search"),
@@ -42,7 +43,9 @@ _DEFAULT_ENABLED = [
     "computer_use",
 ]
 
-_RECOMMENDED_PLUGINS = ("coding-harness", "memory-honcho", "dev-tools")
+# Re-export the canonical tuple so existing imports of this name keep
+# working; the single source of truth lives in `plugins.recommended`.
+_RECOMMENDED_PLUGINS = RECOMMENDED_PLUGINS
 
 
 def _apply_recommended_plugins(ctx: WizardCtx) -> None:
