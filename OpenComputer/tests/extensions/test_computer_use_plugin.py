@@ -2260,7 +2260,7 @@ class TestNoModuleCollisionWithSiblingPlugins:
     """The cu_-prefix rename must make computer-use immune to the
     `sys.modules` filename collision with sibling plugins."""
 
-    def test_no_module_collision_with_sibling_plugins(self) -> None:
+    def test_no_module_collision_with_sibling_plugins(self, force_darwin) -> None:
         by_id = _candidates_by_id()
         for pid in (*_COLLIDING_IDS, "computer-use"):
             assert pid in by_id, (
