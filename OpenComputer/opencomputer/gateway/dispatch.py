@@ -1677,6 +1677,14 @@ class Dispatch:
                 # async-consent round-trip.
                 _pre_consent = self._consent_prompt_counts.get(session_id, 0)
 
+                # A1 — live-stream the reply into an editable message
+                # when the adapter supports EDIT_MESSAGE. ``streamer`` is
+                # None for one-shot adapters (SMS, email, IRC) and for
+                # any adapter where the placeholder send fails — both
+                # fall back cleanly to the historical one-shot path.
+                streamer = await self._maybe_start_streaming(adapter, event)
+                _stream_cb = streamer.feed if streamer is not None else None
+
                 # A6 — bind the per-chat cwd for the duration of the
                 # turn. ``working_directory(None)`` is a no-op, so the
                 # default (no binding cwd) path is unchanged.
@@ -1692,6 +1700,7 @@ class Dispatch:
                                 runtime=runtime,
                                 system_prompt_override=routing_system_override,
                                 system_prompt_merge=routing_system_merge,
+                                stream_callback=_stream_cb,
                             )
                     else:
                         result = await loop.run_conversation(
@@ -1701,6 +1710,7 @@ class Dispatch:
                             runtime=runtime,
                             system_prompt_override=routing_system_override,
                             system_prompt_merge=routing_system_merge,
+                            stream_callback=_stream_cb,
                         )
                 # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:end +
                 # session:end. Hermes spec: session:end fires per
@@ -1944,6 +1954,18 @@ class Dispatch:
                         logger.debug(
                             "parity probe observe (reply) failed", exc_info=True
                         )
+                # A1 — if the reply streamed live into a placeholder,
+                # finalize() edits that message to the fully-formatted
+                # text (banner + footer included) and owns delivery; we
+                # return None so the adapter does not send a duplicate.
+                # A finalize failure returns False → fall through to the
+                # normal one-shot return.
+                if streamer is not None and streamer.active:
+                    try:
+                        if await streamer.finalize(_final_text or ""):
+                            return None
+                    except Exception:  # noqa: BLE001 — never break the reply
+                        logger.debug("streaming finalize failed", exc_info=True)
                 return _final_text
             except Exception as e:  # noqa: BLE001
                 # Always log full traceback for debugging; user only
@@ -2142,6 +2164,46 @@ class Dispatch:
         except Exception:  # noqa: BLE001 — banner must never break dispatch
             logger.debug("session banner render failed", exc_info=True)
             return ""
+
+    async def _maybe_start_streaming(self, adapter: Any, event: Any):
+        """Start A1 live-streaming for this turn, or return None.
+
+        Streaming is used when the adapter advertises
+        ``ChannelCapabilities.EDIT_MESSAGE`` and is not opted out via
+        ``display.streaming.enabled = false``. The ``isinstance`` guard
+        keeps MagicMock test adapters (whose ``.capabilities`` is itself
+        a mock, truthy under ``&``) on the one-shot path. Any failure
+        degrades to one-shot delivery — streaming is an enhancement and
+        must never break dispatch.
+        """
+        if adapter is None:
+            return None
+        try:
+            from plugin_sdk.channel_contract import ChannelCapabilities
+
+            caps = getattr(adapter, "capabilities", None)
+            if not isinstance(caps, ChannelCapabilities):
+                return None
+            if not (caps & ChannelCapabilities.EDIT_MESSAGE):
+                return None
+            display = (self._display_cfg or {}).get("display") or {}
+            s = display.get("streaming")
+            if s is False or (isinstance(s, dict) and s.get("enabled") is False):
+                return None
+
+            from opencomputer.gateway.streaming_delivery import (
+                StreamingDelivery,
+            )
+
+            streamer = StreamingDelivery(adapter, event.chat_id)
+            if await streamer.start():
+                return streamer
+            return None
+        except Exception:  # noqa: BLE001 — never break dispatch
+            logger.debug(
+                "streaming start failed; one-shot fallback", exc_info=True,
+            )
+            return None
 
     async def _safe_lifecycle_hook(self, coro) -> None:
         """Fire-and-forget lifecycle hook with error swallowing.
