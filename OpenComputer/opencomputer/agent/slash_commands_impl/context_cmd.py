@@ -52,7 +52,12 @@ class ContextCommand(SlashCommand):
 
     name = "context"
     description = "Show context window usage + compaction count this session"
-    gateway_safe = True
+    # NOT gateway_safe: /context needs live per-session counters
+    # (session_tokens_in, session_compactions) that only the agent
+    # loop maintains on its own runtime — on the gateway bypass path
+    # they are absent, so the command would show a misleading 0%.
+    # Deferred until the gateway plumbs per-session counters from the
+    # SessionDB (gateway-vs-CLI parity, follow-up).
 
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         custom = runtime.custom if runtime is not None else {}

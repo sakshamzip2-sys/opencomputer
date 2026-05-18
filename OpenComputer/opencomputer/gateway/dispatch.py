@@ -1313,7 +1313,7 @@ class Dispatch:
         # agent reply. The class attribute ``bypass_running_guard``
         # opts the command into this fast path.
         bypass_result = await self._maybe_bypass_running_guard(
-            event, session_id, profile_id,
+            event, session_id, profile_id, loop,
         )
         if bypass_result is not None:
             return bypass_result
@@ -2140,7 +2140,7 @@ class Dispatch:
             logger.debug("lifecycle hook raised", exc_info=True)
 
     async def _maybe_bypass_running_guard(
-        self, event, session_id: str, profile_id: str,
+        self, event, session_id: str, profile_id: str, loop: Any = None,
     ) -> str | None:
         """Detect + execute a slash command inline on the gateway.
 
@@ -2152,11 +2152,16 @@ class Dispatch:
         - ``gateway_safe = True`` (A3, gateway-vs-CLI parity Wave 1) —
           the command is safe to run inline on the gateway. Without
           this flag a slash command falls through to the model as plain
-          text — which is why ``/status``, ``/plan``, ``/handoff`` etc.
-          silently no-op'd on Telegram before A3.
+          text — which is why ``/status``, ``/plan`` etc. silently
+          no-op'd on Telegram before A3.
 
         Either flag routes the command here. Both run pre-lock; spec
         requires gateway-safe commands to be quick.
+
+        ``loop`` is the resolved per-profile :class:`AgentLoop`; it lets
+        the runtime built here carry ``session_db`` / ``model`` /
+        ``active_profile_id`` so read-only commands (``/history``,
+        ``/agents``, ``/status``) show real data instead of placeholders.
 
         Returns the command's text output if dispatched, or None if the
         message is not a gateway-runnable slash command (caller proceeds
@@ -2199,12 +2204,28 @@ class Dispatch:
             "chat_id": event.chat_id,
             "session_id": session_id,
             "profile_id": profile_id,
+            # A3 — ``active_profile_id`` is the key profile-aware commands
+            # read; the gateway resolves the same value as ``profile_id``.
+            "active_profile_id": profile_id,
         }
         if event.metadata:
             for k in ("thread_id", "user_id", "message_id"):
                 v = event.metadata.get(k)
                 if v is not None:
                     custom[k] = v
+        # A3 — give read-only gateway-safe commands the loop-backed
+        # context they need to show real data: ``session_db`` for
+        # /history + /agents, ``model`` for /status. Best-effort — a
+        # missing attribute just leaves the command in its degraded
+        # (placeholder) rendering, never raises.
+        if loop is not None:
+            db = getattr(loop, "db", None)
+            if db is not None:
+                custom["session_db"] = db
+            try:
+                custom["model"] = loop.config.model.model
+            except Exception:  # noqa: BLE001 — model line is decoration
+                pass
         runtime = RuntimeContext(custom=custom)
         # 2026-05-08 — Hermes Doc-2 gateway hooks: command:<slug>.
         # Fire-and-forget so a slow handler never delays slash dispatch.

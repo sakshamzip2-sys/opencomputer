@@ -33,13 +33,15 @@ class HandoffCommand(SlashCommand):
         "(use --no-content to skip the handoff)"
     )
     aliases: tuple[str, ...] = ("profile-handoff",)
-    # A8 (gateway-vs-CLI parity) — the profile-rebind plumbing already
-    # handles every cross-cutting state swap, so /handoff is safe to run
-    # inline on Telegram/Discord. bypass_running_guard lets a swap be
-    # requested even while a turn is in flight (the swap itself lands on
-    # the next turn).
-    gateway_safe = True
-    bypass_running_guard = True
+    # A8 is NOT shippable as a bare gateway_safe tag. /handoff completes
+    # a swap by setting runtime.custom["pending_profile_id"] for the
+    # *next* turn's loop to consume — but the gateway's bypass-path
+    # runtime is ephemeral and discarded after the command, so the swap
+    # never lands. Making /handoff work on the gateway needs the same
+    # persist-then-inject machinery as /plan (A2): a per-chat pending-
+    # profile entry in <profile>/gateway/runtime_state.json that the
+    # dispatcher reads on the next turn. Deferred to that follow-up
+    # rather than shipping a /handoff that runs but silently no-ops.
 
     async def execute(
         self, args: str, runtime: RuntimeContext,
