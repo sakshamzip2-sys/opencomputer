@@ -3224,11 +3224,19 @@ def _run_chat_session(
                 custom.setdefault("session_id", session_id)
                 custom.setdefault("plugin_registry", _bi_registry)
                 rt = _dc_replace(rt, custom=custom)
+                # F3 (review followup): bind the coroutine to a local so
+                # we can ``.close()`` it on the RuntimeError fallback
+                # path. ``asyncio.run`` raises before awaiting when there
+                # is already a running loop in the current thread; the
+                # unawaited coroutine then emits ``RuntimeWarning:
+                # coroutine '_bi_dispatch' was never awaited`` at GC and
+                # leaks its frames. Mirrors the pattern in
+                # ``slash_commands.try_dispatch_agent_slash``.
+                pending = _bi_dispatch(msg, _bi_registry.slash_commands, rt)
                 try:
-                    res = _asyncio_bi.run(
-                        _bi_dispatch(msg, _bi_registry.slash_commands, rt)
-                    )
+                    res = _asyncio_bi.run(pending)
                 except RuntimeError:
+                    pending.close()
                     _inner = _asyncio_bi.get_event_loop()
                     _fut = _asyncio_bi.run_coroutine_threadsafe(
                         _bi_dispatch(msg, _bi_registry.slash_commands, rt),

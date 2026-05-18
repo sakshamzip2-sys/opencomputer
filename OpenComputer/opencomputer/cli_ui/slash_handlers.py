@@ -1802,10 +1802,20 @@ def dispatch_slash(
     # fixes the KeyError for commands with a CommandDef but no native
     # System-B handler, by running the matching System-A Command with
     # the live RuntimeContext).
-    found, output = ctx.on_builtin_dispatch(name, " ".join(args))
+    #
+    # F1 (review followup): pass the *canonical* lowercase name to the
+    # bridge — ``resolve_command`` normalises (so ``/COPY`` finds the
+    # CommandDef) but the System-A registry is keyed by lowercase, so
+    # a non-canonical ``name`` here would miss every mixed-case slash.
+    # F2 (review followup): ``markup=False`` on bridge output — System-A
+    # command output is plain text (file names, exception messages) and
+    # a stray ``[`` would lose data to Rich markup parsing. Mirrors
+    # ``dispatch_agent_slash_to_console``.
+    bridge_name = cmd.name if cmd is not None else name.lower()
+    found, output = ctx.on_builtin_dispatch(bridge_name, " ".join(args))
     if found:
         if output:
-            ctx.console.print(output)
+            ctx.console.print(output, markup=False)
         return SlashResult(handled=True)
     # Still unhandled — fall through to ``on_unknown`` (#639's agent-slash
     # fallthrough, used by ``oc chat`` to reach the agent SlashCommand

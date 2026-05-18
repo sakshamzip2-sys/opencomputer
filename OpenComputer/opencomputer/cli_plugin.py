@@ -1578,20 +1578,30 @@ def _diagnose_plugin(candidate: object) -> list[tuple[str, str, str]]:
         rows.append(("profile scope", "FAIL", reason or f"excluded in {active!r}"))
 
     # 5. Enabled status — against the resolved profile.yaml filter.
+    # F4 (review followup): a broken ``_resolve_plugin_filter`` used to
+    # be silently swallowed and reported as "no explicit filter — all
+    # enabled" — i.e. the doctor lied about the configuration state.
+    # ``_resolve_plugin_filter`` already returns ``None`` for its
+    # documented failure modes (missing config, ProfileConfigError),
+    # so a raised exception here is a real bug and must surface as a
+    # FAIL row so ``doctor`` exits non-zero on real breakage.
     try:
         from opencomputer.cli import _resolve_plugin_filter
 
         enabled = _resolve_plugin_filter()
-    except Exception:  # noqa: BLE001
-        enabled = None
-    if enabled is None:
-        rows.append(("enabled", "SKIP", "no explicit filter — all enabled"))
-    elif manifest.id in enabled:
-        rows.append(("enabled", "PASS", "in active enabled set"))
+    except Exception as exc:  # noqa: BLE001
+        rows.append(("enabled", "FAIL", f"profile filter error: {exc}"))
     else:
-        # Disabled-by-config is a deliberate state, not a fault — keep
-        # it INFO so ``doctor`` exits non-zero only on real breakage.
-        rows.append(("enabled", "INFO", "disabled — not in profile.yaml enabled set"))
+        if enabled is None:
+            rows.append(("enabled", "SKIP", "no explicit filter — all enabled"))
+        elif manifest.id in enabled:
+            rows.append(("enabled", "PASS", "in active enabled set"))
+        else:
+            # Disabled-by-config is a deliberate state, not a fault — keep
+            # it INFO so ``doctor`` exits non-zero only on real breakage.
+            rows.append((
+                "enabled", "INFO", "disabled — not in profile.yaml enabled set"
+            ))
 
     # 6. Declared surface (informational).
     n_tools = len(getattr(manifest, "tool_names", ()) or ())
@@ -1857,8 +1867,15 @@ def _build_catalog_versions() -> dict[str, str]:
 
     try:
         _absorb(fetch_catalog(url=resolve_catalog_url()))
-    except CatalogError:
-        pass  # no default catalog configured — fine
+    except CatalogError as exc:
+        # F5 (review followup): the previous ``except CatalogError: pass``
+        # swallowed every subclass under a "no default catalog configured"
+        # comment that was only true for one subclass. A real network 5xx,
+        # signature failure, or parse error would silently leave
+        # ``update-check`` reporting "all up to date" — the worst class
+        # of bug in a notifier. Surface every variant symmetrically with
+        # the marketplace loop below.
+        _console.print(f"[yellow]skipping default catalog:[/yellow] {exc}")
     for mp in load_marketplaces():
         try:
             _absorb(

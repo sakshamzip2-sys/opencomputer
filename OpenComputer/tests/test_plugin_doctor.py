@@ -79,6 +79,26 @@ def test_declared_surface_is_informational(tmp_path) -> None:  # noqa: ANN001
     assert "3 tools" in surface
 
 
+def test_resolve_filter_error_surfaces_as_fail_row(  # noqa: ANN001
+    tmp_path, monkeypatch
+) -> None:
+    """F4 (review followup) — a broken ``_resolve_plugin_filter`` used
+    to be silently swallowed and the doctor lied with an "enabled SKIP:
+    no explicit filter — all enabled" row. The diagnostic tool itself
+    catching-and-discarding the diagnostic is the worst class of defect.
+    On exception, the enabled row must be FAIL so doctor exits non-zero
+    on real config breakage."""
+    def _boom() -> None:
+        raise RuntimeError("synthetic profile load error")
+
+    monkeypatch.setattr("opencomputer.cli._resolve_plugin_filter", _boom)
+    rows = _diagnose_plugin(_make_plugin(tmp_path))
+    by_check = {c: (s, d) for c, s, d in rows}
+    assert by_check["enabled"][0] == "FAIL"
+    # The error message must surface verbatim so the user can debug.
+    assert "synthetic profile load error" in by_check["enabled"][1]
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 

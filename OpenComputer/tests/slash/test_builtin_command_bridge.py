@@ -117,6 +117,64 @@ def test_bridge_miss_reports_unknown_command() -> None:
     )
 
 
+def test_bridge_receives_canonical_lowercase_name() -> None:
+    """F1 (review followup) — ``resolve_command`` canonicalises but the
+    System-A registry is keyed lowercase. If ``dispatch_slash`` passed
+    the raw mixed-case ``name`` to ``on_builtin_dispatch`` the bridge
+    would miss every ``/COPY``-style command."""
+    captured: list[str] = []
+
+    def _bridge(name: str, args: str) -> tuple[bool, str]:
+        captured.append(name)
+        return (True, "")
+
+    register_extra_commands([CommandDef(name="copy", description="x")])
+    assert "copy" not in slash_handlers._HANDLERS  # bridges, not native
+
+    ctx = _ctx(_bridge)
+    dispatch_slash("/COPY hello", ctx)
+    assert captured == ["copy"]
+
+
+def test_bridge_output_printed_without_markup_parsing() -> None:
+    """F2 (review followup) — System-A command output is plain text and
+    may contain stray ``[brackets]`` (file lists, exception reprs).
+    ``ctx.console.print(output)`` MUST pass ``markup=False`` or Rich
+    will try to parse ``[done]`` as a markup tag and either error or
+    drop the bracketed text."""
+    class _SpyConsole:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def print(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self.calls.append((args, kwargs))
+
+    def _bridge(name: str, args: str) -> tuple[bool, str]:
+        return (True, "result: [done]")
+
+    spy = _SpyConsole()
+    register_extra_commands([CommandDef(name="status", description="x")])
+    ctx = SlashContext(
+        console=spy,
+        session_id="s1",
+        config=None,
+        on_clear=lambda: None,
+        get_cost_summary=dict,
+        get_session_list=list,
+        on_builtin_dispatch=_bridge,
+    )
+    dispatch_slash("/status", ctx)
+    # The bridge-output print must be ``markup=False`` keyword arg
+    # AND the literal string with brackets must be the first arg.
+    output_calls = [c for c in spy.calls if c[0] and "result:" in str(c[0][0])]
+    assert output_calls, f"expected an output print, got {spy.calls!r}"
+    args, kwargs = output_calls[0]
+    assert args[0] == "result: [done]"
+    assert kwargs.get("markup") is False, (
+        f"bridge output must use markup=False; got kwargs={kwargs!r}"
+    )
+
+
 # ── sync_builtin_commands ────────────────────────────────────────────
 
 
