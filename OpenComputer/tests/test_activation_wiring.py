@@ -1,9 +1,11 @@
-"""Wiring tests for the activation planner (best-of-three Recipe 3).
+"""Wiring tests for the activation flag (best-of-three Recipe 3).
 
-``plan_activations`` itself is covered by ``test_activation_planner.py``;
-this file covers how it is wired into ``cli._discover_plugins`` — the
-flag gate, the escape hatch, and the narrowed-set builder. The planner
-ships flag-gated and OFF by default, so behaviour is byte-identical to
+Covers ``_activation_mode`` (the ``OPENCOMPUTER_PLUGIN_ACTIVATION`` flag
+gate + ``OPENCOMPUTER_LOAD_ALL_PLUGINS`` escape hatch) and the basic
+contract of ``_activation_narrowed_enabled_ids`` (returns a frozenset, a
+subset of the catalog, never raises). The narrowing *behaviour* —
+channel-adapter dropping — is covered in ``test_channel_narrowing.py``.
+The flag ships OFF by default, so behaviour is byte-identical to
 pre-Recipe-3 until ``OPENCOMPUTER_PLUGIN_ACTIVATION=plan`` is set.
 """
 from __future__ import annotations

@@ -2,6 +2,7 @@
   "id": "weixin",
   "name": "Weixin (WeChat Public Account)",
   "kind": "channel",
+  "activation": {"on_channels": ["weixin"]},
   "version": "0.1.0",
   "entry": "plugin",
   "description": "WeChat 公众号 / Service Account integration. Outbound via Customer Service Message API (api.weixin.qq.com) with auto-rotated access_token (2-hour TTL, 60s skew). Inbound primitives: SHA1 signature verification + XML parsing. Set WEIXIN_APPID + WEIXIN_SECRET; WEIXIN_TOKEN optional for outbound.",

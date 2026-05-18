@@ -2,6 +2,7 @@
   "id": "dingtalk",
   "name": "DingTalk Channel",
   "kind": "channel",
+  "activation": {"on_channels": ["dingtalk"]},
   "version": "0.1.0",
   "entry": "plugin",
   "description": "DingTalk (钉钉) outbound via Custom Robot webhook. Posts markdown messages to a group chat. Inbound message receive needs an outbound-callback URL hosted by you — deferred.",
